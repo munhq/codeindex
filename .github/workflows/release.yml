@@ -1,0 +1,67 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-linux
+            artifact: codeindex-x86_64-linux
+          - os: ubuntu-latest
+            target: aarch64-linux
+            artifact: codeindex-aarch64-linux
+          - os: macos-latest
+            target: aarch64-macos
+            artifact: codeindex-aarch64-macos
+          - os: macos-latest
+            target: x86_64-macos
+            artifact: codeindex-x86_64-macos
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Fetch vendor dependencies
+        run: cd zig && ./fetch-vendor.sh
+
+      - name: Build
+        run: cd zig && zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }}
+
+      - name: Strip (Linux)
+        if: contains(matrix.target, 'linux')
+        run: strip zig/zig-out/bin/codeindex || true
+
+      - name: Package
+        run: cp zig/zig-out/bin/codeindex ${{ matrix.artifact }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*/*
+          generate_release_notes: true

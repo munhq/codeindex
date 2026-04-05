@@ -1,0 +1,15 @@
+# Build artifacts
+target/
+zig/zig-out/
+zig/.zig-cache/
+
+# Vendored dependencies (fetched by script)
+zig/vendor/
+
+# Snapshots
+.codeindex.json
+
+# IDE
+.idea/
+.vscode/
+*.swp
