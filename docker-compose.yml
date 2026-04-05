@@ -1,0 +1,43 @@
+services:
+  rust-codeindex:
+    build: .
+    image: codeindex-mcp:local
+    container_name: rust-codeindex
+    stdin_open: true
+    volumes:
+      - ${CODEINDEX_WORKSPACE:-/home/adi/code}:/workspace:ro
+    environment:
+      - CODEINDEX_WORKSPACE=/workspace
+      - CODEINDEX_PROJECT_ID=${CODEINDEX_PROJECT_ID:-default}
+      - DATABASE_URL=postgres://codeindex:codeindex@pg18:5432/codeindex
+      - RUST_LOG=info
+    depends_on:
+      pg18:
+        condition: service_healthy
+    networks:
+      - codeindex
+
+  pg18:
+    image: postgres:18
+    container_name: codeindex-pg18
+    environment:
+      POSTGRES_USER: codeindex
+      POSTGRES_PASSWORD: codeindex
+      POSTGRES_DB: codeindex
+    ports:
+      - "5418:5432"
+    volumes:
+      - codeindex-pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U codeindex"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - codeindex
+
+networks:
+  codeindex:
+
+volumes:
+  codeindex-pgdata:
