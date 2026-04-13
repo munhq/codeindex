@@ -8,6 +8,65 @@ const storage = @import("src/storage/snapshot.zig");
 const filter = @import("src/core/filter.zig");
 const config = @import("src/core/config.zig");
 
+const WatchCtx = struct {
+    allocator: std.mem.Allocator,
+    exp: *explorer.Explorer,
+    parser: *treesitter.Parser,
+    f: *filter.Filter,
+    max_file_size: u64,
+    workspace_root: []const u8,
+    running: *bool,
+};
+
+fn watch_callback(c: *WatchCtx, e: watcher.Watcher.Event) !void {
+    if (c.f.should_ignore(e.path)) return;
+
+    const language = models.Language.from_path(e.path);
+    if (language == .unknown) return;
+
+    switch (e.op) {
+        .create, .modify => {
+            const file = std.fs.cwd().openFile(e.path, .{}) catch return;
+            defer file.close();
+            const content = file.readToEndAlloc(c.allocator, c.max_file_size) catch return;
+            defer c.allocator.free(content);
+
+            const outline = c.parser.parse_file(e.path, language) catch |err| {
+                if (err == error.UnsupportedLanguage) {
+                    _ = c.exp.add_file(models.FileOutline{
+                        .path = c.allocator.dupe(u8, e.path) catch return,
+                        .language = language,
+                        .line_count = std.mem.count(u8, content, "\n") + 1,
+                        .byte_size = content.len,
+                        .symbols = &[_]models.Symbol{},
+                        .imports = &[_][]const u8{},
+                    }, content) catch return;
+                    return;
+                }
+                return err;
+            };
+            std.debug.print("Reindexed: {s}\n", .{e.path});
+            _ = try c.exp.add_file(outline, content);
+        },
+        .delete => {
+            std.debug.print("Removed: {s}\n", .{e.path});
+            try c.exp.remove_file(e.path);
+        },
+    }
+}
+
+fn watch_loop(ctx: *WatchCtx) void {
+    var w = watcher.Watcher.init(ctx.allocator) catch return;
+    defer w.deinit();
+    w.add_recursive(ctx.workspace_root) catch return;
+    std.debug.print("Watcher active on {s}\n", .{ctx.workspace_root});
+
+    while (ctx.running.*) {
+        w.poll_events(ctx, watch_callback) catch {};
+        std.Thread.sleep(200 * std.time.ns_per_ms);
+    }
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -41,9 +100,9 @@ pub fn main() !void {
     }
     defer exp.deinit();
 
+    // Background indexing for MCP mode, blocking for watcher mode
     if (!loaded_from_snapshot) {
         if (cfg.mcp_mode) {
-            // In MCP mode, index in background so the server can respond immediately
             const IndexCtx = struct {
                 allocator: std.mem.Allocator,
                 exp: *explorer.Explorer,
@@ -76,10 +135,6 @@ pub fn main() !void {
                 }
             }.run, .{&idx_ctx});
             defer bg_thread.join();
-
-            var srv = server.Server.init(allocator, &exp);
-            srv.with_parser(&parser, &f);
-            try srv.run_mcp();
         } else {
             std.debug.print("Indexing {s}...\n", .{cfg.workspace_root});
             try index_directory(allocator, &exp, &parser, &f, cfg.workspace_root, cfg.max_file_size);
@@ -91,73 +146,31 @@ pub fn main() !void {
         exp.mark_indexing_complete();
     }
 
-    if (cfg.mcp_mode and loaded_from_snapshot) {
+    // Start watcher (background thread for MCP, foreground for standalone)
+    var watch_running = true;
+    var watch_ctx = WatchCtx{
+        .allocator = allocator,
+        .exp = &exp,
+        .parser = &parser,
+        .f = &f,
+        .max_file_size = cfg.max_file_size,
+        .workspace_root = cfg.workspace_root,
+        .running = &watch_running,
+    };
+
+    if (cfg.mcp_mode) {
+        const watch_thread = try std.Thread.spawn(.{}, watch_loop, .{&watch_ctx});
+        defer {
+            watch_running = false;
+            watch_thread.join();
+        }
+
         var srv = server.Server.init(allocator, &exp);
         srv.with_parser(&parser, &f);
         try srv.run_mcp();
     } else {
         std.debug.print("\nWatcher active. Press Ctrl+C to stop.\n", .{});
-
-        var w = try watcher.Watcher.init(allocator);
-        defer w.deinit();
-        try w.add_recursive(cfg.workspace_root);
-
-        const Context = struct {
-            allocator: std.mem.Allocator,
-            exp: *explorer.Explorer,
-            parser: *treesitter.Parser,
-            f: *filter.Filter,
-            max_file_size: u64,
-        };
-        var ctx = Context{
-            .allocator = allocator,
-            .exp = &exp,
-            .parser = &parser,
-            .f = &f,
-            .max_file_size = cfg.max_file_size,
-        };
-
-        while (true) {
-            try w.poll_events(&ctx, struct {
-                fn callback(c: *Context, e: watcher.Watcher.Event) !void {
-                    if (c.f.should_ignore(e.path)) return;
-
-                    const language = models.Language.from_path(e.path);
-                    if (language == .unknown) return;
-
-                    switch (e.op) {
-                        .create, .modify => {
-                            const file = std.fs.cwd().openFile(e.path, .{}) catch return;
-                            defer file.close();
-                            const content = file.readToEndAlloc(c.allocator, c.max_file_size) catch return;
-                            defer c.allocator.free(content);
-
-                            const outline = c.parser.parse_file(e.path, language) catch |err| {
-                                if (err == error.UnsupportedLanguage) {
-                                    _ = c.exp.add_file(models.FileOutline{
-                                        .path = c.allocator.dupe(u8, e.path) catch return,
-                                        .language = language,
-                                        .line_count = std.mem.count(u8, content, "\n") + 1,
-                                        .byte_size = content.len,
-                                        .symbols = &[_]models.Symbol{},
-                                        .imports = &[_][]const u8{},
-                                    }, content) catch return;
-                                    return;
-                                }
-                                return err;
-                            };
-                            std.debug.print("Reindexed: {s}\n", .{e.path});
-                            _ = try c.exp.add_file(outline, content);
-                        },
-                        .delete => {
-                            std.debug.print("Removed: {s}\n", .{e.path});
-                            try c.exp.remove_file(e.path);
-                        },
-                    }
-                }
-            }.callback);
-            std.Thread.sleep(100 * std.time.ns_per_ms);
-        }
+        watch_loop(&watch_ctx);
     }
 }
 
@@ -183,7 +196,6 @@ fn index_directory(allocator: std.mem.Allocator, exp: *explorer.Explorer, parser
         const content = file.readToEndAlloc(allocator, max_file_size) catch continue;
         defer allocator.free(content);
 
-        // Build full path for the parser (which opens files from cwd)
         const full_path = std.fs.path.join(allocator, &.{ path, entry.path }) catch continue;
         defer allocator.free(full_path);
 
@@ -199,7 +211,7 @@ fn index_directory(allocator: std.mem.Allocator, exp: *explorer.Explorer, parser
                 }, content);
                 continue;
             }
-            continue; // Skip files that fail to parse instead of crashing
+            continue;
         };
 
         _ = try exp.add_file(outline, content);

@@ -657,6 +657,75 @@ pub const Explorer = struct {
         return self.files.items[file_id];
     }
 
+    /// Get transitive change impact: all files affected if this file changes.
+    /// Follows reverse dependency chain (who imports this → who imports them → ...).
+    /// Returns (direct_count, transitive_ids) where transitive_ids includes direct deps.
+    pub fn get_change_impact(self: *Explorer, path: []const u8, max_depth: usize) !ChangeImpact {
+        self.dep_lock.lockShared();
+        defer self.dep_lock.unlockShared();
+        self.file_lock.lockShared();
+        defer self.file_lock.unlockShared();
+
+        const file_id = self.file_map.get(path) orelse return ChangeImpact{
+            .direct = &[_]u32{},
+            .transitive = &[_]u32{},
+            .depth_reached = 0,
+        };
+
+        // BFS traversal of reverse dependencies
+        var visited = std.AutoHashMap(u32, u32).init(self.allocator);
+        defer visited.deinit();
+
+        var queue = std.ArrayList(struct { id: u32, depth: u32 }){};
+        defer queue.deinit(self.allocator);
+
+        var direct = std.ArrayList(u32){};
+        var all = std.ArrayList(u32){};
+        var max_d: u32 = 0;
+
+        // Seed with direct reverse deps
+        if (self.depgraph.reverse_deps.get(file_id)) |rev| {
+            for (rev.items) |rid| {
+                if (self.deleted_files.get(rid) != null) continue;
+                if (visited.get(rid) != null) continue;
+                try visited.put(rid, 1);
+                try direct.append(self.allocator, rid);
+                try all.append(self.allocator, rid);
+                try queue.append(self.allocator, .{ .id = rid, .depth = 1 });
+            }
+        }
+
+        // BFS for transitive deps
+        var qi: usize = 0;
+        while (qi < queue.items.len) : (qi += 1) {
+            const item = queue.items[qi];
+            if (item.depth >= max_depth) continue;
+            if (item.depth > max_d) max_d = item.depth;
+
+            if (self.depgraph.reverse_deps.get(item.id)) |rev| {
+                for (rev.items) |rid| {
+                    if (self.deleted_files.get(rid) != null) continue;
+                    if (visited.get(rid) != null) continue;
+                    try visited.put(rid, item.depth + 1);
+                    try all.append(self.allocator, rid);
+                    try queue.append(self.allocator, .{ .id = rid, .depth = item.depth + 1 });
+                }
+            }
+        }
+
+        return ChangeImpact{
+            .direct = try direct.toOwnedSlice(self.allocator),
+            .transitive = try all.toOwnedSlice(self.allocator),
+            .depth_reached = max_d,
+        };
+    }
+
+    pub const ChangeImpact = struct {
+        direct: []const u32,
+        transitive: []const u32,
+        depth_reached: u32,
+    };
+
     /// Get recently changed files.
     pub fn get_hot_files(self: *Explorer, limit: usize) []const models.ChangeRecord {
         return self.version.hot_files(limit);
@@ -693,6 +762,32 @@ pub const Explorer = struct {
         }
 
         return try root_children.toOwnedSlice(self.allocator);
+    }
+
+    /// Total bytes of all indexed file content.
+    pub fn total_content_bytes(self: *Explorer) u64 {
+        self.outline_lock.lockShared();
+        defer self.outline_lock.unlockShared();
+        var total: u64 = 0;
+        var it = self.outlines.iterator();
+        while (it.next()) |entry| {
+            if (self.deleted_files.get(entry.key_ptr.*) != null) continue;
+            total += entry.value_ptr.*.byte_size;
+        }
+        return total;
+    }
+
+    /// Total lines across all indexed files.
+    pub fn total_line_count(self: *Explorer) u64 {
+        self.outline_lock.lockShared();
+        defer self.outline_lock.unlockShared();
+        var total: u64 = 0;
+        var it = self.outlines.iterator();
+        while (it.next()) |entry| {
+            if (self.deleted_files.get(entry.key_ptr.*) != null) continue;
+            total += entry.value_ptr.*.line_count;
+        }
+        return total;
     }
 };
 

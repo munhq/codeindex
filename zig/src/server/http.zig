@@ -99,11 +99,25 @@ pub const Server = struct {
         const w = out.writer(self.allocator);
 
         if (std.mem.eql(u8, tool, "status")) {
-            try w.print("{{\"files\":{d},\"symbols\":{d},\"indexing\":{s},\"latest_seq\":{d}}}", .{
+            // Calculate token savings stats
+            // Naive approach: cat all files = total bytes / 4 (rough tokens estimate)
+            // Codeindex: outline = ~10 tokens/symbol, search result = ~20 tokens/hit
+            const total_bytes = self.exp.total_content_bytes();
+            const total_lines = self.exp.total_line_count();
+            const naive_tokens = total_bytes / 4; // ~4 chars per token estimate
+            const outline_tokens = self.exp.symbol_count() * 10; // ~10 tokens per symbol in outline
+            const savings_pct: u64 = if (naive_tokens > 0) 100 - (outline_tokens * 100 / naive_tokens) else 0;
+
+            try w.print("{{\"files\":{d},\"symbols\":{d},\"indexing\":{s},\"latest_seq\":{d},\"total_lines\":{d},\"total_bytes\":{d},\"naive_tokens\":{d},\"outline_tokens\":{d},\"savings_pct\":{d},\"watcher\":true}}", .{
                 self.exp.file_count(),
                 self.exp.symbol_count(),
                 if (self.exp.is_indexing()) "true" else "false",
                 self.exp.latest_seq(),
+                total_lines,
+                total_bytes,
+                naive_tokens,
+                outline_tokens,
+                savings_pct,
             });
         } else if (std.mem.eql(u8, tool, "search")) {
             const query = get_string_arg(args, "query") orelse "";
@@ -232,6 +246,53 @@ pub const Server = struct {
                     if (self.exp.file_path(fid)) |p| {
                         try w.print("{s}\n", .{p});
                     }
+                }
+            }
+        } else if (std.mem.eql(u8, tool, "get_change_impact")) {
+            const path = get_string_arg(args, "path") orelse "";
+            const max_depth = @as(usize, @intCast(get_int_arg(args, "max_depth") orelse 10));
+            if (path.len == 0) {
+                try w.writeAll("No path provided.");
+            } else {
+                const impact = try self.exp.get_change_impact(path, max_depth);
+                defer {
+                    self.allocator.free(impact.direct);
+                    self.allocator.free(impact.transitive);
+                }
+                try w.print("# Change impact for {s}\n", .{path});
+                try w.print("Direct dependents: {d}, Total affected: {d}, Max depth: {d}\n\n", .{
+                    impact.direct.len,
+                    impact.transitive.len,
+                    impact.depth_reached,
+                });
+                if (impact.direct.len > 0) {
+                    try w.writeAll("## Direct (depth 1)\n");
+                    for (impact.direct) |fid| {
+                        if (self.exp.file_path(fid)) |p| {
+                            try w.print("  {s}\n", .{p});
+                        }
+                    }
+                }
+                if (impact.transitive.len > impact.direct.len) {
+                    try w.writeAll("\n## Transitive\n");
+                    for (impact.transitive) |fid| {
+                        // Skip direct deps (already printed)
+                        var is_direct = false;
+                        for (impact.direct) |did| {
+                            if (fid == did) {
+                                is_direct = true;
+                                break;
+                            }
+                        }
+                        if (!is_direct) {
+                            if (self.exp.file_path(fid)) |p| {
+                                try w.print("  {s}\n", .{p});
+                            }
+                        }
+                    }
+                }
+                if (impact.transitive.len == 0) {
+                    try w.writeAll("No dependents found — this file is a leaf.");
                 }
             }
         } else if (std.mem.eql(u8, tool, "get_hot_files")) {
@@ -566,6 +627,8 @@ pub const Server = struct {
             "{\"name\":\"read_file\",\"description\":\"Read file contents with optional line range. Returns content with line numbers.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"File path relative to workspace root\"},\"start_line\":{\"type\":\"integer\",\"description\":\"Start line (1-based, default 1)\"},\"end_line\":{\"type\":\"integer\",\"description\":\"End line (inclusive, default: end of file)\"}},\"required\":[\"path\"]}}",
             // read_symbol
             "{\"name\":\"read_symbol\",\"description\":\"Read the source code of a specific symbol (function, struct, etc). Returns the symbol's code with line numbers.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\",\"description\":\"Symbol name to read\"},\"path\":{\"type\":\"string\",\"description\":\"File path to disambiguate (optional)\"},\"context\":{\"type\":\"integer\",\"description\":\"Extra context lines before/after (default 0)\"}},\"required\":[\"name\"]}}",
+            // get_change_impact
+            "{\"name\":\"get_change_impact\",\"description\":\"Show what breaks if a file changes. Follows the full reverse dependency chain transitively.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"File path to analyze impact for\"},\"max_depth\":{\"type\":\"integer\",\"description\":\"Max traversal depth (default 10)\"}},\"required\":[\"path\"]}}",
         };
         for (tool_defs, 0..) |def, i| {
             if (i > 0) try bw.writeAll(",");
