@@ -189,6 +189,17 @@ pub const Snapshot = struct {
             }
         }
 
+        // Re-populate content cache by reading files from disk
+        for (exp.files.items, 0..) |fp, idx| {
+            const fid: u32 = @intCast(idx);
+            if (exp.outlines.get(fid) == null) continue;
+            const f = std.fs.cwd().openFile(fp, .{}) catch continue;
+            defer f.close();
+            const fc = f.readToEndAlloc(allocator, 10 * 1024 * 1024) catch continue;
+            try exp.content_cache.put(fid, fc);
+            exp.cache_bytes += fc.len;
+        }
+
         return exp;
     }
 
