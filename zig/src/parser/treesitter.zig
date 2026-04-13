@@ -124,7 +124,8 @@ pub const Parser = struct {
             while (ts.ts_query_cursor_next_match(cursor, &match)) {
                 var current_kind: models.SymbolKind = .unknown;
                 var current_name: ?[]const u8 = null;
-                var current_node: ?ts.TSNode = null;
+                var name_node: ?ts.TSNode = null;
+                var def_node: ?ts.TSNode = null;
 
                 for (0..match.capture_count) |i| {
                     const capture = match.captures[i];
@@ -136,10 +137,11 @@ pub const Parser = struct {
                         const start_byte = ts.ts_node_start_byte(capture.node);
                         const end_byte = ts.ts_node_end_byte(capture.node);
                         current_name = content[start_byte..end_byte];
-                        current_node = capture.node;
+                        name_node = capture.node;
                     } else if (std.mem.startsWith(u8, tag, "definition.")) {
                         const kind_str = tag["definition.".len..];
                         current_kind = self.map_kind(kind_str);
+                        def_node = capture.node;
                     } else if (std.mem.startsWith(u8, tag, "reference.import")) {
                         const start_byte = ts.ts_node_start_byte(capture.node);
                         const end_byte = ts.ts_node_end_byte(capture.node);
@@ -148,7 +150,10 @@ pub const Parser = struct {
                 }
 
                 if (current_name) |name| {
-                    if (current_node) |node| {
+                    // Use definition node for line range (full function body),
+                    // fall back to name node if no definition capture
+                    const range_node = def_node orelse name_node;
+                    if (range_node) |node| {
                         try symbols.append(self.allocator, models.Symbol{
                             .name = try self.allocator.dupe(u8, name),
                             .kind = current_kind,
