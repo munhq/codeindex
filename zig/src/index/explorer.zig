@@ -471,14 +471,17 @@ pub const Explorer = struct {
 
             for (resolved) |resolved_path| {
                 if (self.file_map.get(resolved_path)) |target_id| {
+                    if (target_id == file_id) continue; // never self-loop
                     try self.depgraph.add_dependency(file_id, target_id);
                 }
             }
 
-            // Fallback: if resolver found nothing, try naive substring match
-            if (resolved.len == 0) {
+            // Fallback: if resolver found nothing and the import is long enough to be specific,
+            // try a path-segment substring match. Skip short bare identifiers (too broad).
+            if (resolved.len == 0 and imp.len >= 6) {
                 var it = self.file_map.iterator();
                 while (it.next()) |entry| {
+                    if (entry.value_ptr.* == file_id) continue; // never self-loop
                     if (std.mem.indexOf(u8, entry.key_ptr.*, imp) != null) {
                         try self.depgraph.add_dependency(file_id, entry.value_ptr.*);
                     }

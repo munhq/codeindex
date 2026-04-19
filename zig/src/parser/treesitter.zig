@@ -1,5 +1,6 @@
 const std = @import("std");
 const models = @import("../core/models.zig");
+const import_scan = @import("import_scan.zig");
 
 const ts = @cImport({
     @cInclude("tree_sitter/api.h");
@@ -106,6 +107,9 @@ pub const Parser = struct {
             for (imports.items) |i| self.allocator.free(i);
             imports.deinit(self.allocator);
         }
+
+        // Fill in imports via regex pre-pass — vendored tags.scm queries don't capture them.
+        try import_scan.extract(self.allocator, language, content, &imports);
 
         if (query_source.len > 0) {
             var error_offset: u32 = 0;
