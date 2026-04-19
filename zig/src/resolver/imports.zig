@@ -70,26 +70,82 @@ fn resolve_rust(allocator: std.mem.Allocator, import_str: []const u8, known_file
 // ── TypeScript/JavaScript ────────────────────────────────────────────────────
 
 fn resolve_ts(allocator: std.mem.Allocator, import_str: []const u8, source_path: []const u8, known_files: []const []const u8) ![][]const u8 {
-    // Skip node_modules
-    if (!std.mem.startsWith(u8, import_str, ".")) return &[_][]const u8{};
+    // Skip bare package specifiers (node_modules). Still handle path aliases
+    // like `@/foo` and `~/foo` by falling through to the suffix-match pass.
+    const is_relative = std.mem.startsWith(u8, import_str, ".");
+    const is_alias = std.mem.startsWith(u8, import_str, "@/") or std.mem.startsWith(u8, import_str, "~/");
+    if (!is_relative and !is_alias) return &[_][]const u8{};
 
     const source_dir = std.fs.path.dirname(source_path) orelse ".";
-    const extensions = [_][]const u8{ ".ts", ".tsx", ".js", ".jsx", ".json", "/index.ts", "/index.tsx", "/index.js" };
+    const extensions = [_][]const u8{ "", ".ts", ".tsx", ".js", ".jsx", ".json", "/index.ts", "/index.tsx", "/index.js", "/index.js" };
 
     var results = std.ArrayList([]const u8){};
+
+    // Build normalized candidates
     for (&extensions) |ext| {
-        const candidate = try std.fmt.allocPrint(allocator, "{s}/{s}{s}", .{ source_dir, import_str, ext });
+        var candidate: []u8 = undefined;
+        if (is_relative) {
+            const joined = try std.fmt.allocPrint(allocator, "{s}/{s}{s}", .{ source_dir, import_str, ext });
+            defer allocator.free(joined);
+            candidate = try normalize_path(allocator, joined);
+        } else {
+            // Alias — strip the alias prefix, try matching anywhere in known_files
+            const stripped = import_str[2..];
+            candidate = try std.fmt.allocPrint(allocator, "/{s}{s}", .{ stripped, ext });
+        }
         defer allocator.free(candidate);
-        // Normalize .. and .
+
         for (known_files) |f| {
-            if (std.mem.endsWith(u8, f, candidate) or pathEndsWith(f, candidate)) {
+            if (std.mem.endsWith(u8, f, candidate)) {
                 try results.append(allocator, f);
                 break;
             }
         }
+        if (results.items.len > 0) break;
     }
 
     return try results.toOwnedSlice(allocator);
+}
+
+/// Collapse `./` and `foo/../` segments. Returns owned memory.
+fn normalize_path(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    var segments = std.ArrayList([]const u8){};
+    defer segments.deinit(allocator);
+
+    var it = std.mem.splitScalar(u8, path, '/');
+    while (it.next()) |seg| {
+        if (seg.len == 0) {
+            // Preserve leading slash by appending empty segment only for the very first entry
+            if (segments.items.len == 0) try segments.append(allocator, "");
+            continue;
+        }
+        if (std.mem.eql(u8, seg, ".")) continue;
+        if (std.mem.eql(u8, seg, "..")) {
+            if (segments.items.len > 0 and !std.mem.eql(u8, segments.items[segments.items.len - 1], "")) {
+                _ = segments.pop();
+            }
+            continue;
+        }
+        try segments.append(allocator, seg);
+    }
+
+    // Re-join
+    var total: usize = 0;
+    for (segments.items, 0..) |s, i| {
+        total += s.len;
+        if (i > 0) total += 1;
+    }
+    var out = try allocator.alloc(u8, total);
+    var pos: usize = 0;
+    for (segments.items, 0..) |s, i| {
+        if (i > 0) {
+            out[pos] = '/';
+            pos += 1;
+        }
+        @memcpy(out[pos .. pos + s.len], s);
+        pos += s.len;
+    }
+    return out;
 }
 
 // ── Python ───────────────────────────────────────────────────────────────────
@@ -205,12 +261,3 @@ fn copy_replacing(buf: []u8, start: usize, src: []const u8, find: []const u8, re
     return pos - start;
 }
 
-fn pathEndsWith(full: []const u8, suffix: []const u8) bool {
-    if (suffix.len > full.len) return false;
-    // Normalize both by removing leading ./
-    var s = suffix;
-    while (std.mem.startsWith(u8, s, "./")) s = s[2..];
-    var f = full;
-    while (std.mem.startsWith(u8, f, "./")) f = f[2..];
-    return std.mem.endsWith(u8, f, s);
-}

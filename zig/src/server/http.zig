@@ -171,6 +171,27 @@ pub const Server = struct {
                     }
                 }
             }
+        } else if (std.mem.eql(u8, tool, "find_callers")) {
+            const name = get_string_arg(args, "name") orelse "";
+            const limit = get_int_arg(args, "limit") orelse 100;
+            if (name.len == 0) {
+                try w.writeAll("No name provided.");
+            } else {
+                const results = try self.exp.find_callers(name, limit);
+                defer {
+                    for (results) |r| self.allocator.free(r.line_text);
+                    self.allocator.free(results);
+                }
+                if (results.len == 0) {
+                    try w.writeAll("No callers found.");
+                } else {
+                    for (results) |r| {
+                        try w.print("{s}:{d} [{s}] {s}\n", .{
+                            r.path, r.line_num, r.context, r.line_text,
+                        });
+                    }
+                }
+            }
         } else if (std.mem.eql(u8, tool, "find_word")) {
             const word = get_string_arg(args, "word") orelse "";
             const limit = get_int_arg(args, "limit") orelse 50;
@@ -693,6 +714,8 @@ pub const Server = struct {
             "{\"name\":\"get_imports\",\"description\":\"Get which files the given file imports/depends on\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"File path relative to workspace root\"}},\"required\":[\"path\"]}}",
             // get_imported_by
             "{\"name\":\"get_imported_by\",\"description\":\"Get which files import/depend on the given file (reverse dependencies)\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"File path relative to workspace root\"}},\"required\":[\"path\"]}}",
+            // find_callers
+            "{\"name\":\"find_callers\",\"description\":\"Approximate callers of a symbol. Finds word-index hits with call/method/path context, excluding the defining body. Heuristic — no full name resolution, may include shadowed names.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\",\"description\":\"Symbol name\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max results (default 100)\"}},\"required\":[\"name\"]}}",
             // get_hot_files
             "{\"name\":\"get_hot_files\",\"description\":\"Get recently changed files sorted by recency\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"limit\":{\"type\":\"integer\",\"description\":\"Max results (default 20)\"}}}}",
             // index_workspace

@@ -244,6 +244,18 @@ pub const ScopedSearchResult = struct {
     scope_kind: ?models.SymbolKind = null,
 };
 
+pub const CallerHit = struct {
+    path: []const u8,
+    line_num: u32,
+    line_text: []const u8,
+    /// Context kind inferred from the surrounding characters:
+    /// - "call": looks like foo(
+    /// - "method": looks like .foo( or ->foo(
+    /// - "path": looks like ::foo or Foo::foo
+    /// - "other": word hit without a clear call shape (filtered out in strict mode)
+    context: []const u8,
+};
+
 // ── Explorer ─────────────────────────────────────────────────────────────────
 
 pub const Explorer = struct {
@@ -599,6 +611,116 @@ pub const Explorer = struct {
                     }
                 }
                 line_num += 1;
+            }
+        }
+        return try results.toOwnedSlice(self.allocator);
+    }
+
+    /// Approximate callers: word-index hits for `name` where the surrounding
+    /// characters suggest a call/method/path reference, excluding the defining
+    /// line. This is a stand-in for a real call graph — ~80% of the value with
+    /// no name resolution. False positives: shadowed names, same-name methods
+    /// on different types, comments.
+    pub fn find_callers(self: *Explorer, name: []const u8, limit: usize) ![]CallerHit {
+        self.word_lock.lockShared();
+        defer self.word_lock.unlockShared();
+        self.file_lock.lockShared();
+        defer self.file_lock.unlockShared();
+        self.content_lock.lockShared();
+        defer self.content_lock.unlockShared();
+        self.outline_lock.lockShared();
+        defer self.outline_lock.unlockShared();
+
+        // Collect (file_id -> set of defining line numbers) so we can skip them.
+        var def_lines = std.AutoHashMap(u64, void).init(self.allocator);
+        defer def_lines.deinit();
+        var oit = self.outlines.iterator();
+        while (oit.next()) |entry| {
+            const fid = entry.key_ptr.*;
+            for (entry.value_ptr.symbols) |sym| {
+                if (!std.mem.eql(u8, sym.name, name)) continue;
+                // Symbol line_start/line_end and WordIndex line_num are both 0-based.
+                var ln: usize = sym.line_start;
+                while (ln <= sym.line_end) : (ln += 1) {
+                    const key: u64 = (@as(u64, fid) << 32) | @as(u64, @intCast(ln));
+                    try def_lines.put(key, {});
+                }
+            }
+        }
+
+        var results = std.ArrayList(CallerHit){};
+        errdefer {
+            for (results.items) |h| self.allocator.free(h.line_text);
+            results.deinit(self.allocator);
+        }
+
+        const hits = self.words.search(name);
+        for (hits) |entry_val| {
+            const file_id: u32 = @intCast(entry_val >> 32);
+            const line_num_0: u32 = @intCast(entry_val & 0xFFFFFFFF);
+            if (self.deleted_files.get(file_id) != null) continue;
+            if (file_id >= self.files.items.len) continue;
+
+            // Skip lines that fall inside the symbol's own definition.
+            if (def_lines.get(entry_val) != null) continue;
+
+            const content = self.content_cache.get(file_id) orelse continue;
+            // Scan to the requested line (0-based).
+            var line_text: []const u8 = "";
+            var cur_line: u32 = 0;
+            var it = std.mem.splitScalar(u8, content, '\n');
+            while (it.next()) |l| {
+                if (cur_line == line_num_0) {
+                    line_text = l;
+                    break;
+                }
+                cur_line += 1;
+            }
+            if (line_text.len == 0) continue;
+
+            // Find `name` occurrences in the line and classify context.
+            var search_start: usize = 0;
+            var picked: ?[]const u8 = null;
+            while (std.mem.indexOfPos(u8, line_text, search_start, name)) |pos| {
+                defer search_start = pos + name.len;
+                // Word boundary on the left
+                if (pos > 0) {
+                    const p = line_text[pos - 1];
+                    if (std.ascii.isAlphanumeric(p) or p == '_') continue;
+                }
+                const end = pos + name.len;
+                if (end < line_text.len) {
+                    const n = line_text[end];
+                    if (std.ascii.isAlphanumeric(n) or n == '_') continue;
+                }
+
+                // Classify: call / method / path
+                var ctx: []const u8 = "other";
+                // Call: `name(`
+                if (end < line_text.len and line_text[end] == '(') ctx = "call";
+                // Method: `.name(` or `->name(`
+                if (pos > 0 and line_text[pos - 1] == '.' and end < line_text.len and line_text[end] == '(') ctx = "method";
+                if (pos >= 2 and line_text[pos - 2] == '-' and line_text[pos - 1] == '>' and end < line_text.len and line_text[end] == '(') ctx = "method";
+                // Path reference: `::name` or `name::`
+                if (pos >= 2 and line_text[pos - 2] == ':' and line_text[pos - 1] == ':') ctx = "path";
+                if (end + 1 < line_text.len and line_text[end] == ':' and line_text[end + 1] == ':') ctx = "path";
+
+                // Skip "other" to keep signal-to-noise high.
+                if (!std.mem.eql(u8, ctx, "other")) {
+                    picked = ctx;
+                    break;
+                }
+            }
+
+            if (picked) |ctx| {
+                const trimmed = std.mem.trim(u8, line_text, " \t\r");
+                try results.append(self.allocator, .{
+                    .path = self.files.items[file_id],
+                    .line_num = line_num_0 + 1, // report 1-based for user-facing display
+                    .line_text = try self.allocator.dupe(u8, trimmed),
+                    .context = ctx,
+                });
+                if (results.items.len >= limit) break;
             }
         }
         return try results.toOwnedSlice(self.allocator);
