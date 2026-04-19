@@ -11,6 +11,9 @@ const type_drift = @import("../analysis/type_drift.zig");
 const db_schema = @import("../analysis/db_schema.zig");
 const migration_parity = @import("../analysis/migration_parity.zig");
 const manifest_compliance = @import("../analysis/manifest_compliance.zig");
+const literal_scan = @import("../analysis/literal_scan.zig");
+const coupling = @import("../analysis/coupling.zig");
+const cycles = @import("../analysis/cycles.zig");
 
 const treesitter = @import("../parser/treesitter.zig");
 const filter_mod = @import("../core/filter.zig");
@@ -464,8 +467,81 @@ pub const Server = struct {
                 try w.print("{{\"manifests_checked\":{d},\"violations\":{d}}}", .{
                     report.manifests_checked, report.violations.len,
                 });
+            } else if (std.mem.eql(u8, analysis_type, "literal_scan")) {
+                const findings = try literal_scan.scan(self.allocator, self.exp);
+                defer literal_scan.free_findings(self.allocator, findings);
+                const s = literal_scan.summarize(findings);
+                try w.print("{{\"total\":{d},\"urls\":{d},\"ips\":{d},\"localhosts\":{d},\"abs_paths\":{d},\"secrets\":{d},\"magic_ports\":{d},\"todos\":{d},\"findings\":[", .{
+                    s.total, s.urls, s.ips, s.localhosts, s.paths, s.secrets, s.ports, s.todos,
+                });
+                const max_emit: usize = 200;
+                const emit_n = @min(findings.len, max_emit);
+                for (findings[0..emit_n], 0..) |f, fi| {
+                    if (fi > 0) try w.writeAll(",");
+                    try w.print("{{\"file\":\"{s}\",\"line\":{d},\"category\":\"{s}\",\"snippet\":\"{s}\"}}", .{
+                        f.file, f.line, f.category.as_str(), f.snippet,
+                    });
+                }
+                try w.print("],\"truncated\":{s}}}", .{if (findings.len > max_emit) "true" else "false"});
+            } else if (std.mem.eql(u8, analysis_type, "coupling")) {
+                var report = try coupling.analyze(self.allocator, self.exp);
+                defer coupling.free_report(self.allocator, &report);
+                try w.print("{{\"total_files\":{d},\"total_edges\":{d},\"god_modules\":[", .{
+                    report.total_files, report.total_edges,
+                });
+                const top: usize = 15;
+                const gn = @min(report.god_modules.len, top);
+                for (report.god_modules[0..gn], 0..) |m, i| {
+                    if (i > 0) try w.writeAll(",");
+                    try w.print("{{\"file\":\"{s}\",\"fan_in\":{d},\"fan_out\":{d},\"instability\":{d:.2}}}", .{
+                        m.file, m.fan_in, m.fan_out, m.instability,
+                    });
+                }
+                try w.writeAll("],\"stable_cores\":[");
+                const sn = @min(report.stable_cores.len, top);
+                for (report.stable_cores[0..sn], 0..) |m, i| {
+                    if (i > 0) try w.writeAll(",");
+                    try w.print("{{\"file\":\"{s}\",\"fan_in\":{d},\"fan_out\":{d},\"instability\":{d:.2}}}", .{
+                        m.file, m.fan_in, m.fan_out, m.instability,
+                    });
+                }
+                try w.writeAll("],\"unstable_drivers\":[");
+                const dn = @min(report.unstable_drivers.len, top);
+                for (report.unstable_drivers[0..dn], 0..) |m, i| {
+                    if (i > 0) try w.writeAll(",");
+                    try w.print("{{\"file\":\"{s}\",\"fan_in\":{d},\"fan_out\":{d},\"instability\":{d:.2}}}", .{
+                        m.file, m.fan_in, m.fan_out, m.instability,
+                    });
+                }
+                try w.print("],\"islands_count\":{d},\"islands_sample\":[", .{report.islands.len});
+                const in = @min(report.islands.len, top);
+                for (report.islands[0..in], 0..) |m, i| {
+                    if (i > 0) try w.writeAll(",");
+                    try w.print("{{\"file\":\"{s}\",\"lines\":{d},\"symbols\":{d}}}", .{
+                        m.file, m.line_count, m.symbol_count,
+                    });
+                }
+                try w.writeAll("]}");
+            } else if (std.mem.eql(u8, analysis_type, "cycles")) {
+                var report = try cycles.analyze(self.allocator, self.exp);
+                defer cycles.free_report(self.allocator, &report);
+                try w.print("{{\"total_nodes\":{d},\"total_edges\":{d},\"cycle_count\":{d},\"cycles\":[", .{
+                    report.total_nodes, report.total_edges, report.cycles.len,
+                });
+                const max_emit: usize = 50;
+                const en = @min(report.cycles.len, max_emit);
+                for (report.cycles[0..en], 0..) |c, i| {
+                    if (i > 0) try w.writeAll(",");
+                    try w.print("{{\"size\":{d},\"files\":[", .{c.files.len});
+                    for (c.files, 0..) |f, j| {
+                        if (j > 0) try w.writeAll(",");
+                        try w.print("\"{s}\"", .{f});
+                    }
+                    try w.writeAll("]}");
+                }
+                try w.print("],\"truncated\":{s}}}", .{if (report.cycles.len > max_emit) "true" else "false"});
             } else {
-                try w.print("Unknown analysis: {s}. Available: security, dead_code, unwrap_audit, test_coverage, architecture, crossref, type_drift, db_schema, migration_parity, manifest_compliance", .{analysis_type});
+                try w.print("Unknown analysis: {s}. Available: security, dead_code, unwrap_audit, test_coverage, architecture, crossref, type_drift, db_schema, migration_parity, manifest_compliance, literal_scan, coupling, cycles", .{analysis_type});
             }
         } else if (std.mem.eql(u8, tool, "read_file")) {
             const path = get_string_arg(args, "path") orelse "";
@@ -622,7 +698,7 @@ pub const Server = struct {
             // index_workspace
             "{\"name\":\"index_workspace\",\"description\":\"Index or re-index a workspace directory\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Directory path to index\"}},\"required\":[\"path\"]}}",
             // analyze
-            "{\"name\":\"analyze\",\"description\":\"Run code analysis. Types: security, dead_code, unwrap_audit, test_coverage, architecture, crossref, type_drift, db_schema, migration_parity, manifest_compliance\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"analysis\":{\"type\":\"string\",\"description\":\"Analysis type: security, dead_code, unwrap_audit, test_coverage, architecture, crossref, type_drift, db_schema, migration_parity, manifest_compliance\"}},\"required\":[\"analysis\"]}}",
+            "{\"name\":\"analyze\",\"description\":\"Run code analysis. Types: security, dead_code, unwrap_audit, test_coverage, architecture, crossref, type_drift, db_schema, migration_parity, manifest_compliance, literal_scan, coupling, cycles\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"analysis\":{\"type\":\"string\",\"description\":\"Analysis type: security, dead_code, unwrap_audit, test_coverage, architecture, crossref, type_drift, db_schema, migration_parity, manifest_compliance, literal_scan, coupling, cycles\"}},\"required\":[\"analysis\"]}}",
             // read_file
             "{\"name\":\"read_file\",\"description\":\"Read file contents with optional line range. Returns content with line numbers.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"File path relative to workspace root\"},\"start_line\":{\"type\":\"integer\",\"description\":\"Start line (1-based, default 1)\"},\"end_line\":{\"type\":\"integer\",\"description\":\"End line (inclusive, default: end of file)\"}},\"required\":[\"path\"]}}",
             // read_symbol

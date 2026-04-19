@@ -22,6 +22,8 @@ pub const Watcher = struct {
     }
 
     pub fn deinit(self: *Watcher) void {
+        var le_it = self.last_event.iterator();
+        while (le_it.next()) |entry| self.allocator.free(entry.key_ptr.*);
         self.last_event.deinit();
         var it = self.wd_map.iterator();
         while (it.next()) |entry| {
@@ -80,10 +82,15 @@ pub const Watcher = struct {
 
                 // Debounce: skip if we got an event for this path recently
                 const now = std.time.milliTimestamp();
-                if (self.last_event.get(full_path)) |last| {
-                    if (now - last < DEBOUNCE_MS) continue;
+                if (self.last_event.getEntry(full_path)) |entry| {
+                    if (now - entry.value_ptr.* < DEBOUNCE_MS) continue;
+                    entry.value_ptr.* = now;
+                } else {
+                    // HashMap stores the slice header by value but the bytes must outlive the entry,
+                    // so dupe the key into allocator-owned memory.
+                    const owned_key = self.allocator.dupe(u8, full_path) catch full_path;
+                    self.last_event.put(owned_key, now) catch self.allocator.free(owned_key);
                 }
-                self.last_event.put(full_path, now) catch {};
 
                 if (event.mask & (linux.IN.CREATE | linux.IN.MOVED_TO) != 0) {
                     try callback(context, Event{ .path = full_path, .op = .create });
