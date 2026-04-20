@@ -11,7 +11,7 @@ pub fn resolve(
     known_files: []const []const u8,
 ) ![][]const u8 {
     return switch (language) {
-        .rust => try resolve_rust(allocator, import_str, known_files),
+        .rust => try resolve_rust(allocator, import_str, source_path, known_files),
         .go => try resolve_go(allocator, import_str, known_files),
         .typescript, .javascript => try resolve_ts(allocator, import_str, source_path, known_files),
         .python => try resolve_python(allocator, import_str, source_path, known_files),
@@ -22,14 +22,49 @@ pub fn resolve(
 
 // ── Rust ─────────────────────────────────────────────────────────────────────
 
-fn resolve_rust(allocator: std.mem.Allocator, import_str: []const u8, known_files: []const []const u8) ![][]const u8 {
+fn resolve_rust(
+    allocator: std.mem.Allocator,
+    import_str: []const u8,
+    source_path: []const u8,
+    known_files: []const []const u8,
+) ![][]const u8 {
     // Skip std/core/alloc crates
     if (std.mem.startsWith(u8, import_str, "std::") or
         std.mem.startsWith(u8, import_str, "core::") or
         std.mem.startsWith(u8, import_str, "alloc::"))
         return &[_][]const u8{};
 
-    // use crate::foo::bar -> src/foo/bar.rs or src/foo/bar/mod.rs
+    var results = std.ArrayList([]const u8){};
+    errdefer results.deinit(allocator);
+
+    // Case 1: bare module name (e.g. `mod estop;` → import_str = "estop").
+    // Resolve relative to source_path's directory: src/security/mod.rs + "estop"
+    //   → src/security/estop.rs or src/security/estop/mod.rs
+    if (std.mem.indexOf(u8, import_str, "::") == null and
+        !std.mem.startsWith(u8, import_str, "crate") and
+        !std.mem.startsWith(u8, import_str, "super"))
+    {
+        const source_dir = std.fs.path.dirname(source_path) orelse ".";
+        const rel_file = try std.fmt.allocPrint(allocator, "{s}/{s}.rs", .{ source_dir, import_str });
+        defer allocator.free(rel_file);
+        const rel_mod = try std.fmt.allocPrint(allocator, "{s}/{s}/mod.rs", .{ source_dir, import_str });
+        defer allocator.free(rel_mod);
+        for (known_files) |f| {
+            if (std.mem.eql(u8, f, rel_file) or std.mem.eql(u8, f, rel_mod)) {
+                try results.append(allocator, f);
+                return try results.toOwnedSlice(allocator);
+            }
+        }
+        // Try endsWith fallback for relative-ish path matching
+        for (known_files) |f| {
+            if (std.mem.endsWith(u8, f, rel_file) or std.mem.endsWith(u8, f, rel_mod)) {
+                try results.append(allocator, f);
+                return try results.toOwnedSlice(allocator);
+            }
+        }
+        return try results.toOwnedSlice(allocator);
+    }
+
     var path_part = import_str;
     if (std.mem.startsWith(u8, path_part, "crate::")) {
         path_part = path_part[7..];
@@ -38,33 +73,68 @@ fn resolve_rust(allocator: std.mem.Allocator, import_str: []const u8, known_file
     }
 
     // Convert :: to /
-    var results = std.ArrayList([]const u8){};
     var buf: [512]u8 = undefined;
     var pos: usize = 0;
     pos += copy_replacing(&buf, pos, path_part, "::", "/");
+    const joined = buf[0..pos];
 
-    // Try src/{path}.rs
-    const as_file = try std.fmt.allocPrint(allocator, "src/{s}.rs", .{buf[0..pos]});
+    // Try src/{path}.rs then src/{path}/mod.rs (treating last component as module).
+    if (try try_rust_file(allocator, known_files, joined, &results)) {
+        return try results.toOwnedSlice(allocator);
+    }
+
+    // Case 2: last component is a PascalCase symbol (not a module). Strip and retry.
+    // e.g. `crate::security::EstopManager` → `security/EstopManager` fails above,
+    //      then we strip `EstopManager` → `security` → src/security.rs / src/security/mod.rs.
+    if (std.mem.lastIndexOfScalar(u8, joined, '/')) |slash| {
+        const last = joined[slash + 1 ..];
+        if (last.len > 0 and std.ascii.isUpper(last[0])) {
+            const parent = joined[0..slash];
+            if (parent.len > 0) {
+                if (try try_rust_file(allocator, known_files, parent, &results)) {
+                    return try results.toOwnedSlice(allocator);
+                }
+            }
+        }
+    } else {
+        // No slash — single component like `crate::SymbolName` (rare; top-level re-export).
+        if (joined.len > 0 and std.ascii.isUpper(joined[0])) {
+            // Try lib.rs (crate root) — conventional workspace root.
+            for (known_files) |f| {
+                if (std.mem.endsWith(u8, f, "src/lib.rs")) {
+                    try results.append(allocator, f);
+                    return try results.toOwnedSlice(allocator);
+                }
+            }
+        }
+    }
+
+    return try results.toOwnedSlice(allocator);
+}
+
+fn try_rust_file(
+    allocator: std.mem.Allocator,
+    known_files: []const []const u8,
+    path: []const u8,
+    results: *std.ArrayList([]const u8),
+) !bool {
+    const as_file = try std.fmt.allocPrint(allocator, "src/{s}.rs", .{path});
     defer allocator.free(as_file);
     for (known_files) |f| {
         if (std.mem.endsWith(u8, f, as_file)) {
             try results.append(allocator, f);
-            return try results.toOwnedSlice(allocator);
+            return true;
         }
     }
-
-    // Try src/{path}/mod.rs
-    const as_mod = try std.fmt.allocPrint(allocator, "src/{s}/mod.rs", .{buf[0..pos]});
+    const as_mod = try std.fmt.allocPrint(allocator, "src/{s}/mod.rs", .{path});
     defer allocator.free(as_mod);
     for (known_files) |f| {
         if (std.mem.endsWith(u8, f, as_mod)) {
             try results.append(allocator, f);
-            return try results.toOwnedSlice(allocator);
+            return true;
         }
     }
-
-    results.deinit(allocator);
-    return &[_][]const u8{};
+    return false;
 }
 
 // ── TypeScript/JavaScript ────────────────────────────────────────────────────
