@@ -678,6 +678,20 @@ pub const Explorer = struct {
             }
             if (line_text.len == 0) continue;
 
+            // Detect re-export / use-statement context for the whole line.
+            const trimmed_for_ctx = std.mem.trimLeft(u8, line_text, " \t");
+            const is_use_line = std.mem.startsWith(u8, trimmed_for_ctx, "use ") or
+                std.mem.startsWith(u8, trimmed_for_ctx, "pub use ") or
+                std.mem.startsWith(u8, trimmed_for_ctx, "pub(crate) use ") or
+                std.mem.startsWith(u8, trimmed_for_ctx, "export ") or
+                std.mem.startsWith(u8, trimmed_for_ctx, "import ") or
+                std.mem.startsWith(u8, trimmed_for_ctx, "from ") or
+                std.mem.indexOf(u8, trimmed_for_ctx, "from \"") != null or
+                std.mem.indexOf(u8, trimmed_for_ctx, "from '") != null;
+            const is_reexport_line = std.mem.startsWith(u8, trimmed_for_ctx, "pub use ") or
+                std.mem.startsWith(u8, trimmed_for_ctx, "pub(crate) use ") or
+                std.mem.startsWith(u8, trimmed_for_ctx, "export ");
+
             // Find `name` occurrences in the line and classify context.
             var search_start: usize = 0;
             var picked: ?[]const u8 = null;
@@ -694,16 +708,19 @@ pub const Explorer = struct {
                     if (std.ascii.isAlphanumeric(n) or n == '_') continue;
                 }
 
-                // Classify: call / method / path
+                // Classify: reexport (takes precedence on use/import lines) / call / method / path
                 var ctx: []const u8 = "other";
+                if (is_reexport_line) ctx = "reexport" else if (is_use_line) ctx = "import";
                 // Call: `name(`
                 if (end < line_text.len and line_text[end] == '(') ctx = "call";
                 // Method: `.name(` or `->name(`
                 if (pos > 0 and line_text[pos - 1] == '.' and end < line_text.len and line_text[end] == '(') ctx = "method";
                 if (pos >= 2 and line_text[pos - 2] == '-' and line_text[pos - 1] == '>' and end < line_text.len and line_text[end] == '(') ctx = "method";
-                // Path reference: `::name` or `name::`
-                if (pos >= 2 and line_text[pos - 2] == ':' and line_text[pos - 1] == ':') ctx = "path";
-                if (end + 1 < line_text.len and line_text[end] == ':' and line_text[end + 1] == ':') ctx = "path";
+                // Path reference: `::name` or `name::` — only if NOT on a use/import line
+                if (!is_use_line) {
+                    if (pos >= 2 and line_text[pos - 2] == ':' and line_text[pos - 1] == ':') ctx = "path";
+                    if (end + 1 < line_text.len and line_text[end] == ':' and line_text[end + 1] == ':') ctx = "path";
+                }
 
                 // Skip "other" to keep signal-to-noise high.
                 if (!std.mem.eql(u8, ctx, "other")) {
