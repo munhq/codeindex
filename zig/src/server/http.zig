@@ -14,6 +14,7 @@ const manifest_compliance = @import("../analysis/manifest_compliance.zig");
 const literal_scan = @import("../analysis/literal_scan.zig");
 const coupling = @import("../analysis/coupling.zig");
 const cycles = @import("../analysis/cycles.zig");
+const plan_change = @import("../analysis/plan_change.zig");
 
 const treesitter = @import("../parser/treesitter.zig");
 const filter_mod = @import("../core/filter.zig");
@@ -170,6 +171,20 @@ pub const Server = struct {
                         });
                     }
                 }
+            }
+        } else if (std.mem.eql(u8, tool, "plan_change")) {
+            const symbol = get_string_arg(args, "symbol");
+            const file = get_string_arg(args, "file");
+            if (symbol == null and file == null) {
+                try w.writeAll("Provide `symbol` or `file`.");
+            } else if (symbol != null and symbol.?.len > 0) {
+                var plan = try plan_change.plan_symbol(self.allocator, self.exp, symbol.?);
+                defer plan_change.free_symbol_plan(self.allocator, &plan);
+                try render_symbol_plan(w, &plan);
+            } else {
+                var plan = try plan_change.plan_file(self.allocator, self.exp, file.?);
+                defer plan_change.free_file_plan(self.allocator, &plan);
+                try render_file_plan(w, &plan);
             }
         } else if (std.mem.eql(u8, tool, "find_callers")) {
             const name = get_string_arg(args, "name") orelse "";
@@ -716,6 +731,8 @@ pub const Server = struct {
             "{\"name\":\"get_imported_by\",\"description\":\"Get which files import/depend on the given file (reverse dependencies)\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"File path relative to workspace root\"}},\"required\":[\"path\"]}}",
             // find_callers
             "{\"name\":\"find_callers\",\"description\":\"Approximate callers of a symbol. Finds word-index hits with call/method/path context, excluding the defining body. Heuristic — no full name resolution, may include shadowed names.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\",\"description\":\"Symbol name\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max results (default 100)\"}},\"required\":[\"name\"]}}",
+            // plan_change
+            "{\"name\":\"plan_change\",\"description\":\"Given a symbol name or file path, produce a full edit plan: definition(s), callers, file role (god/stable-core/driver/island), hardcoded-literal heads-up, and transitive blast radius. Use before refactors.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"symbol\":{\"type\":\"string\",\"description\":\"Symbol name to plan around\"},\"file\":{\"type\":\"string\",\"description\":\"Or a file path to plan around\"}}}}",
             // get_hot_files
             "{\"name\":\"get_hot_files\",\"description\":\"Get recently changed files sorted by recency\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"limit\":{\"type\":\"integer\",\"description\":\"Max results (default 20)\"}}}}",
             // index_workspace
@@ -738,6 +755,132 @@ pub const Server = struct {
         try file.writeAll(buf.items);
     }
 };
+
+// ── Renderers ────────────────────────────────────────────────────────────────
+
+fn render_symbol_plan(w: anytype, plan: *plan_change.SymbolPlan) !void {
+    try w.print("# Change plan: `{s}`\n\n", .{plan.target_name});
+
+    // Definitions + ambiguity
+    if (plan.definitions.len == 0) {
+        try w.writeAll("## Definition\n- No matching definition found.\n\n");
+    } else {
+        try w.print("## Definition ({d})\n", .{plan.definitions.len});
+        for (plan.definitions) |d| {
+            try w.print("- {s}:{d}-{d}  [{s}]\n", .{ d.path, d.line_start, d.line_end, d.kind.as_str() });
+        }
+        if (plan.definitions.len > 1) {
+            try w.writeAll("  ⚠ Ambiguous — multiple definitions share this name.\n");
+        }
+        try w.writeAll("\n");
+    }
+
+    // Callers — grouped by file
+    try w.print("## Call sites: {d} total across {d} files\n", .{ plan.callers_total, plan.caller_groups.len });
+    const max_files: usize = 20;
+    const shown = @min(plan.caller_groups.len, max_files);
+    for (plan.caller_groups[0..shown]) |g| {
+        try w.print("- {s}  ({d} hit{s})\n", .{ g.path, g.count, if (g.count == 1) @as([]const u8, "") else @as([]const u8, "s") });
+        for (g.samples) |s| {
+            try w.print("    {d}  [{s}]  {s}\n", .{ s.line_num, s.context, s.snippet });
+        }
+    }
+    if (plan.caller_groups.len > max_files) {
+        try w.print("- ... ({d} more files omitted)\n", .{plan.caller_groups.len - max_files});
+    }
+    if (plan.callers_total == 0) try w.writeAll("- None found via heuristic context filter.\n");
+    if (plan.indexer_missed_def) {
+        try w.writeAll("  ⚠ Outline didn't capture a definition for this name, but callers exist — indexer likely missed it (known gap: tree-sitter tags.scm for TS/JS only captures .d.ts-style signatures). The first-listed file is the best guess for where it's defined.\n");
+    }
+    try w.writeAll("\n");
+
+    // File context
+    if (plan.primary_file) |pf| {
+        try w.print("## File context: {s}\n", .{pf});
+        try w.print("- Role: {s}  (fan_in={d}, fan_out={d})\n", .{ plan.file_role.as_str(), plan.fan_in, plan.fan_out });
+        try render_literals(w, plan.literals);
+        try w.writeAll("\n");
+    }
+
+    // Impact
+    try w.print("## Blast radius (files affected if this file changes)\n", .{});
+    try w.print("- Direct: {d}\n", .{plan.direct_impact.len});
+    for (plan.direct_impact) |p| try w.print("  - {s}\n", .{p});
+    try w.print("- Transitive: {d} (depth reached {d})\n", .{ plan.transitive_impact.len, plan.max_depth_reached });
+    for (plan.transitive_impact) |p| try w.print("  - {s}\n", .{p});
+    try w.writeAll("\n");
+
+    try render_heads_up(w, plan.file_role, plan.literals);
+}
+
+fn render_file_plan(w: anytype, plan: *plan_change.FilePlan) !void {
+    try w.print("# Change plan: `{s}`\n\n", .{plan.target_path});
+    try w.print("## Role: {s}  (fan_in={d}, fan_out={d})\n\n", .{ plan.file_role.as_str(), plan.fan_in, plan.fan_out });
+
+    try w.print("## Symbols in file ({d})\n", .{plan.symbols_in_file.len});
+    const max_sym: usize = 40;
+    const n = @min(plan.symbols_in_file.len, max_sym);
+    for (plan.symbols_in_file[0..n]) |s| {
+        try w.print("- {d}: [{s}] {s}\n", .{ s.line_start + 1, s.kind.as_str(), s.name });
+    }
+    if (plan.symbols_in_file.len > max_sym) try w.print("... ({d} more)\n", .{plan.symbols_in_file.len - max_sym});
+    try w.writeAll("\n");
+
+    try render_literals(w, plan.literals);
+    try w.writeAll("\n");
+
+    try w.print("## Blast radius (files affected if this file changes)\n", .{});
+    try w.print("- Direct: {d}\n", .{plan.direct_impact.len});
+    for (plan.direct_impact) |p| try w.print("  - {s}\n", .{p});
+    try w.print("- Transitive: {d} (depth reached {d})\n", .{ plan.transitive_impact.len, plan.max_depth_reached });
+    for (plan.transitive_impact) |p| try w.print("  - {s}\n", .{p});
+    try w.writeAll("\n");
+
+    try render_heads_up(w, plan.file_role, plan.literals);
+}
+
+fn render_literals(w: anytype, l: plan_change.LiteralSummary) !void {
+    const total = l.urls + l.localhosts + l.ips + l.secrets + l.magic_ports + l.abs_paths + l.todos;
+    if (total == 0) return;
+    try w.print("- Hardcoded literals: urls={d}, localhost={d}, magic_ports={d}, abs_paths={d}, todos={d}\n", .{
+        l.urls, l.localhosts, l.magic_ports, l.abs_paths, l.todos,
+    });
+}
+
+fn render_heads_up(w: anytype, role: plan_change.FileRole, l: plan_change.LiteralSummary) !void {
+    var any = false;
+    try w.writeAll("## Heads-up\n");
+    switch (role) {
+        .god_module => {
+            try w.writeAll("- ⚠ **God module** — many files depend on this AND it imports widely. High blast radius.\n");
+            any = true;
+        },
+        .stable_core => {
+            try w.writeAll("- Stable core (contract/trait file). Changes here likely require call-site updates in every dependent.\n");
+            any = true;
+        },
+        .island => {
+            try w.writeAll("- ⚠ Island — nothing imports this and it imports nothing. Possibly dead.\n");
+            any = true;
+        },
+        .driver => {
+            try w.writeAll("- Driver — entry point / aggregator. Few depend on it but it wires many things together.\n");
+            any = true;
+        },
+        .regular => {},
+    }
+    if (l.urls > 0 or l.magic_ports > 0 or l.abs_paths > 0) {
+        try w.print("- ⚠ Hardcoded configuration detected ({d} URLs, {d} ports, {d} abs paths). Consider pulling into config.\n", .{
+            l.urls, l.magic_ports, l.abs_paths,
+        });
+        any = true;
+    }
+    if (l.todos > 0) {
+        try w.print("- {d} TODO/FIXME markers in this file.\n", .{l.todos});
+        any = true;
+    }
+    if (!any) try w.writeAll("- No architectural tells detected.\n");
+}
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
