@@ -5,7 +5,12 @@ VENDOR_DIR="$(cd "$(dirname "$0")" && pwd)/vendor"
 mkdir -p "$VENDOR_DIR/grammars"
 
 clone() {
-    local name="$1" url="$2" dir="$VENDOR_DIR/grammars/$name"
+    # Split into separate `local` statements: bash evaluates all RHS of a
+    # multi-var `local` before any assignment, so `local a=$1 b=$VENDOR/$a`
+    # trips `set -u` with "a: unbound variable".
+    local name="$1"
+    local url="$2"
+    local dir="$VENDOR_DIR/grammars/$name"
     if [ -d "$dir" ]; then
         echo "  skip $name (exists)"
         return
