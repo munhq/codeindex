@@ -46,7 +46,7 @@ const required_fields_package_json = [_][]const u8{
 };
 
 pub fn analyze(allocator: std.mem.Allocator, exp: *explorer.Explorer) !Report {
-    var violations = std.ArrayList(Violation){};
+    var violations = std.ArrayList(Violation).empty;
     var manifests_checked: usize = 0;
 
     var it = exp.outlines.iterator();

@@ -15,7 +15,7 @@ pub const Report = struct {
 /// Any SCC of size > 1 is a cycle; self-loops (SCC size 1 with an edge to itself) are also reported.
 pub fn analyze(allocator: std.mem.Allocator, exp: *explorer.Explorer) !Report {
     // Gather node set (file_ids currently alive)
-    var nodes = std.ArrayList(u32){};
+    var nodes = std.ArrayList(u32).empty;
     defer nodes.deinit(allocator);
 
     var oit = exp.outlines.iterator();
@@ -36,11 +36,11 @@ pub fn analyze(allocator: std.mem.Allocator, exp: *explorer.Explorer) !Report {
     defer lowlink.deinit();
     var on_stack = std.AutoHashMap(u32, void).init(allocator);
     defer on_stack.deinit();
-    var stack = std.ArrayList(u32){};
+    var stack = std.ArrayList(u32).empty;
     defer stack.deinit(allocator);
 
     var index_counter: i32 = 0;
-    var sccs = std.ArrayList([]u32){};
+    var sccs = std.ArrayList([]u32).empty;
     errdefer {
         for (sccs.items) |s| allocator.free(s);
         sccs.deinit(allocator);
@@ -62,7 +62,7 @@ pub fn analyze(allocator: std.mem.Allocator, exp: *explorer.Explorer) !Report {
     }
 
     // Filter: keep SCCs of size >= 2, or size 1 with self-loop
-    var cycles = std.ArrayList(Cycle){};
+    var cycles = std.ArrayList(Cycle).empty;
     errdefer cycles.deinit(allocator);
 
     for (sccs.items) |scc_ids| {
@@ -130,7 +130,7 @@ fn strongconnect(
     }
 
     if (lowlink.get(v).? == index_map.get(v).?) {
-        var group = std.ArrayList(u32){};
+        var group = std.ArrayList(u32).empty;
         errdefer group.deinit(allocator);
         while (true) {
             const w = stack.pop() orelse break;

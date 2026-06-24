@@ -29,7 +29,7 @@ fn get_layer(path: []const u8) ?struct { name: []const u8, rank: usize } {
 }
 
 pub fn analyze(allocator: std.mem.Allocator, exp: *explorer.Explorer) ![]Violation {
-    var violations = std.ArrayList(Violation){};
+    var violations = std.ArrayList(Violation).empty;
 
     var it = exp.depgraph.imports.iterator();
     while (it.next()) |entry| {

@@ -18,6 +18,8 @@ const plan_change = @import("../analysis/plan_change.zig");
 
 const treesitter = @import("../parser/treesitter.zig");
 const filter_mod = @import("../core/filter.zig");
+const scanner = @import("../index/scanner.zig");
+const io = @import("../core/io.zig");
 
 pub const Server = struct {
     allocator: std.mem.Allocator,
@@ -35,15 +37,18 @@ pub const Server = struct {
     }
 
     pub fn run_mcp(self: *Server) !void {
-        const stdin_file = std.fs.File.stdin();
-        const stdout_file = std.fs.File.stdout();
+        const stdin_file = io.stdin();
+        const stdout_file = io.stdout();
+
+        var rbuf: [256 * 1024]u8 = undefined;
+        var fr = stdin_file.reader(io.io(), &rbuf);
 
         var read_buf: [1024 * 1024]u8 = undefined;
-        var carry = std.ArrayList(u8){};
+        var carry = std.ArrayList(u8).empty;
         defer carry.deinit(self.allocator);
 
         while (true) {
-            const n = stdin_file.read(&read_buf) catch break;
+            const n = fr.interface.readSliceShort(&read_buf) catch break;
             if (n == 0) break; // EOF
 
             try carry.appendSlice(self.allocator, read_buf[0..n]);
@@ -69,13 +74,13 @@ pub const Server = struct {
                 const id = obj.get("id");
 
                 if (std.mem.eql(u8, method, "initialize")) {
-                    var buf = std.ArrayList(u8){};
-                    defer buf.deinit(self.allocator);
-                    const bw = buf.writer(self.allocator);
+                    var buf = std.Io.Writer.Allocating.init(self.allocator);
+                    defer buf.deinit();
+                    const bw = &buf.writer;
                     try bw.writeAll("{\"jsonrpc\":\"2.0\",\"id\":");
                     try write_id(bw, id);
                     try bw.writeAll(",\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"codeindex-zig\",\"version\":\"0.1.0\"}}}\n");
-                    try stdout_file.writeAll(buf.items);
+                    try io.writeAll(stdout_file, buf.written());
                 } else if (std.mem.eql(u8, method, "notifications/initialized")) {
                     // No response needed
                 } else if (std.mem.eql(u8, method, "tools/list")) {
@@ -94,13 +99,13 @@ pub const Server = struct {
         // Wait for indexing to complete before processing query tools
         if (!std.mem.eql(u8, tool, "status")) {
             while (self.exp.is_indexing()) {
-                std.Thread.sleep(100 * std.time.ns_per_ms);
+                io.sleep(100 * std.time.ns_per_ms);
             }
         }
 
-        var out = std.ArrayList(u8){};
-        defer out.deinit(self.allocator);
-        const w = out.writer(self.allocator);
+        var out = std.Io.Writer.Allocating.init(self.allocator);
+        defer out.deinit();
+        const w = &out.writer;
 
         if (std.mem.eql(u8, tool, "status")) {
             // Calculate token savings stats
@@ -112,7 +117,7 @@ pub const Server = struct {
             const outline_tokens = self.exp.symbol_count() * 10; // ~10 tokens per symbol in outline
             const savings_pct: u64 = if (naive_tokens > 0) 100 - (outline_tokens * 100 / naive_tokens) else 0;
 
-            try w.print("{{\"files\":{d},\"symbols\":{d},\"indexing\":{s},\"latest_seq\":{d},\"total_lines\":{d},\"total_bytes\":{d},\"naive_tokens\":{d},\"outline_tokens\":{d},\"savings_pct\":{d},\"watcher\":true}}", .{
+            try w.print("{{\"files\":{d},\"symbols\":{d},\"indexing\":{s},\"latest_seq\":{d},\"total_lines\":{d},\"total_bytes\":{d},\"naive_tokens\":{d},\"outline_tokens\":{d},\"savings_pct\":{d},\"watcher\":true", .{
                 self.exp.file_count(),
                 self.exp.symbol_count(),
                 if (self.exp.is_indexing()) "true" else "false",
@@ -123,6 +128,12 @@ pub const Server = struct {
                 outline_tokens,
                 savings_pct,
             });
+            if (self.exp.status_message) |msg| {
+                try w.writeAll(",\"message\":\"");
+                try w.writeAll(msg);
+                try w.writeAll("\"");
+            }
+            try w.writeAll("}");
         } else if (std.mem.eql(u8, tool, "search")) {
             const query = get_string_arg(args, "query") orelse "";
             const limit = get_int_arg(args, "limit") orelse 50;
@@ -358,53 +369,23 @@ pub const Server = struct {
                 self.exp.deinit();
                 self.exp.* = explorer.Explorer.init(self.allocator);
 
-                var dir = std.fs.cwd().openDir(path.?, .{ .iterate = true }) catch {
-                    try w.print("Directory not found: {s}", .{path.?});
-                    try self.write_tool_result(writer, id, out.items, true);
+                const res = scanner.index_tree(self.allocator, self.exp, self.parser.?, self.filter.?, path.?, 10 * 1024 * 1024, .{}) catch {
+                    try w.print("Failed to index: {s}", .{path.?});
+                    self.exp.mark_indexing_complete();
+                    try self.write_tool_result(writer, id, out.written(), true);
                     return;
                 };
-                defer dir.close();
-                var dir_walker = dir.walk(self.allocator) catch {
-                    try w.writeAll("Failed to walk directory");
-                    try self.write_tool_result(writer, id, out.items, true);
-                    return;
-                };
-                defer dir_walker.deinit();
-
-                var count: usize = 0;
-                while (dir_walker.next() catch null) |entry| {
-                    if (entry.kind != .file) continue;
-                    if (self.filter.?.should_ignore(entry.path)) continue;
-                    const language = models.Language.from_path(entry.path);
-                    if (language == .unknown) continue;
-
-                    const f_file = entry.dir.openFile(entry.basename, .{}) catch continue;
-                    defer f_file.close();
-                    const content = f_file.readToEndAlloc(self.allocator, 10 * 1024 * 1024) catch continue;
-                    defer self.allocator.free(content);
-
-                    const full_path = std.fs.path.join(self.allocator, &.{ path.?, entry.path }) catch continue;
-                    defer self.allocator.free(full_path);
-
-                    const outline = self.parser.?.parse_file(full_path, language) catch {
-                        _ = self.exp.add_file(.{
-                            .path = self.allocator.dupe(u8, entry.path) catch continue,
-                            .language = language,
-                            .line_count = std.mem.count(u8, content, "\n") + 1,
-                            .byte_size = content.len,
-                            .symbols = &[_]models.Symbol{},
-                            .imports = &[_][]const u8{},
-                        }, content) catch continue;
-                        count += 1;
-                        continue;
-                    };
-                    _ = self.exp.add_file(outline, content) catch continue;
-                    count += 1;
-                }
+                if (res.capped) self.exp.set_status("Workspace too large — indexing stopped at the safety cap; results are partial.");
                 self.exp.mark_indexing_complete();
-                try w.print("Indexed {d} files — {d} symbols across {d} files", .{
-                    count, self.exp.symbol_count(), self.exp.file_count(),
-                });
+                if (res.capped) {
+                    try w.print("Indexed {d} files — {d} symbols (stopped at safety cap; results partial)", .{
+                        res.files, self.exp.symbol_count(),
+                    });
+                } else {
+                    try w.print("Indexed {d} files — {d} symbols across {d} files", .{
+                        res.files, self.exp.symbol_count(), self.exp.file_count(),
+                    });
+                }
             } else {
                 try w.print("Indexed {d} files — {d} symbols", .{
                     self.exp.file_count(), self.exp.symbol_count(),
@@ -649,7 +630,7 @@ pub const Server = struct {
             try w.print("Unknown tool: {s}", .{tool});
         }
 
-        try self.write_tool_result(writer, id, out.items, false);
+        try self.write_tool_result(writer, id, out.written(), false);
     }
 
     fn write_file_content(self: *Server, w: anytype, file_id: u32, args: ?std.json.Value) !void {
@@ -675,11 +656,11 @@ pub const Server = struct {
         }
     }
 
-    fn write_tool_result(self: *Server, file: std.fs.File, id: ?std.json.Value, text: []const u8, is_error: bool) !void {
+    fn write_tool_result(self: *Server, file: io.File, id: ?std.json.Value, text: []const u8, is_error: bool) !void {
         // Build the full response into a buffer, then write it atomically
-        var buf = std.ArrayList(u8){};
-        defer buf.deinit(self.allocator);
-        const bw = buf.writer(self.allocator);
+        var buf = std.Io.Writer.Allocating.init(self.allocator);
+        defer buf.deinit();
+        const bw = &buf.writer;
 
         try bw.writeAll("{\"jsonrpc\":\"2.0\",\"id\":");
         try write_id(bw, id);
@@ -689,25 +670,25 @@ pub const Server = struct {
         try bw.writeAll(if (is_error) "true" else "false");
         try bw.writeAll("}}\n");
 
-        try file.writeAll(buf.items);
+        try io.writeAll(file, buf.written());
     }
 
-    fn write_response(self: *Server, file: std.fs.File, id: ?std.json.Value, result: anytype) !void {
-        var buf = std.ArrayList(u8){};
-        defer buf.deinit(self.allocator);
-        const bw = buf.writer(self.allocator);
+    fn write_response(self: *Server, file: io.File, id: ?std.json.Value, result: anytype) !void {
+        var buf = std.Io.Writer.Allocating.init(self.allocator);
+        defer buf.deinit();
+        const bw = &buf.writer;
 
         try bw.writeAll("{\"jsonrpc\":\"2.0\",\"id\":");
         try write_id(bw, id);
         try bw.print(",\"result\":{f}}}\n", .{std.json.fmt(result, .{})});
 
-        try file.writeAll(buf.items);
+        try io.writeAll(file, buf.written());
     }
 
-    fn write_tools_list(self: *Server, file: std.fs.File, id: ?std.json.Value) !void {
-        var buf = std.ArrayList(u8){};
-        defer buf.deinit(self.allocator);
-        const bw = buf.writer(self.allocator);
+    fn write_tools_list(self: *Server, file: io.File, id: ?std.json.Value) !void {
+        var buf = std.Io.Writer.Allocating.init(self.allocator);
+        defer buf.deinit();
+        const bw = &buf.writer;
 
         try bw.writeAll("{\"jsonrpc\":\"2.0\",\"id\":");
         try write_id(bw, id);
@@ -752,7 +733,7 @@ pub const Server = struct {
         }
         try bw.writeAll("]}}\n");
 
-        try file.writeAll(buf.items);
+        try io.writeAll(file, buf.written());
     }
 };
 

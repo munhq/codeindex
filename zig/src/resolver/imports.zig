@@ -34,7 +34,7 @@ fn resolve_rust(
         std.mem.startsWith(u8, import_str, "alloc::"))
         return &[_][]const u8{};
 
-    var results = std.ArrayList([]const u8){};
+    var results = std.ArrayList([]const u8).empty;
     errdefer results.deinit(allocator);
 
     // Case 1: bare module name (e.g. `mod estop;` → import_str = "estop").
@@ -149,7 +149,7 @@ fn resolve_ts(allocator: std.mem.Allocator, import_str: []const u8, source_path:
     const source_dir = std.fs.path.dirname(source_path) orelse ".";
     const extensions = [_][]const u8{ "", ".ts", ".tsx", ".js", ".jsx", ".json", "/index.ts", "/index.tsx", "/index.js", "/index.js" };
 
-    var results = std.ArrayList([]const u8){};
+    var results = std.ArrayList([]const u8).empty;
 
     // Build normalized candidates
     for (&extensions) |ext| {
@@ -179,7 +179,7 @@ fn resolve_ts(allocator: std.mem.Allocator, import_str: []const u8, source_path:
 
 /// Collapse `./` and `foo/../` segments. Returns owned memory.
 fn normalize_path(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    var segments = std.ArrayList([]const u8){};
+    var segments = std.ArrayList([]const u8).empty;
     defer segments.deinit(allocator);
 
     var it = std.mem.splitScalar(u8, path, '/');
@@ -239,7 +239,7 @@ fn resolve_python(allocator: std.mem.Allocator, import_str: []const u8, source_p
     }
 
     _ = source_path;
-    var results = std.ArrayList([]const u8){};
+    var results = std.ArrayList([]const u8).empty;
 
     // Convert dots to slashes
     var buf: [512]u8 = undefined;
@@ -267,7 +267,7 @@ fn resolve_go(allocator: std.mem.Allocator, import_str: []const u8, known_files:
     if (std.mem.indexOf(u8, import_str, ".") == null) return &[_][]const u8{};
 
     // For module imports like "github.com/org/repo/pkg", match files in pkg/
-    var results = std.ArrayList([]const u8){};
+    var results = std.ArrayList([]const u8).empty;
     if (std.mem.lastIndexOf(u8, import_str, "/")) |last_slash| {
         const pkg = import_str[last_slash + 1 ..];
         for (known_files) |f| {
@@ -296,7 +296,7 @@ fn resolve_c(allocator: std.mem.Allocator, import_str: []const u8, source_path: 
     const candidate = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ source_dir, path });
     defer allocator.free(candidate);
 
-    var results = std.ArrayList([]const u8){};
+    var results = std.ArrayList([]const u8).empty;
     for (known_files) |f| {
         if (std.mem.endsWith(u8, f, candidate) or std.mem.endsWith(u8, f, path)) {
             try results.append(allocator, f);

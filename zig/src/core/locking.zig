@@ -1,4 +1,5 @@
 const std = @import("std");
+const io = @import("io.zig");
 
 pub const Lock = struct {
     path: []const u8,
@@ -14,7 +15,7 @@ pub const Lock = struct {
 pub const LockManager = struct {
     allocator: std.mem.Allocator,
     locks: std.StringHashMap(Lock),
-    mutex: std.Thread.Mutex,
+    mutex: io.Mutex,
     timeout_ms: i64,
 
     pub fn init(allocator: std.mem.Allocator, timeout_ms: i64) LockManager {
@@ -41,7 +42,7 @@ pub const LockManager = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const now = std.time.milliTimestamp();
+        const now = io.milliTimestamp();
 
         if (self.locks.getPtr(path)) |lock| {
             if (now < lock.expires_at_ms and !std.mem.eql(u8, lock.agent_id, agent_id)) {
@@ -83,7 +84,7 @@ pub const LockManager = struct {
 
         if (self.locks.getPtr(path)) |lock| {
             if (std.mem.eql(u8, lock.agent_id, agent_id)) {
-                lock.expires_at_ms = std.time.milliTimestamp() + self.timeout_ms;
+                lock.expires_at_ms = io.milliTimestamp() + self.timeout_ms;
                 return true;
             }
         }
@@ -102,8 +103,8 @@ pub const LockManager = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const now = std.time.milliTimestamp();
-        var to_remove = std.ArrayList([]const u8){};
+        const now = io.milliTimestamp();
+        var to_remove = std.ArrayList([]const u8).empty;
         defer to_remove.deinit(self.allocator);
 
         var it = self.locks.iterator();
@@ -127,7 +128,7 @@ pub const LockManager = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        var result = std.ArrayList(Lock){};
+        var result = std.ArrayList(Lock).empty;
         var it = self.locks.iterator();
         while (it.next()) |entry| {
             if (std.mem.eql(u8, entry.value_ptr.agent_id, agent_id)) {
@@ -141,7 +142,7 @@ pub const LockManager = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        var result = std.ArrayList(Lock){};
+        var result = std.ArrayList(Lock).empty;
         var it = self.locks.iterator();
         while (it.next()) |entry| {
             result.append(self.allocator, entry.value_ptr.*) catch continue;

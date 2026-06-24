@@ -41,7 +41,7 @@ pub const Report = struct {
 
 /// Extract struct/interface types from content by looking for field patterns.
 fn extract_types(allocator: std.mem.Allocator, exp: *explorer.Explorer) ![]TypeInfo {
-    var types = std.ArrayList(TypeInfo){};
+    var types = std.ArrayList(TypeInfo).empty;
 
     var it = exp.outlines.iterator();
     while (it.next()) |entry| {
@@ -57,7 +57,7 @@ fn extract_types(allocator: std.mem.Allocator, exp: *explorer.Explorer) ![]TypeI
         for (outline.symbols) |sym| {
             if (sym.kind != .@"struct" and sym.kind != .class and sym.kind != .interface) continue;
 
-            var fields = std.ArrayList(FieldInfo){};
+            var fields = std.ArrayList(FieldInfo).empty;
             var line_num: usize = 0;
             var lines_it = std.mem.splitScalar(u8, content, '\n');
             while (lines_it.next()) |line| {
@@ -170,8 +170,8 @@ pub fn analyze(allocator: std.mem.Allocator, exp: *explorer.Explorer) !Report {
         allocator.free(types);
     }
 
-    var mismatches = std.ArrayList(Mismatch){};
-    var missing = std.ArrayList(MissingField){};
+    var mismatches = std.ArrayList(Mismatch).empty;
+    var missing = std.ArrayList(MissingField).empty;
 
     // Compare types with the same name across languages
     for (types, 0..) |a, ai| {

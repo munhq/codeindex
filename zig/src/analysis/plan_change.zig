@@ -82,7 +82,7 @@ pub const FilePlan = struct {
 
 pub fn plan_symbol(allocator: std.mem.Allocator, exp: *explorer.Explorer, target: []const u8) !SymbolPlan {
     // 1. Collect all symbol definitions with this name
-    var defs = std.ArrayList(DefSite){};
+    var defs = std.ArrayList(DefSite).empty;
     errdefer defs.deinit(allocator);
     var primary_file_id: ?u32 = null;
 
@@ -221,7 +221,7 @@ fn collect_impact(allocator: std.mem.Allocator, exp: *explorer.Explorer, path: [
     }
 
     // Transitive = all minus direct (but preserve order). ci.transitive includes direct.
-    var trans_list = std.ArrayList([]const u8){};
+    var trans_list = std.ArrayList([]const u8).empty;
     errdefer trans_list.deinit(allocator);
     outer: for (ci.transitive) |fid| {
         for (ci.direct) |dfid| if (dfid == fid) continue :outer;
@@ -330,7 +330,7 @@ fn group_by_file(allocator: std.mem.Allocator, callers: []CallerLine) ![]CallerG
     if (callers.len == 0) return &[_]CallerGroup{};
 
     // simple O(n²) grouping — fine up to a few hundred callers
-    var groups = std.ArrayList(CallerGroup){};
+    var groups = std.ArrayList(CallerGroup).empty;
     errdefer {
         for (groups.items) |*g| {
             for (g.samples) |s| allocator.free(s.snippet);

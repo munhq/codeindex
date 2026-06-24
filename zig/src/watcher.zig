@@ -1,8 +1,16 @@
 const std = @import("std");
 const posix = std.posix;
 const linux = std.os.linux;
+const io = @import("core/io.zig");
 
 const DEBOUNCE_MS: i64 = 200;
+
+/// Linux syscalls return errors as the top 4 KiB of the unsigned range
+/// (i.e. -4095..-1 reinterpreted). 0.16 dropped the std.posix inotify wrappers,
+/// so we call the raw linux syscalls and check the return this way.
+fn syscall_ok(rc: usize) bool {
+    return rc <= std.math.maxInt(usize) - 4096;
+}
 
 pub const Watcher = struct {
     allocator: std.mem.Allocator,
@@ -11,7 +19,9 @@ pub const Watcher = struct {
     last_event: std.StringHashMap(i64), // path -> timestamp for debouncing
 
     pub fn init(allocator: std.mem.Allocator) !Watcher {
-        const fd = try posix.inotify_init1(linux.IN.NONBLOCK | linux.IN.CLOEXEC);
+        const rc = linux.inotify_init1(linux.IN.NONBLOCK | linux.IN.CLOEXEC);
+        if (!syscall_ok(rc)) return error.INotifyInitFailed;
+        const fd: i32 = @intCast(rc);
 
         return Watcher{
             .allocator = allocator,
@@ -30,28 +40,39 @@ pub const Watcher = struct {
             self.allocator.free(entry.value_ptr.*);
         }
         self.wd_map.deinit();
-        posix.close(self.fd);
+        _ = linux.close(self.fd);
     }
 
     pub fn add_recursive(self: *Watcher, root_path: []const u8) !void {
-        var dir = std.fs.cwd().openDir(root_path, .{ .iterate = true }) catch return;
-        defer dir.close();
+        var dir = io.cwd().openDir(io.io(), root_path, .{ .iterate = true }) catch return;
+        defer dir.close(io.io());
 
-        // Add watch for the directory itself
-        const wd = try posix.inotify_add_watch(self.fd, root_path, linux.IN.MODIFY | linux.IN.CREATE | linux.IN.DELETE | linux.IN.MOVED_FROM | linux.IN.MOVED_TO);
-        try self.wd_map.put(wd, try self.allocator.dupe(u8, root_path));
+        const mask = linux.IN.MODIFY | linux.IN.CREATE | linux.IN.DELETE | linux.IN.MOVED_FROM | linux.IN.MOVED_TO;
+
+        // Add watch for the directory itself (inotify needs a null-terminated path)
+        const root_z = try self.allocator.dupeZ(u8, root_path);
+        defer self.allocator.free(root_z);
+        const wd_rc = linux.inotify_add_watch(self.fd, root_z, mask);
+        if (!syscall_ok(wd_rc)) return error.INotifyAddWatchFailed;
+        try self.wd_map.put(@intCast(wd_rc), try self.allocator.dupe(u8, root_path));
 
         var walker = try dir.walk(self.allocator);
         defer walker.deinit();
 
-        while (try walker.next()) |entry| {
+        while (try walker.next(io.io())) |entry| {
             if (entry.kind == .directory) {
                 const full_path = try std.fs.path.join(self.allocator, &.{ root_path, entry.path });
-                const sub_wd = posix.inotify_add_watch(self.fd, full_path, linux.IN.MODIFY | linux.IN.CREATE | linux.IN.DELETE | linux.IN.MOVED_FROM | linux.IN.MOVED_TO) catch {
+                const fp_z = self.allocator.dupeZ(u8, full_path) catch {
                     self.allocator.free(full_path);
                     continue;
                 };
-                try self.wd_map.put(sub_wd, full_path);
+                defer self.allocator.free(fp_z);
+                const sub_rc = linux.inotify_add_watch(self.fd, fp_z, mask);
+                if (!syscall_ok(sub_rc)) {
+                    self.allocator.free(full_path);
+                    continue;
+                }
+                try self.wd_map.put(@intCast(sub_rc), full_path);
             }
         }
     }
@@ -81,7 +102,7 @@ pub const Watcher = struct {
                 defer self.allocator.free(full_path);
 
                 // Debounce: skip if we got an event for this path recently
-                const now = std.time.milliTimestamp();
+                const now = io.milliTimestamp();
                 if (self.last_event.getEntry(full_path)) |entry| {
                     if (now - entry.value_ptr.* < DEBOUNCE_MS) continue;
                     entry.value_ptr.* = now;

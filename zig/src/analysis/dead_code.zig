@@ -36,7 +36,7 @@ fn should_skip(name: []const u8, kind: models.SymbolKind) bool {
 }
 
 pub fn find_dead_code(allocator: std.mem.Allocator, exp: *explorer.Explorer) ![]DeadSymbol {
-    var results = std.ArrayList(DeadSymbol){};
+    var results = std.ArrayList(DeadSymbol).empty;
 
     var it = exp.outlines.iterator();
     while (it.next()) |entry| {

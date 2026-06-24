@@ -28,7 +28,7 @@ pub const ModuleCoverage = struct {
 };
 
 pub fn analyze(allocator: std.mem.Allocator, exp: *explorer.Explorer) ![]ModuleCoverage {
-    var results = std.ArrayList(ModuleCoverage){};
+    var results = std.ArrayList(ModuleCoverage).empty;
 
     // First pass: collect all test file word sets
     var test_words = std.StringHashMap(void).init(allocator);

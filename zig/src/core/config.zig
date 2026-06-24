@@ -1,4 +1,5 @@
 const std = @import("std");
+const io = @import("io.zig");
 
 pub const Config = struct {
     workspace_root: []const u8 = ".",
@@ -9,26 +10,34 @@ pub const Config = struct {
     respect_gitignore: bool = true,
     skip_hidden: bool = true,
     mcp_mode: bool = false,
+    show_version: bool = false,
+    show_help: bool = false,
 
-    pub fn from_args(allocator: std.mem.Allocator) !Config {
+    pub fn from_args(allocator: std.mem.Allocator, args_vec: std.process.Args) !Config {
         var config = Config{};
 
         // Check env vars first
-        if (std.process.getEnvVarOwned(allocator, "CODEINDEX_WORKSPACE")) |val| {
+        if (io.getEnv(allocator, "CODEINDEX_WORKSPACE")) |val| {
             config.workspace_root = val;
-        } else |_| {}
+        }
 
-        if (std.process.getEnvVarOwned(allocator, "CODEINDEX_PROJECT_ID")) |val| {
+        if (io.getEnv(allocator, "CODEINDEX_PROJECT_ID")) |val| {
             config.project_id = val;
-        } else |_| {}
+        }
 
-        // CLI args override env vars
-        var args = try std.process.argsWithAllocator(allocator);
+        // CLI args override env vars. On POSIX these slices point into the
+        // process argv and live for the whole program, so storing them in
+        // `config` without duping is safe.
+        var args = std.process.Args.Iterator.init(args_vec);
         defer args.deinit();
         _ = args.next(); // skip program name
 
         while (args.next()) |arg| {
-            if (std.mem.eql(u8, arg, "--mcp")) {
+            if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "-V")) {
+                config.show_version = true;
+            } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+                config.show_help = true;
+            } else if (std.mem.eql(u8, arg, "--mcp")) {
                 config.mcp_mode = true;
             } else if (std.mem.eql(u8, arg, "--workspace")) {
                 if (args.next()) |val| {

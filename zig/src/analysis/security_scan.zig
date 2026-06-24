@@ -64,7 +64,7 @@ const rules = [_]Rule{
 };
 
 pub fn scan(allocator: std.mem.Allocator, exp: *explorer.Explorer) ![]Finding {
-    var findings = std.ArrayList(Finding){};
+    var findings = std.ArrayList(Finding).empty;
 
     var it = exp.outlines.iterator();
     while (it.next()) |entry| {

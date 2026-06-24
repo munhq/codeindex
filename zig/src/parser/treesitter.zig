@@ -1,6 +1,7 @@
 const std = @import("std");
 const models = @import("../core/models.zig");
 const import_scan = @import("import_scan.zig");
+const io = @import("../core/io.zig");
 
 const ts = @cImport({
     @cInclude("tree_sitter/api.h");
@@ -87,10 +88,7 @@ pub const Parser = struct {
             return error.TSLanguageSetFailed;
         }
 
-        const file = try std.fs.cwd().openFile(path, .{});
-        defer file.close();
-
-        const content = try file.readToEndAlloc(self.allocator, 1024 * 1024 * 10); // 10MB limit
+        const content = try io.readFileAlloc(self.allocator, path, 1024 * 1024 * 10); // 10MB limit
         defer self.allocator.free(content);
 
         const tree = ts.ts_parser_parse_string(self.parser, null, content.ptr, @intCast(content.len)) orelse return error.TSParseFailed;
@@ -99,8 +97,8 @@ pub const Parser = struct {
         const root_node = ts.ts_tree_root_node(tree);
         const query_source = self.get_query_source(language);
 
-        var symbols = std.ArrayList(models.Symbol){};
-        var imports = std.ArrayList([]const u8){};
+        var symbols = std.ArrayList(models.Symbol).empty;
+        var imports = std.ArrayList([]const u8).empty;
         errdefer {
             for (symbols.items) |*s| s.deinit(self.allocator);
             symbols.deinit(self.allocator);

@@ -1,4 +1,5 @@
 const std = @import("std");
+const io = @import("io.zig");
 
 pub const Filter = struct {
     allocator: std.mem.Allocator,
@@ -11,6 +12,17 @@ pub const Filter = struct {
         "vendor", "dist", "build", ".next", ".nuxt",
         ".svelte-kit", ".parcel-cache", ".turbo",
         "coverage", ".nyc_output", ".cache",
+        // Package / dependency caches that are not hidden (hidden ones like
+        // .cargo/.rustup/.npm/.m2/.gradle/.venv are already skipped by skip_hidden).
+        "venv", "site-packages", "Pods", "_build", "elm-stuff", "bower_components",
+    };
+
+    // Path fragments matched anywhere in a path. Used to prune language package
+    // caches that live under non-hidden roots (e.g. ~/go/pkg/mod) which a
+    // per-component match cannot catch without over-matching a dir literally
+    // named "go" or "pkg".
+    const builtin_skip_fragments = [_][]const u8{
+        "go/pkg/mod", "go/pkg/sumdb", "go/pkg/cache",
     };
 
     const builtin_skip_extensions = [_][]const u8{
@@ -27,7 +39,7 @@ pub const Filter = struct {
     pub fn init(allocator: std.mem.Allocator) Filter {
         return .{
             .allocator = allocator,
-            .ignore_patterns = std.ArrayList([]const u8){},
+            .ignore_patterns = std.ArrayList([]const u8).empty,
         };
     }
 
@@ -40,10 +52,7 @@ pub const Filter = struct {
         const gitignore_path = try std.fs.path.join(self.allocator, &.{ root, ".gitignore" });
         defer self.allocator.free(gitignore_path);
 
-        const file = std.fs.cwd().openFile(gitignore_path, .{}) catch return;
-        defer file.close();
-
-        const content = try file.readToEndAlloc(self.allocator, 1024 * 1024);
+        const content = io.readFileAlloc(self.allocator, gitignore_path, 1024 * 1024) catch return;
         defer self.allocator.free(content);
 
         var line_it = std.mem.splitScalar(u8, content, '\n');
@@ -57,7 +66,30 @@ pub const Filter = struct {
         }
     }
 
+    /// Whether traversal should skip descending into this directory.
+    /// Reuses the same rules as should_ignore minus the extension check.
+    pub fn should_skip_dir(self: *const Filter, path: []const u8) bool {
+        for (&builtin_skip_fragments) |frag| {
+            if (std.mem.indexOf(u8, path, frag) != null) return true;
+        }
+        var comp_it = std.mem.splitScalar(u8, path, '/');
+        while (comp_it.next()) |component| {
+            if (component.len == 0) continue;
+            if (self.skip_hidden and component[0] == '.' and component.len > 1) return true;
+            for (&builtin_skip_dirs) |dir| {
+                if (std.mem.eql(u8, component, dir)) return true;
+            }
+        }
+        for (self.ignore_patterns.items) |pattern| {
+            if (matchPattern(path, pattern)) return true;
+        }
+        return false;
+    }
+
     pub fn should_ignore(self: *const Filter, path: []const u8) bool {
+        for (&builtin_skip_fragments) |frag| {
+            if (std.mem.indexOf(u8, path, frag) != null) return true;
+        }
         var comp_it = std.mem.splitScalar(u8, path, '/');
         while (comp_it.next()) |component| {
             if (component.len == 0) continue;
