@@ -4,23 +4,26 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const flags = &.{"-std=c11", "-D_POSIX_C_SOURCE=200809L", "-D_GNU_SOURCE"};
+    const flags = &.{ "-std=c11", "-D_POSIX_C_SOURCE=200809L", "-D_GNU_SOURCE" };
 
     // ── Tree-sitter library ──────────────────────────────────────────
-    const ts_lib = b.addLibrary(.{
-        .name = "tree-sitter",
-        .root_module = b.createModule(.{
-            .target = target,
-            .optimize = optimize,
-        }),
+    // Zig 0.16: C sources, include paths and lib linkage live on the Module,
+    // and libc/libc++ linkage are Module create-options.
+    const ts_mod = b.createModule(.{
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
     });
-    ts_lib.addCSourceFile(.{
+    ts_mod.addCSourceFile(.{
         .file = b.path("vendor/tree-sitter/lib/src/lib.c"),
         .flags = flags,
     });
-    ts_lib.addIncludePath(b.path("vendor/tree-sitter/lib/include"));
-    ts_lib.addIncludePath(b.path("vendor/tree-sitter/lib/src"));
-    ts_lib.linkLibC();
+    ts_mod.addIncludePath(b.path("vendor/tree-sitter/lib/include"));
+    ts_mod.addIncludePath(b.path("vendor/tree-sitter/lib/src"));
+    const ts_lib = b.addLibrary(.{
+        .name = "tree-sitter",
+        .root_module = ts_mod,
+    });
 
     // ── Grammar sources ──────────────────────────────────────────────
     const grammars = &[_]struct { name: []const u8, path: []const u8 }{
@@ -68,20 +71,21 @@ pub fn build(b: *std.Build) void {
         .{ .name = "regex", .path = "vendor/grammars/regex/src" },
     };
 
+    const grammar_mod = b.createModule(.{
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    grammar_mod.addIncludePath(b.path("vendor/tree-sitter/lib/include"));
+    grammar_mod.addIncludePath(b.path("vendor/tree-sitter/lib/src"));
     const grammar_lib = b.addLibrary(.{
         .name = "grammars",
-        .root_module = b.createModule(.{
-            .target = target,
-            .optimize = optimize,
-        }),
+        .root_module = grammar_mod,
     });
-    grammar_lib.addIncludePath(b.path("vendor/tree-sitter/lib/include"));
-    grammar_lib.addIncludePath(b.path("vendor/tree-sitter/lib/src"));
-    grammar_lib.linkLibC();
 
     for (grammars) |g| {
         const parser_path = b.path(b.fmt("{s}/parser.c", .{g.path}));
-        grammar_lib.addCSourceFile(.{
+        grammar_mod.addCSourceFile(.{
             .file = parser_path,
             .flags = flags,
         });
@@ -90,15 +94,15 @@ pub fn build(b: *std.Build) void {
         const sc_c = b.fmt("{s}/scanner.c", .{g.path});
         const sc_cc = b.fmt("{s}/scanner.cc", .{g.path});
 
-        if (std.fs.cwd().access(sc_c, .{})) |_| {
-            grammar_lib.addCSourceFile(.{
+        if (b.build_root.handle.access(b.graph.io, sc_c, .{})) |_| {
+            grammar_mod.addCSourceFile(.{
                 .file = b.path(sc_c),
                 .flags = flags,
             });
         } else |_| {}
 
-        if (std.fs.cwd().access(sc_cc, .{})) |_| {
-            grammar_lib.addCSourceFile(.{
+        if (b.build_root.handle.access(b.graph.io, sc_cc, .{})) |_| {
+            grammar_mod.addCSourceFile(.{
                 .file = b.path(sc_cc),
                 .flags = &.{ "-std=c++11", "-D_POSIX_C_SOURCE=200809L", "-D_GNU_SOURCE" },
             });
@@ -110,18 +114,17 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("main.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
+        .link_libcpp = true,
     });
     mod.addIncludePath(b.path("vendor/tree-sitter/lib/include"));
+    mod.linkLibrary(ts_lib);
+    mod.linkLibrary(grammar_lib);
 
     const exe = b.addExecutable(.{
         .name = "codeindex",
         .root_module = mod,
     });
-
-    exe.linkLibrary(ts_lib);
-    exe.linkLibrary(grammar_lib);
-    exe.linkLibC();
-    exe.linkLibCpp();
     b.installArtifact(exe);
 
     // ── Tests ────────────────────────────────────────────────────────
@@ -129,16 +132,16 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/tests.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
+        .link_libcpp = true,
     });
     test_mod.addIncludePath(b.path("vendor/tree-sitter/lib/include"));
+    test_mod.linkLibrary(ts_lib);
+    test_mod.linkLibrary(grammar_lib);
 
     const tests = b.addTest(.{
         .root_module = test_mod,
     });
-    tests.linkLibrary(ts_lib);
-    tests.linkLibrary(grammar_lib);
-    tests.linkLibC();
-    tests.linkLibCpp();
 
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run unit tests");

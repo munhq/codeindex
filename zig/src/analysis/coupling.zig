@@ -22,7 +22,7 @@ pub const Report = struct {
 };
 
 pub fn analyze(allocator: std.mem.Allocator, exp: *explorer.Explorer) !Report {
-    var all = std.ArrayList(FileMetric){};
+    var all = std.ArrayList(FileMetric).empty;
     errdefer all.deinit(allocator);
 
     var total_edges: usize = 0;
@@ -55,13 +55,13 @@ pub fn analyze(allocator: std.mem.Allocator, exp: *explorer.Explorer) !Report {
     // (Sorted views were collected earlier; thresholds below do the filtering directly.)
 
     // God modules: top-20 by combined, must exceed thresholds
-    var gods = std.ArrayList(FileMetric){};
+    var gods = std.ArrayList(FileMetric).empty;
     errdefer gods.deinit(allocator);
-    var cores = std.ArrayList(FileMetric){};
+    var cores = std.ArrayList(FileMetric).empty;
     errdefer cores.deinit(allocator);
-    var drivers = std.ArrayList(FileMetric){};
+    var drivers = std.ArrayList(FileMetric).empty;
     errdefer drivers.deinit(allocator);
-    var isles = std.ArrayList(FileMetric){};
+    var isles = std.ArrayList(FileMetric).empty;
     errdefer isles.deinit(allocator);
 
     for (metrics) |m| {

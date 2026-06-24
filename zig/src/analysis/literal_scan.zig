@@ -248,7 +248,7 @@ fn snippet(allocator: std.mem.Allocator, line: []const u8, s: usize, e: usize) !
     }
     const raw = std.mem.trim(u8, line[start..end], " \t");
     // Escape for JSON
-    var out = std.ArrayList(u8){};
+    var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
     for (raw) |c| {
         switch (c) {
@@ -263,7 +263,7 @@ fn snippet(allocator: std.mem.Allocator, line: []const u8, s: usize, e: usize) !
 }
 
 pub fn scan(allocator: std.mem.Allocator, exp: *explorer.Explorer) ![]Finding {
-    var findings = std.ArrayList(Finding){};
+    var findings = std.ArrayList(Finding).empty;
     errdefer findings.deinit(allocator);
 
     var it = exp.outlines.iterator();

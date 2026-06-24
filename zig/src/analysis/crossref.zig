@@ -43,8 +43,8 @@ const fetch_patterns = [_][]const u8{
 };
 
 pub fn analyze(allocator: std.mem.Allocator, exp: *explorer.Explorer) !Report {
-    var backend_routes = std.ArrayList(BackendRoute){};
-    var frontend_calls = std.ArrayList(FrontendCall){};
+    var backend_routes = std.ArrayList(BackendRoute).empty;
+    var frontend_calls = std.ArrayList(FrontendCall).empty;
 
     var it = exp.outlines.iterator();
     while (it.next()) |entry| {
@@ -98,7 +98,7 @@ pub fn analyze(allocator: std.mem.Allocator, exp: *explorer.Explorer) !Report {
         }
     }
 
-    var wired = std.ArrayList(WiredRoute){};
+    var wired = std.ArrayList(WiredRoute).empty;
     var matched_b = std.AutoHashMap(usize, void).init(allocator);
     defer matched_b.deinit();
     var matched_f = std.AutoHashMap(usize, void).init(allocator);
@@ -114,11 +114,11 @@ pub fn analyze(allocator: std.mem.Allocator, exp: *explorer.Explorer) !Report {
         }
     }
 
-    var bo = std.ArrayList(BackendRoute){};
+    var bo = std.ArrayList(BackendRoute).empty;
     for (backend_routes.items, 0..) |br, i| {
         if (matched_b.get(i) == null) try bo.append(allocator, br);
     }
-    var fo = std.ArrayList(FrontendCall){};
+    var fo = std.ArrayList(FrontendCall).empty;
     for (frontend_calls.items, 0..) |fc, i| {
         if (matched_f.get(i) == null) try fo.append(allocator, fc);
     }

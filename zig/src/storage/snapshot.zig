@@ -1,6 +1,7 @@
 const std = @import("std");
 const explorer_mod = @import("../index/explorer.zig");
 const models = @import("../core/models.zig");
+const io = @import("../core/io.zig");
 
 const SNAPSHOT_VERSION: u32 = 2;
 
@@ -15,19 +16,19 @@ pub const Snapshot = struct {
             break :blk std.fmt.bufPrint(&buf, "{s}.tmp", .{path}) catch unreachable;
         };
 
-        const file = try std.fs.cwd().createFile(tmp_path, .{});
+        const file = try io.cwd().createFile(io.io(), tmp_path, .{});
         var closed = false;
-        defer if (!closed) file.close();
-        errdefer std.fs.cwd().deleteFile(tmp_path) catch {};
+        defer if (!closed) file.close(io.io());
+        errdefer io.cwd().deleteFile(io.io(), tmp_path) catch {};
 
         var buf: [65536]u8 = undefined;
-        var bw = file.writer(&buf);
+        var bw = file.writer(io.io(), &buf);
         const w = &bw.interface;
 
         // Header
         try w.print("{{\"version\":{d},\"created_at\":{d},\"file_count\":{d},\"symbol_count\":{d},", .{
             SNAPSHOT_VERSION,
-            std.time.milliTimestamp(),
+            io.milliTimestamp(),
             exp.file_count(),
             exp.symbol_count(),
         });
@@ -98,20 +99,17 @@ pub const Snapshot = struct {
         }
         try w.writeAll("]}");
         try w.flush();
-        try file.sync();
-        file.close();
+        try file.sync(io.io());
+        file.close(io.io());
         closed = true;
 
         // Rename tmp to final (atomic on POSIX)
-        try std.fs.cwd().rename(tmp_path, path);
+        try io.cwd().rename(tmp_path, io.cwd(), path, io.io());
     }
 
     /// Load explorer state from JSON snapshot.
     pub fn load(allocator: std.mem.Allocator, path: []const u8) !explorer_mod.Explorer {
-        const file = try std.fs.cwd().openFile(path, .{});
-        defer file.close();
-
-        const content = try file.readToEndAlloc(allocator, 100 * 1024 * 1024); // 100MB max
+        const content = try io.readFileAlloc(allocator, path, 100 * 1024 * 1024); // 100MB max
         defer allocator.free(content);
 
         const parsed = try std.json.parseFromSlice(std.json.Value, allocator, content, .{});
@@ -189,15 +187,15 @@ pub const Snapshot = struct {
             }
         }
 
-        // Re-populate content cache by reading files from disk
+        // Rebuild the in-RAM search indexes (trigram + word) and prime the
+        // bounded content cache by re-reading files from disk. The snapshot only
+        // persists outlines/deps, so without this search would return nothing.
         for (exp.files.items, 0..) |fp, idx| {
             const fid: u32 = @intCast(idx);
             if (exp.outlines.get(fid) == null) continue;
-            const f = std.fs.cwd().openFile(fp, .{}) catch continue;
-            defer f.close();
-            const fc = f.readToEndAlloc(allocator, 10 * 1024 * 1024) catch continue;
-            try exp.content_cache.put(fid, fc);
-            exp.cache_bytes += fc.len;
+            const fc = io.readFileAlloc(allocator, fp, 10 * 1024 * 1024) catch continue;
+            defer allocator.free(fc);
+            exp.prime_file(fid, fc) catch continue;
         }
 
         return exp;
@@ -205,17 +203,17 @@ pub const Snapshot = struct {
 
     /// Check if a snapshot is stale (files on disk changed since snapshot was created).
     pub fn is_stale(allocator: std.mem.Allocator, path: []const u8, workspace: []const u8) bool {
-        const snap_stat = std.fs.cwd().statFile(path) catch return true;
+        const snap_stat = io.cwd().statFile(io.io(), path, .{}) catch return true;
         const snap_mtime = snap_stat.mtime;
 
-        var dir = std.fs.cwd().openDir(workspace, .{ .iterate = true }) catch return true;
-        defer dir.close();
+        var dir = io.cwd().openDir(io.io(), workspace, .{ .iterate = true }) catch return true;
+        defer dir.close(io.io());
         var walker = dir.walk(allocator) catch return true;
         defer walker.deinit();
 
-        while (walker.next() catch null) |entry| {
+        while (walker.next(io.io()) catch null) |entry| {
             if (entry.kind != .file) continue;
-            const stat = entry.dir.statFile(entry.basename) catch continue;
+            const stat = entry.dir.statFile(io.io(), entry.basename, .{}) catch continue;
             if (stat.mtime > snap_mtime) return true;
         }
         return false;

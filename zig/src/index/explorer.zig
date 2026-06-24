@@ -2,6 +2,7 @@ const std = @import("std");
 const models = @import("../core/models.zig");
 const version_mod = @import("version.zig");
 const imports_resolver = @import("../resolver/imports.zig");
+const io = @import("../core/io.zig");
 
 pub const TrigramIndex = struct {
     allocator: std.mem.Allocator,
@@ -35,7 +36,7 @@ pub const TrigramIndex = struct {
                 const trigram = @as(u24, line[i]) | (@as(u24, line[i + 1]) << 8) | (@as(u24, line[i + 2]) << 16);
                 const gop = try self.map.getOrPut(trigram);
                 if (!gop.found_existing) {
-                    gop.value_ptr.* = std.ArrayList(u64){};
+                    gop.value_ptr.* = std.ArrayList(u64).empty;
                 }
                 const entry = (@as(u64, file_id) << 32) | line_num;
                 if (gop.value_ptr.items.len == 0 or gop.value_ptr.items[gop.value_ptr.items.len - 1] != entry) {
@@ -75,7 +76,7 @@ pub const TrigramIndex = struct {
                 results = try std.ArrayList(u64).initCapacity(self.allocator, locations.items.len);
                 try results.?.appendSlice(self.allocator, locations.items);
             } else {
-                var new_results = std.ArrayList(u64){};
+                var new_results = std.ArrayList(u64).empty;
                 var r_idx: usize = 0;
                 var l_idx: usize = 0;
                 const r_items = results.?.items;
@@ -134,7 +135,7 @@ pub const WordIndex = struct {
                 const gop = try self.map.getOrPut(word);
                 if (!gop.found_existing) {
                     gop.key_ptr.* = try self.allocator.dupe(u8, word);
-                    gop.value_ptr.* = std.ArrayList(u64){};
+                    gop.value_ptr.* = std.ArrayList(u64).empty;
                 }
 
                 if (gop.value_ptr.items.len == 0 or gop.value_ptr.items[gop.value_ptr.items.len - 1] != entry) {
@@ -193,7 +194,7 @@ pub const DepGraph = struct {
 
     pub fn add_dependency(self: *DepGraph, from: u32, to: u32) !void {
         const i_gop = try self.imports.getOrPut(from);
-        if (!i_gop.found_existing) i_gop.value_ptr.* = std.ArrayList(u32){};
+        if (!i_gop.found_existing) i_gop.value_ptr.* = std.ArrayList(u32).empty;
 
         for (i_gop.value_ptr.items) |id| {
             if (id == to) return;
@@ -201,7 +202,7 @@ pub const DepGraph = struct {
         try i_gop.value_ptr.append(self.allocator, to);
 
         const r_gop = try self.reverse_deps.getOrPut(to);
-        if (!r_gop.found_existing) r_gop.value_ptr.* = std.ArrayList(u32){};
+        if (!r_gop.found_existing) r_gop.value_ptr.* = std.ArrayList(u32).empty;
         try r_gop.value_ptr.append(self.allocator, from);
     }
 
@@ -273,14 +274,15 @@ pub const Explorer = struct {
     cache_bytes: usize,
     max_cache_bytes: usize,
     cache_order: std.ArrayList(u32), // LRU order: oldest at front, newest at back
+    status_message: ?[]u8 = null, // surfaced via the `status` tool (refused / capped scans)
 
     // Per-index RwLocks for concurrent read access during writes
-    trigram_lock: std.Thread.RwLock = .{},
-    word_lock: std.Thread.RwLock = .{},
-    outline_lock: std.Thread.RwLock = .{},
-    dep_lock: std.Thread.RwLock = .{},
-    content_lock: std.Thread.RwLock = .{},
-    file_lock: std.Thread.RwLock = .{},
+    trigram_lock: io.RwLock = .{},
+    word_lock: io.RwLock = .{},
+    outline_lock: io.RwLock = .{},
+    dep_lock: io.RwLock = .{},
+    content_lock: io.RwLock = .{},
+    file_lock: io.RwLock = .{},
 
     pub fn init(allocator: std.mem.Allocator) Explorer {
         return .{
@@ -288,7 +290,7 @@ pub const Explorer = struct {
             .trigrams = TrigramIndex.init(allocator),
             .words = WordIndex.init(allocator),
             .depgraph = DepGraph.init(allocator),
-            .files = std.ArrayList([]const u8){},
+            .files = std.ArrayList([]const u8).empty,
             .file_map = std.StringHashMap(u32).init(allocator),
             .outlines = std.AutoHashMap(u32, models.FileOutline).init(allocator),
             .deleted_files = std.AutoHashMap(u32, void).init(allocator),
@@ -297,7 +299,7 @@ pub const Explorer = struct {
             .content_cache = std.AutoHashMap(u32, []const u8).init(allocator),
             .cache_bytes = 0,
             .max_cache_bytes = 50 * 1024 * 1024,
-            .cache_order = std.ArrayList(u32){},
+            .cache_order = std.ArrayList(u32).empty,
         };
     }
 
@@ -322,6 +324,13 @@ pub const Explorer = struct {
         }
         self.content_cache.deinit();
         self.cache_order.deinit(self.allocator);
+        if (self.status_message) |m| self.allocator.free(m);
+    }
+
+    /// Replace the status message (owns a copy of `msg`).
+    pub fn set_status(self: *Explorer, msg: []const u8) void {
+        if (self.status_message) |old| self.allocator.free(old);
+        self.status_message = self.allocator.dupe(u8, msg) catch null;
     }
 
     /// Evict oldest cache entries until under max_cache_bytes.
@@ -424,6 +433,19 @@ pub const Explorer = struct {
 
         try self.version.record(outline.path, op);
         return file_id;
+    }
+
+    /// Rebuild the search indexes (trigram + word) and prime the bounded content
+    /// cache for an already-registered file. Used when restoring from a snapshot,
+    /// which persists outlines/deps but not the in-RAM search indexes.
+    pub fn prime_file(self: *Explorer, file_id: u32, content: []const u8) !void {
+        try self.trigrams.add_text(file_id, content);
+        try self.words.add_text(file_id, content);
+        const cached = try self.allocator.dupe(u8, content);
+        try self.content_cache.put(file_id, cached);
+        self.cache_bytes += cached.len;
+        self.cache_touch(file_id);
+        self.evict_cache();
     }
 
     pub fn remove_file(self: *Explorer, path: []const u8) !void {
@@ -545,7 +567,7 @@ pub const Explorer = struct {
     pub fn find_symbol(self: *Explorer, name: []const u8, limit: usize) ![]SymbolResult {
         self.outline_lock.lockShared();
         defer self.outline_lock.unlockShared();
-        var results = std.ArrayList(SymbolResult){};
+        var results = std.ArrayList(SymbolResult).empty;
         var it = self.outlines.iterator();
         while (it.next()) |entry| {
             const file_id = entry.key_ptr.*;
@@ -574,7 +596,7 @@ pub const Explorer = struct {
         defer self.content_lock.unlockShared();
         self.outline_lock.lockShared();
         defer self.outline_lock.unlockShared();
-        var results = std.ArrayList(ScopedSearchResult){};
+        var results = std.ArrayList(ScopedSearchResult).empty;
 
         // Get candidate file+line pairs from trigram index
         const candidates = try self.trigrams.query(query_text);
@@ -648,7 +670,7 @@ pub const Explorer = struct {
             }
         }
 
-        var results = std.ArrayList(CallerHit){};
+        var results = std.ArrayList(CallerHit).empty;
         errdefer {
             for (results.items) |h| self.allocator.free(h.line_text);
             results.deinit(self.allocator);
@@ -679,7 +701,7 @@ pub const Explorer = struct {
             if (line_text.len == 0) continue;
 
             // Detect re-export / use-statement context for the whole line.
-            const trimmed_for_ctx = std.mem.trimLeft(u8, line_text, " \t");
+            const trimmed_for_ctx = std.mem.trimStart(u8, line_text, " \t");
             const is_use_line = std.mem.startsWith(u8, trimmed_for_ctx, "use ") or
                 std.mem.startsWith(u8, trimmed_for_ctx, "pub use ") or
                 std.mem.startsWith(u8, trimmed_for_ctx, "pub(crate) use ") or
@@ -749,7 +771,7 @@ pub const Explorer = struct {
         defer self.word_lock.unlockShared();
         self.file_lock.lockShared();
         defer self.file_lock.unlockShared();
-        var results = std.ArrayList(WordHit){};
+        var results = std.ArrayList(WordHit).empty;
         const hits = self.words.search(word);
         for (hits) |entry_val| {
             const file_id = @as(u32, @intCast(entry_val >> 32));
@@ -818,11 +840,11 @@ pub const Explorer = struct {
         var visited = std.AutoHashMap(u32, u32).init(self.allocator);
         defer visited.deinit();
 
-        var queue = std.ArrayList(struct { id: u32, depth: u32 }){};
+        var queue = std.ArrayList(struct { id: u32, depth: u32 }).empty;
         defer queue.deinit(self.allocator);
 
-        var direct = std.ArrayList(u32){};
-        var all = std.ArrayList(u32){};
+        var direct = std.ArrayList(u32).empty;
+        var all = std.ArrayList(u32).empty;
         var max_d: u32 = 0;
 
         // Seed with direct reverse deps
@@ -883,7 +905,7 @@ pub const Explorer = struct {
         self.outline_lock.lockShared();
         defer self.outline_lock.unlockShared();
         // Collect all paths into a tree structure
-        var root_children = std.ArrayList(models.TreeNode){};
+        var root_children = std.ArrayList(models.TreeNode).empty;
 
         var it = self.outlines.iterator();
         while (it.next()) |entry| {

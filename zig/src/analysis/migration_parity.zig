@@ -20,8 +20,8 @@ pub const Report = struct {
 };
 
 pub fn analyze(allocator: std.mem.Allocator, exp: *explorer.Explorer) !Report {
-    var migrations = std.ArrayList(Migration){};
-    var issues = std.ArrayList(Issue){};
+    var migrations = std.ArrayList(Migration).empty;
+    var issues = std.ArrayList(Issue).empty;
 
     // Find migration files by path pattern
     var it = exp.outlines.iterator();

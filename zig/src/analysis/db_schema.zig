@@ -42,9 +42,9 @@ const struct_db_hints = [_][]const u8{
 };
 
 pub fn analyze(allocator: std.mem.Allocator, exp: *explorer.Explorer) !Report {
-    var migration_tables = std.ArrayList(TableDef){};
-    var code_tables = std.ArrayList(TableDef){};
-    var issues = std.ArrayList(SchemaIssue){};
+    var migration_tables = std.ArrayList(TableDef).empty;
+    var code_tables = std.ArrayList(TableDef).empty;
+    var issues = std.ArrayList(SchemaIssue).empty;
 
     var it = exp.outlines.iterator();
     while (it.next()) |entry| {

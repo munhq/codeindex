@@ -1,5 +1,6 @@
 const std = @import("std");
 const models = @import("../core/models.zig");
+const io = @import("../core/io.zig");
 
 const MAX_CHANGES: usize = 1000;
 
@@ -12,7 +13,7 @@ pub const VersionStore = struct {
     pub fn init(allocator: std.mem.Allocator) VersionStore {
         return .{
             .allocator = allocator,
-            .buffer = std.ArrayList(models.ChangeRecord){},
+            .buffer = std.ArrayList(models.ChangeRecord).empty,
             .seq = std.atomic.Value(u64).init(0),
         };
     }
@@ -38,7 +39,7 @@ pub const VersionStore = struct {
             .seq = new_seq,
             .path = path_dup,
             .op = op,
-            .timestamp_ms = std.time.milliTimestamp(),
+            .timestamp_ms = io.milliTimestamp(),
         });
     }
 

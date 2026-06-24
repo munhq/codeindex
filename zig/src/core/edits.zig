@@ -1,5 +1,5 @@
 const std = @import("std");
-const posix = std.posix;
+const io = @import("io.zig");
 
 pub const FileEdit = struct {
     path: []const u8,
@@ -45,10 +45,7 @@ pub const EditEngine = struct {
         const full_path = try std.fs.path.join(self.allocator, &.{ self.workspace_root, edit.path });
         defer self.allocator.free(full_path);
 
-        const file = try std.fs.cwd().openFile(full_path, .{});
-        defer file.close();
-
-        const content = try file.readToEndAlloc(self.allocator, 1024 * 1024 * 10);
+        const content = try io.readFileAlloc(self.allocator, full_path, 1024 * 1024 * 10);
         defer self.allocator.free(content);
 
         const new_content = try self.apply_line_edit(content, edit.line_start, edit.line_end, edit.new_content);
@@ -58,14 +55,7 @@ pub const EditEngine = struct {
         const new_hash = std.hash.Wyhash.hash(0, new_content);
 
         // Atomic write: .tmp then rename
-        const tmp_path = try std.mem.concat(self.allocator, u8, &.{ full_path, ".tmp" });
-        defer self.allocator.free(tmp_path);
-
-        const tmp_file = try std.fs.cwd().createFile(tmp_path, .{});
-        try tmp_file.writeAll(new_content);
-        tmp_file.close();
-
-        try std.fs.cwd().rename(tmp_path, full_path);
+        try io.writeFileAtomic(self.allocator, full_path, new_content);
 
         const replaced = if (edit.line_end >= edit.line_start) edit.line_end - edit.line_start + 1 else 0;
         const inserted = std.mem.count(u8, edit.new_content, "\n") + 1;
@@ -84,17 +74,14 @@ pub const EditEngine = struct {
         const full_path = try std.fs.path.join(self.allocator, &.{ self.workspace_root, edit.path });
         defer self.allocator.free(full_path);
 
-        const file = try std.fs.cwd().openFile(full_path, .{});
-        defer file.close();
-
-        const content = try file.readToEndAlloc(self.allocator, 1024 * 1024 * 10);
+        const content = try io.readFileAlloc(self.allocator, full_path, 1024 * 1024 * 10);
         defer self.allocator.free(content);
 
         return try self.apply_line_edit(content, edit.line_start, edit.line_end, edit.new_content);
     }
 
     pub fn apply_batch(self: *EditEngine, edits: []const FileEdit) ![]EditResult {
-        var results = std.ArrayList(EditResult){};
+        var results = std.ArrayList(EditResult).empty;
         for (edits) |edit| {
             try results.append(self.allocator, try self.apply(edit));
         }
@@ -104,7 +91,7 @@ pub const EditEngine = struct {
     fn apply_line_edit(self: *EditEngine, content: []const u8, line_start: usize, line_end: usize, new_content: []const u8) ![]u8 {
         if (line_start == 0) return error.InvalidLineStart;
         
-        var lines = std.ArrayList([]const u8){};
+        var lines = std.ArrayList([]const u8).empty;
         defer lines.deinit(self.allocator);
 
         var it = std.mem.splitScalar(u8, content, '\n');
@@ -116,7 +103,7 @@ pub const EditEngine = struct {
         if (line_end > lines.items.len) return error.LineEndOutOfBounds;
         if (line_end < line_start - 1) return error.InvalidLineRange;
 
-        var result = std.ArrayList(u8){};
+        var result = std.ArrayList(u8).empty;
         errdefer result.deinit(self.allocator);
 
         // Lines before
