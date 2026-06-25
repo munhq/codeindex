@@ -107,8 +107,23 @@ pub const Snapshot = struct {
         try io.cwd().rename(tmp_path, io.cwd(), path, io.io());
     }
 
-    /// Load explorer state from JSON snapshot.
+    /// Load explorer state from a JSON snapshot into a fresh Explorer.
     pub fn load(allocator: std.mem.Allocator, path: []const u8) !explorer_mod.Explorer {
+        var exp = explorer_mod.Explorer.init(allocator);
+        errdefer exp.deinit();
+        try load_into(&exp, allocator, path);
+        return exp;
+    }
+
+    /// Populate an already-initialized (empty) Explorer from a JSON snapshot, in
+    /// place. The MCP server holds the Explorer by pointer and keeps serving from
+    /// it while a background thread runs this — so we must fill the existing value
+    /// rather than bit-copy a new one over it (Explorer embeds RwLocks as fields,
+    /// which a struct move would corrupt). The reprime loop at the end re-reads
+    /// every file to rebuild the search indexes; it is the slow part, and running
+    /// it here — off the MCP `initialize`/`tools/list` handshake path — is the
+    /// whole point. The caller owns `exp` and deinits it on error.
+    pub fn load_into(exp: *explorer_mod.Explorer, allocator: std.mem.Allocator, path: []const u8) !void {
         const content = try io.readFileAlloc(allocator, path, 100 * 1024 * 1024); // 100MB max
         defer allocator.free(content);
 
@@ -120,9 +135,6 @@ pub const Snapshot = struct {
         // Check version
         const version = root.get("version") orelse return error.InvalidSnapshot;
         if (version.integer != SNAPSHOT_VERSION) return error.IncompatibleVersion;
-
-        var exp = explorer_mod.Explorer.init(allocator);
-        errdefer exp.deinit();
 
         // Load files
         const files_arr = (root.get("files") orelse return error.InvalidSnapshot).array;
@@ -197,8 +209,6 @@ pub const Snapshot = struct {
             defer allocator.free(fc);
             exp.prime_file(fid, fc) catch continue;
         }
-
-        return exp;
     }
 
     /// Check if a snapshot is stale (files on disk changed since snapshot was created).

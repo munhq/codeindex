@@ -168,81 +168,35 @@ pub fn main(init: std.process.Init.Minimal) !void {
     try f.load_gitignore(cfg.workspace_root);
 
     const snapshot_path = cfg.snapshot_path;
-    var exp: explorer.Explorer = undefined;
-    var loaded_from_snapshot = false;
 
-    if (refused_reason != null) {
-        exp = explorer.Explorer.init(allocator);
-    } else if (io.cwd().openFile(io.io(), snapshot_path, .{})) |file| {
-        file.close(io.io());
-        std.debug.print("Loading from snapshot...\n", .{});
-        if (storage.Snapshot.load(allocator, snapshot_path)) |loaded| {
-            exp = loaded;
-            loaded_from_snapshot = true;
-        } else |err| {
-            std.debug.print("Snapshot invalid ({s}), re-indexing fresh\n", .{@errorName(err)});
-            exp = explorer.Explorer.init(allocator);
-        }
-    } else |_| {
-        exp = explorer.Explorer.init(allocator);
-    }
+    // The live Explorer the MCP server serves from. It starts EMPTY with
+    // indexing=true; a background worker fills it (snapshot load or full scan).
+    // This is what keeps the MCP handshake instant: the expensive snapshot
+    // reprime (one disk read per file to rebuild the search indexes) and the
+    // cold index both run off the `initialize`/`tools/list` path. Query tools
+    // already block on is_indexing() until the data is ready (see http.zig).
+    var exp = explorer.Explorer.init(allocator);
     defer exp.deinit();
 
-    // Background indexing for MCP mode, blocking for watcher mode
+    // Cheap check: is there a snapshot to prefer over a full scan? (The heavy
+    // load itself happens later, on the background worker.)
+    var snapshot_exists = false;
+    if (refused_reason == null) {
+        if (io.cwd().openFile(io.io(), snapshot_path, .{})) |file| {
+            file.close(io.io());
+            snapshot_exists = true;
+        } else |_| {}
+    }
+
+    // Refused (home/root) workspace: never scan, just surface why via `status`.
     if (refused_reason) |reason| {
         var buf: [320]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "Indexing refused: {s}. This MCP server scans the directory it is launched in — pass --workspace <dir> or set CODEINDEX_WORKSPACE to a specific project.", .{reason}) catch reason;
         exp.set_status(msg);
         std.debug.print("{s}\n", .{msg});
         exp.mark_indexing_complete();
-    } else if (!loaded_from_snapshot) {
-        if (cfg.mcp_mode) {
-            const IndexCtx = struct {
-                allocator: std.mem.Allocator,
-                exp: *explorer.Explorer,
-                parser: *treesitter.Parser,
-                f: *filter.Filter,
-                workspace_root: []const u8,
-                max_file_size: u64,
-                snapshot_path: []const u8,
-            };
-            var idx_ctx = IndexCtx{
-                .allocator = allocator,
-                .exp = &exp,
-                .parser = &parser,
-                .f = &f,
-                .workspace_root = cfg.workspace_root,
-                .max_file_size = cfg.max_file_size,
-                .snapshot_path = snapshot_path,
-            };
-            const bg_thread = try std.Thread.spawn(.{}, struct {
-                fn run(ctx: *IndexCtx) void {
-                    std.debug.print("Indexing {s}...\n", .{ctx.workspace_root});
-                    const res = scanner.index_tree(ctx.allocator, ctx.exp, ctx.parser, ctx.f, ctx.workspace_root, ctx.max_file_size, .{}) catch |err| {
-                        std.debug.print("Indexing failed: {}\n", .{err});
-                        ctx.exp.mark_indexing_complete();
-                        return;
-                    };
-                    if (res.capped) ctx.exp.set_status("Workspace too large — indexing stopped at the safety cap; results are partial. Narrow the scope with --workspace or CODEINDEX_WORKSPACE.");
-                    ctx.exp.mark_indexing_complete();
-                    std.debug.print("Indexed {d} files, {d} symbols\n", .{ ctx.exp.file_count(), ctx.exp.symbol_count() });
-                    storage.Snapshot.save(ctx.exp, ctx.snapshot_path) catch {};
-                }
-            }.run, .{&idx_ctx});
-            defer bg_thread.join();
-        } else {
-            std.debug.print("Indexing {s}...\n", .{cfg.workspace_root});
-            const res = try scanner.index_tree(allocator, &exp, &parser, &f, cfg.workspace_root, cfg.max_file_size, .{});
-            if (res.capped) exp.set_status("Workspace too large — indexing stopped at the safety cap; results are partial. Narrow the scope with --workspace or CODEINDEX_WORKSPACE.");
-            exp.mark_indexing_complete();
-            std.debug.print("Indexed {d} files, {d} symbols\n", .{ exp.file_count(), exp.symbol_count() });
-            try storage.Snapshot.save(&exp, snapshot_path);
-        }
-    } else {
-        exp.mark_indexing_complete();
     }
 
-    // Start watcher (background thread for MCP, foreground for standalone)
     var watch_running = true;
     var watch_ctx = WatchCtx{
         .allocator = allocator,
@@ -254,22 +208,86 @@ pub fn main(init: std.process.Init.Minimal) !void {
         .running = &watch_running,
     };
 
-    // Never start a recursive filesystem watch on a refused (home/root) workspace.
-    const start_watcher = refused_reason == null;
+    const BuildCtx = struct {
+        allocator: std.mem.Allocator,
+        exp: *explorer.Explorer,
+        parser: *treesitter.Parser,
+        f: *filter.Filter,
+        workspace_root: []const u8,
+        max_file_size: u64,
+        snapshot_path: []const u8,
+        snapshot_exists: bool,
+        watch_ctx: *WatchCtx,
+        start_watcher: bool,
+
+        // Fill `exp` in place: prefer the snapshot, fall back to a full scan.
+        fn build(ctx: *@This()) void {
+            var loaded_ok = false;
+            if (ctx.snapshot_exists) {
+                std.debug.print("Loading from snapshot...\n", .{});
+                if (storage.Snapshot.load_into(ctx.exp, ctx.allocator, ctx.snapshot_path)) |_| {
+                    loaded_ok = true;
+                } else |err| {
+                    std.debug.print("Snapshot load failed ({s}), indexing fresh\n", .{@errorName(err)});
+                }
+            }
+            // Only scan if the snapshot didn't load AND nothing was partially
+            // populated — guards against duplicate entries on a mid-load error.
+            if (!loaded_ok and ctx.exp.file_count() == 0) {
+                std.debug.print("Indexing {s}...\n", .{ctx.workspace_root});
+                if (scanner.index_tree(ctx.allocator, ctx.exp, ctx.parser, ctx.f, ctx.workspace_root, ctx.max_file_size, .{})) |res| {
+                    if (res.capped) ctx.exp.set_status("Workspace too large — indexing stopped at the safety cap; results are partial. Narrow the scope with --workspace or CODEINDEX_WORKSPACE.");
+                    storage.Snapshot.save(ctx.exp, ctx.snapshot_path) catch {};
+                    std.debug.print("Indexed {d} files, {d} symbols\n", .{ ctx.exp.file_count(), ctx.exp.symbol_count() });
+                } else |err| {
+                    std.debug.print("Indexing failed: {}\n", .{err});
+                }
+            }
+            ctx.exp.mark_indexing_complete();
+        }
+
+        // Background worker: build the index, THEN take over file-watching.
+        // Watching starts only after the build so the lock-free snapshot restore
+        // never races a concurrent watcher write into the same Explorer.
+        fn build_then_watch(ctx: *@This()) void {
+            ctx.build();
+            if (ctx.start_watcher) watch_loop(ctx.watch_ctx);
+        }
+    };
+
+    var build_ctx = BuildCtx{
+        .allocator = allocator,
+        .exp = &exp,
+        .parser = &parser,
+        .f = &f,
+        .workspace_root = cfg.workspace_root,
+        .max_file_size = cfg.max_file_size,
+        .snapshot_path = snapshot_path,
+        .snapshot_exists = snapshot_exists,
+        .watch_ctx = &watch_ctx,
+        .start_watcher = refused_reason == null,
+    };
 
     if (cfg.mcp_mode) {
-        var watch_thread: ?std.Thread = null;
-        if (start_watcher) watch_thread = try std.Thread.spawn(.{}, watch_loop, .{&watch_ctx});
+        // Build + watch on a background thread so `initialize` is answered NOW,
+        // not after a cold index / snapshot reprime (which can exceed the MCP
+        // client's connection timeout on large or cold-cache workspaces).
+        var worker: ?std.Thread = null;
+        if (refused_reason == null) worker = try std.Thread.spawn(.{}, BuildCtx.build_then_watch, .{&build_ctx});
         defer {
             watch_running = false;
-            if (watch_thread) |t| t.join();
+            if (worker) |t| t.join();
         }
 
         var srv = server.Server.init(allocator, &exp);
         srv.with_parser(&parser, &f);
         try srv.run_mcp();
-    } else if (start_watcher) {
-        std.debug.print("\nWatcher active. Press Ctrl+C to stop.\n", .{});
-        watch_loop(&watch_ctx);
+    } else {
+        // Standalone: build synchronously, then watch in the foreground.
+        if (refused_reason == null) {
+            build_ctx.build();
+            std.debug.print("\nWatcher active. Press Ctrl+C to stop.\n", .{});
+            watch_loop(&watch_ctx);
+        }
     }
 }
