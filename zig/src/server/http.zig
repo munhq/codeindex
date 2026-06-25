@@ -37,18 +37,19 @@ pub const Server = struct {
     }
 
     pub fn run_mcp(self: *Server) !void {
-        const stdin_file = io.stdin();
         const stdout_file = io.stdout();
 
-        var rbuf: [256 * 1024]u8 = undefined;
-        var fr = stdin_file.reader(io.io(), &rbuf);
-
+        // Read stdin with a direct blocking syscall on fd 0 rather than through
+        // the std.Io.Threaded backend. The index build + file watcher run that
+        // backend concurrently on another thread; sharing it for the MCP read
+        // loop starves/deadlocks the handshake. A raw read is the correct, fully
+        // decoupled primitive for a line-oriented stdio server.
         var read_buf: [1024 * 1024]u8 = undefined;
         var carry = std.ArrayList(u8).empty;
         defer carry.deinit(self.allocator);
 
         while (true) {
-            const n = fr.interface.readSliceShort(&read_buf) catch break;
+            const n = std.posix.read(std.posix.STDIN_FILENO, &read_buf) catch break;
             if (n == 0) break; // EOF
 
             try carry.appendSlice(self.allocator, read_buf[0..n]);
