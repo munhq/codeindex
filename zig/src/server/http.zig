@@ -14,6 +14,8 @@ const manifest_compliance = @import("../analysis/manifest_compliance.zig");
 const literal_scan = @import("../analysis/literal_scan.zig");
 const coupling = @import("../analysis/coupling.zig");
 const cycles = @import("../analysis/cycles.zig");
+const duplication = @import("../analysis/duplication.zig");
+const clones = @import("../analysis/clones.zig");
 const plan_change = @import("../analysis/plan_change.zig");
 
 const treesitter = @import("../parser/treesitter.zig");
@@ -116,7 +118,12 @@ pub const Server = struct {
             const total_lines = self.exp.total_line_count();
             const naive_tokens = total_bytes / 4; // ~4 chars per token estimate
             const outline_tokens = self.exp.symbol_count() * 10; // ~10 tokens per symbol in outline
-            const savings_pct: u64 = if (naive_tokens > 0) 100 - (outline_tokens * 100 / naive_tokens) else 0;
+            // (naive - outline) / naive. Compute the saved delta directly so small
+            // ratios don't truncate to 0 and report a bogus 100%.
+            const savings_pct: u64 = if (naive_tokens > outline_tokens)
+                (naive_tokens - outline_tokens) * 100 / naive_tokens
+            else
+                0;
 
             try w.print("{{\"files\":{d},\"symbols\":{d},\"indexing\":{s},\"latest_seq\":{d},\"total_lines\":{d},\"total_bytes\":{d},\"naive_tokens\":{d},\"outline_tokens\":{d},\"savings_pct\":{d},\"watcher\":true", .{
                 self.exp.file_count(),
@@ -187,16 +194,26 @@ pub const Server = struct {
         } else if (std.mem.eql(u8, tool, "plan_change")) {
             const symbol = get_string_arg(args, "symbol");
             const file = get_string_arg(args, "file");
+            const fmt = get_string_arg(args, "format") orelse "";
+            const want_json = std.mem.eql(u8, fmt, "json");
             if (symbol == null and file == null) {
                 try w.writeAll("Provide `symbol` or `file`.");
             } else if (symbol != null and symbol.?.len > 0) {
                 var plan = try plan_change.plan_symbol(self.allocator, self.exp, symbol.?);
                 defer plan_change.free_symbol_plan(self.allocator, &plan);
-                try render_symbol_plan(w, &plan);
+                if (want_json) {
+                    try render_symbol_plan_json(w, &plan);
+                } else {
+                    try render_symbol_plan(w, &plan);
+                }
             } else {
                 var plan = try plan_change.plan_file(self.allocator, self.exp, file.?);
                 defer plan_change.free_file_plan(self.allocator, &plan);
-                try render_file_plan(w, &plan);
+                if (want_json) {
+                    try render_file_plan_json(w, &plan);
+                } else {
+                    try render_file_plan(w, &plan);
+                }
             }
         } else if (std.mem.eql(u8, tool, "find_callers")) {
             const name = get_string_arg(args, "name") orelse "";
@@ -238,16 +255,19 @@ pub const Server = struct {
         } else if (std.mem.eql(u8, tool, "get_outline")) {
             const path = get_string_arg(args, "path") orelse "";
             if (self.exp.get_outline(path)) |outline| {
-                try w.print("{{\"path\":\"{s}\",\"language\":\"{s}\",\"line_count\":{d},\"byte_size\":{d},\"symbols\":[", .{
-                    outline.path,
+                try w.writeAll("{\"path\":");
+                try write_json_string(w, outline.path);
+                try w.print(",\"language\":\"{s}\",\"line_count\":{d},\"byte_size\":{d},\"symbols\":[", .{
                     @tagName(outline.language),
                     outline.line_count,
                     outline.byte_size,
                 });
                 for (outline.symbols, 0..) |sym, i| {
                     if (i > 0) try w.writeAll(",");
-                    try w.print("{{\"name\":\"{s}\",\"kind\":\"{s}\",\"line_start\":{d},\"line_end\":{d}}}", .{
-                        sym.name, sym.kind.as_str(), sym.line_start, sym.line_end,
+                    try w.writeAll("{\"name\":");
+                    try write_json_string(w, sym.name);
+                    try w.print(",\"kind\":\"{s}\",\"line_start\":{d},\"line_end\":{d}}}", .{
+                        sym.kind.as_str(), sym.line_start, sym.line_end,
                     });
                 }
                 try w.writeAll("]}");
@@ -266,9 +286,11 @@ pub const Server = struct {
             try w.writeAll("[");
             for (tree, 0..) |node, i| {
                 if (i > 0) try w.writeAll(",");
-                try w.print("{{\"name\":\"{s}\",\"path\":\"{s}\",\"symbols\":{d},\"language\":\"{s}\",\"lines\":{d}}}", .{
-                    node.name,
-                    node.path,
+                try w.writeAll("{\"name\":");
+                try write_json_string(w, node.name);
+                try w.writeAll(",\"path\":");
+                try write_json_string(w, node.path);
+                try w.print(",\"symbols\":{d},\"language\":\"{s}\",\"lines\":{d}}}", .{
                     node.symbol_count orelse 0,
                     if (node.language) |l| @tagName(l) else "unknown",
                     node.line_count orelse 0,
@@ -396,16 +418,18 @@ pub const Server = struct {
             const analysis_type = get_string_arg(args, "analysis") orelse "";
             if (std.mem.eql(u8, analysis_type, "security")) {
                 const findings = try security_scan.scan(self.allocator, self.exp);
-                defer self.allocator.free(findings);
+                defer security_scan.free_findings(self.allocator, findings);
                 const summary = security_scan.summarize(findings);
                 try w.print("{{\"total\":{d},\"critical\":{d},\"high\":{d},\"medium\":{d},\"low\":{d},\"findings\":[", .{
                     summary.total, summary.critical, summary.high, summary.medium, summary.low,
                 });
                 for (findings, 0..) |f, fi| {
                     if (fi > 0) try w.writeAll(",");
-                    try w.print("{{\"file\":\"{s}\",\"line\":{d},\"rule\":\"{s}\",\"severity\":\"{s}\"}}", .{
+                    try w.print("{{\"file\":\"{s}\",\"line\":{d},\"rule\":\"{s}\",\"severity\":\"{s}\",\"line_text\":", .{
                         f.file, f.line, f.rule, f.severity.as_str(),
                     });
+                    try write_json_string(w, f.line_text);
+                    try w.writeAll("}");
                 }
                 try w.writeAll("]}");
             } else if (std.mem.eql(u8, analysis_type, "dead_code")) {
@@ -414,9 +438,14 @@ pub const Server = struct {
                 try w.print("{{\"dead_count\":{d},\"symbols\":[", .{symbols.len});
                 for (symbols, 0..) |s, si| {
                     if (si > 0) try w.writeAll(",");
-                    try w.print("{{\"name\":\"{s}\",\"kind\":\"{s}\",\"file\":\"{s}\",\"line\":{d}}}", .{
-                        s.name, s.kind.as_str(), s.file, s.line,
-                    });
+                    try w.writeAll("{\"name\":");
+                    try write_json_string(w, s.name);
+                    try w.print(",\"kind\":\"{s}\",", .{s.kind.as_str()});
+                    try w.writeAll("\"file\":");
+                    try write_json_string(w, s.file);
+                    try w.print(",\"line\":{d},\"reason\":", .{s.line});
+                    try write_json_string(w, s.reason);
+                    try w.writeAll("}");
                 }
                 try w.writeAll("]}");
             } else if (std.mem.eql(u8, analysis_type, "unwrap_audit")) {
@@ -425,9 +454,13 @@ pub const Server = struct {
                 try w.print("{{\"total\":{d},\"findings\":[", .{findings.len});
                 for (findings, 0..) |f, fi| {
                     if (fi > 0) try w.writeAll(",");
-                    try w.print("{{\"file\":\"{s}\",\"line\":{d},\"kind\":\"{s}\",\"severity\":\"{s}\"}}", .{
+                    try w.print("{{\"file\":\"{s}\",\"line\":{d},\"kind\":\"{s}\",\"severity\":\"{s}\",\"line_text\":", .{
                         f.file, f.line, f.kind.as_str(), f.severity.as_str(),
                     });
+                    try write_json_string(w, f.line_text);
+                    try w.writeAll(",\"scope\":");
+                    try write_json_string(w, f.scope orelse "");
+                    try w.writeAll("}");
                 }
                 try w.writeAll("]}");
             } else if (std.mem.eql(u8, analysis_type, "test_coverage")) {
@@ -436,8 +469,8 @@ pub const Server = struct {
                 try w.print("{{\"modules\":[", .{});
                 for (modules, 0..) |m, mi| {
                     if (mi > 0) try w.writeAll(",");
-                    try w.print("{{\"file\":\"{s}\",\"symbols\":{d},\"tests\":{d},\"coverage\":\"{s}\"}}", .{
-                        m.file, m.total_symbols, m.test_symbols, m.coverage_level.as_str(),
+                    try w.print("{{\"file\":\"{s}\",\"symbols\":{d},\"public\":{d},\"tests\":{d},\"referenced\":{d},\"coverage\":\"{s}\"}}", .{
+                        m.file, m.total_symbols, m.public_symbols, m.test_symbols, m.referenced_in_tests, m.coverage_level.as_str(),
                     });
                 }
                 try w.writeAll("]}");
@@ -447,9 +480,11 @@ pub const Server = struct {
                 try w.print("{{\"violations\":{d},\"details\":[", .{violations.len});
                 for (violations, 0..) |v, vi| {
                     if (vi > 0) try w.writeAll(",");
-                    try w.print("{{\"from\":\"{s}\",\"to\":\"{s}\",\"from_layer\":\"{s}\",\"to_layer\":\"{s}\"}}", .{
+                    try w.print("{{\"from\":\"{s}\",\"to\":\"{s}\",\"from_layer\":\"{s}\",\"to_layer\":\"{s}\",\"description\":", .{
                         v.from_file, v.to_file, v.from_layer, v.to_layer,
                     });
+                    try write_json_string(w, v.description);
+                    try w.writeAll("}");
                 }
                 try w.writeAll("]}");
             } else if (std.mem.eql(u8, analysis_type, "crossref")) {
@@ -457,34 +492,123 @@ pub const Server = struct {
                 defer self.allocator.free(report.wired);
                 defer self.allocator.free(report.backend_only);
                 defer self.allocator.free(report.frontend_only);
-                try w.print("{{\"wired\":{d},\"backend_only\":{d},\"frontend_only\":{d}}}", .{
+                try w.print("{{\"wired\":{d},\"backend_only\":{d},\"frontend_only\":{d},\"backend_only_routes\":[", .{
                     report.wired_count, report.backend_only_count, report.frontend_only_count,
                 });
+                const xr_cap: usize = 200;
+                const xbn = @min(report.backend_only.len, xr_cap);
+                for (report.backend_only[0..xbn], 0..) |r, i| {
+                    if (i > 0) try w.writeAll(",");
+                    try w.writeAll("{\"path\":");
+                    try write_json_string(w, r.path);
+                    try w.print(",\"method\":\"{s}\",\"file\":", .{r.method});
+                    try write_json_string(w, r.file);
+                    try w.print(",\"line\":{d}}}", .{r.line});
+                }
+                try w.writeAll("],\"frontend_only_calls\":[");
+                const xfn = @min(report.frontend_only.len, xr_cap);
+                for (report.frontend_only[0..xfn], 0..) |c, i| {
+                    if (i > 0) try w.writeAll(",");
+                    try w.writeAll("{\"url\":");
+                    try write_json_string(w, c.url);
+                    try w.print(",\"method\":\"{s}\",\"file\":", .{c.method});
+                    try write_json_string(w, c.file);
+                    try w.print(",\"line\":{d}}}", .{c.line});
+                }
+                try w.writeAll("]}");
             } else if (std.mem.eql(u8, analysis_type, "type_drift")) {
                 const report = try type_drift.analyze(self.allocator, self.exp);
                 defer self.allocator.free(report.mismatches);
                 defer self.allocator.free(report.missing_fields);
-                try w.print("{{\"types_found\":{d},\"mismatches\":{d},\"missing_fields\":{d}}}", .{
+                try w.print("{{\"types_found\":{d},\"mismatches\":{d},\"missing_fields\":{d},\"mismatch_details\":[", .{
                     report.types_found, report.mismatches.len, report.missing_fields.len,
                 });
+                const td_cap: usize = 200;
+                const tmn = @min(report.mismatches.len, td_cap);
+                for (report.mismatches[0..tmn], 0..) |m, i| {
+                    if (i > 0) try w.writeAll(",");
+                    try w.writeAll("{\"type_name\":");
+                    try write_json_string(w, m.type_name);
+                    try w.writeAll(",\"field\":");
+                    try write_json_string(w, m.field);
+                    try w.writeAll(",\"lang_a\":");
+                    try write_json_string(w, m.lang_a);
+                    try w.writeAll(",\"type_a\":");
+                    try write_json_string(w, m.type_a);
+                    try w.writeAll(",\"lang_b\":");
+                    try write_json_string(w, m.lang_b);
+                    try w.writeAll(",\"type_b\":");
+                    try write_json_string(w, m.type_b);
+                    try w.writeAll("}");
+                }
+                try w.writeAll("],\"missing_field_details\":[");
+                const tfn = @min(report.missing_fields.len, td_cap);
+                for (report.missing_fields[0..tfn], 0..) |m, i| {
+                    if (i > 0) try w.writeAll(",");
+                    try w.writeAll("{\"type_name\":");
+                    try write_json_string(w, m.type_name);
+                    try w.writeAll(",\"field\":");
+                    try write_json_string(w, m.field);
+                    try w.writeAll(",\"present_in\":");
+                    try write_json_string(w, m.present_in);
+                    try w.writeAll(",\"missing_from\":");
+                    try write_json_string(w, m.missing_from);
+                    try w.writeAll("}");
+                }
+                try w.writeAll("]}");
             } else if (std.mem.eql(u8, analysis_type, "db_schema")) {
                 const report = try db_schema.analyze(self.allocator, self.exp);
                 defer self.allocator.free(report.issues);
-                try w.print("{{\"tables_in_migrations\":{d},\"tables_in_code\":{d},\"issues\":{d}}}", .{
+                try w.print("{{\"tables_in_migrations\":{d},\"tables_in_code\":{d},\"issues\":{d},\"issue_details\":[", .{
                     report.tables_in_migrations, report.tables_in_code, report.issues.len,
                 });
+                const ds_cap: usize = 200;
+                const dsn = @min(report.issues.len, ds_cap);
+                for (report.issues[0..dsn], 0..) |iss, i| {
+                    if (i > 0) try w.writeAll(",");
+                    try w.writeAll("{\"table\":");
+                    try write_json_string(w, iss.table);
+                    try w.print(",\"issue_type\":\"{s}\",\"description\":", .{@tagName(iss.issue_type)});
+                    try write_json_string(w, iss.description);
+                    try w.writeAll(",\"file\":");
+                    try write_json_string(w, iss.file);
+                    try w.print(",\"line\":{d}}}", .{iss.line});
+                }
+                try w.writeAll("]}");
             } else if (std.mem.eql(u8, analysis_type, "migration_parity")) {
                 const report = try migration_parity.analyze(self.allocator, self.exp);
                 defer self.allocator.free(report.issues);
-                try w.print("{{\"total_migrations\":{d},\"issues\":{d}}}", .{
+                try w.print("{{\"total_migrations\":{d},\"issues\":{d},\"issue_details\":[", .{
                     report.total_migrations, report.issues.len,
                 });
+                const mp_cap: usize = 200;
+                const mpn = @min(report.issues.len, mp_cap);
+                for (report.issues[0..mpn], 0..) |iss, i| {
+                    if (i > 0) try w.writeAll(",");
+                    try w.print("{{\"issue_type\":\"{s}\",\"description\":", .{@tagName(iss.issue_type)});
+                    try write_json_string(w, iss.description);
+                    try w.writeAll(",\"file\":");
+                    try write_json_string(w, iss.file);
+                    try w.writeAll("}");
+                }
+                try w.writeAll("]}");
             } else if (std.mem.eql(u8, analysis_type, "manifest_compliance")) {
                 const report = try manifest_compliance.analyze(self.allocator, self.exp);
                 defer self.allocator.free(report.violations);
-                try w.print("{{\"manifests_checked\":{d},\"violations\":{d}}}", .{
+                try w.print("{{\"manifests_checked\":{d},\"violations\":{d},\"violation_details\":[", .{
                     report.manifests_checked, report.violations.len,
                 });
+                const mc_cap: usize = 200;
+                const mcn = @min(report.violations.len, mc_cap);
+                for (report.violations[0..mcn], 0..) |v, i| {
+                    if (i > 0) try w.writeAll(",");
+                    try w.print("{{\"violation_type\":\"{s}\",\"file\":", .{v.violation_type.as_str()});
+                    try write_json_string(w, v.file);
+                    try w.print(",\"line\":{d},\"description\":", .{v.line});
+                    try write_json_string(w, v.description);
+                    try w.writeAll("}");
+                }
+                try w.writeAll("]}");
             } else if (std.mem.eql(u8, analysis_type, "literal_scan")) {
                 const findings = try literal_scan.scan(self.allocator, self.exp);
                 defer literal_scan.free_findings(self.allocator, findings);
@@ -558,8 +682,111 @@ pub const Server = struct {
                     try w.writeAll("]}");
                 }
                 try w.print("],\"truncated\":{s}}}", .{if (report.cycles.len > max_emit) "true" else "false"});
+            } else if (std.mem.eql(u8, analysis_type, "duplication")) {
+                var report = try duplication.analyze(self.allocator, self.exp);
+                defer report.deinit(self.allocator);
+                try w.print("{{\"duplicate_names\":{d},\"clusters\":[", .{report.total_clusters});
+                const top: usize = 50;
+                const n = @min(report.clusters.len, top);
+                for (report.clusters[0..n], 0..) |c, i| {
+                    if (i > 0) try w.writeAll(",");
+                    try w.writeAll("{\"name\":");
+                    try write_json_string(w, c.name);
+                    try w.print(",\"kind\":\"{s}\",\"count\":{d},\"files\":[", .{ c.kind.as_str(), c.files.len });
+                    for (c.files, 0..) |f, j| {
+                        if (j >= 8) {
+                            try w.writeAll(",\"...\"");
+                            break;
+                        }
+                        if (j > 0) try w.writeAll(",");
+                        try write_json_string(w, f);
+                    }
+                    try w.writeAll("]}");
+                }
+                try w.print("],\"truncated\":{s}}}", .{if (report.clusters.len > top) "true" else "false"});
+            } else if (std.mem.eql(u8, analysis_type, "clones")) {
+                var report = try clones.analyze(self.allocator, self.exp);
+                defer report.deinit(self.allocator);
+                try w.print("{{\"clone_groups\":{d},\"cloned_functions\":{d},\"groups\":[", .{
+                    report.total_groups, report.total_cloned_fns,
+                });
+                const top: usize = 40;
+                const n = @min(report.groups.len, top);
+                for (report.groups[0..n], 0..) |g, i| {
+                    if (i > 0) try w.writeAll(",");
+                    try w.print("{{\"lines\":{d},\"count\":{d},\"functions\":[", .{ g.lines, g.members.len });
+                    for (g.members, 0..) |m, j| {
+                        if (j >= 8) {
+                            try w.writeAll(",\"...\"");
+                            break;
+                        }
+                        if (j > 0) try w.writeAll(",");
+                        try w.writeAll("{\"name\":");
+                        try write_json_string(w, m.name);
+                        try w.writeAll(",\"file\":");
+                        try write_json_string(w, m.file);
+                        try w.print(",\"line\":{d}}}", .{m.line});
+                    }
+                    try w.writeAll("]}");
+                }
+                try w.print("],\"truncated\":{s}}}", .{if (report.groups.len > top) "true" else "false"});
+            } else if (std.mem.eql(u8, analysis_type, "health")) {
+                // One-call repo health: structure + risk + waste, with a verdict.
+                const dead = try dead_code.find_dead_code(self.allocator, self.exp);
+                defer self.allocator.free(dead);
+                const unwraps = try unwrap_audit.audit(self.allocator, self.exp);
+                defer self.allocator.free(unwraps);
+                const sec_findings = try security_scan.scan(self.allocator, self.exp);
+                defer security_scan.free_findings(self.allocator, sec_findings);
+                const sec = security_scan.summarize(sec_findings);
+                var cyc = try cycles.analyze(self.allocator, self.exp);
+                defer cycles.free_report(self.allocator, &cyc);
+                var coup = try coupling.analyze(self.allocator, self.exp);
+                defer coupling.free_report(self.allocator, &coup);
+                var dup = try duplication.analyze(self.allocator, self.exp);
+                defer dup.deinit(self.allocator);
+                var cln = try clones.analyze(self.allocator, self.exp);
+                defer cln.deinit(self.allocator);
+
+                try w.print("{{\"files\":{d},\"symbols\":{d},\"dependency_edges\":{d}," ++
+                    "\"security_critical\":{d},\"security_total\":{d},\"panic_sites\":{d}," ++
+                    "\"circular_deps\":{d},\"god_modules\":{d},\"dead_symbols\":{d}," ++
+                    "\"duplicate_names\":{d},\"clone_groups\":{d},\"cloned_functions\":{d},", .{
+                    self.exp.file_count(),        self.exp.symbol_count(), coup.total_edges,
+                    sec.critical,                 sec.total,               unwraps.len,
+                    cyc.cycles.len,               coup.god_modules.len,    dead.len,
+                    dup.total_clusters,           cln.total_groups,        cln.total_cloned_fns,
+                });
+                // Top reinvented/duplicated definitions — the "are we reusing?" answer.
+                try w.writeAll("\"top_duplication\":[");
+                const dn = @min(dup.clusters.len, 8);
+                for (dup.clusters[0..dn], 0..) |c, i| {
+                    if (i > 0) try w.writeAll(",");
+                    try w.writeAll("{\"name\":");
+                    try write_json_string(w, c.name);
+                    try w.print(",\"defined_in_files\":{d}}}", .{c.files.len});
+                }
+                // Top god-modules — the "is structure ok?" answer.
+                // Biggest copy-paste clones — the "did we paste this?" answer.
+                try w.writeAll("],\"top_clones\":[");
+                const cn = @min(cln.groups.len, 8);
+                for (cln.groups[0..cn], 0..) |g, i| {
+                    if (i > 0) try w.writeAll(",");
+                    try w.print("{{\"lines\":{d},\"copies\":{d},\"example\":", .{ g.lines, g.members.len });
+                    try write_json_string(w, g.members[0].name);
+                    try w.writeAll("}");
+                }
+                try w.writeAll("],\"top_god_modules\":[");
+                const gn = @min(coup.god_modules.len, 8);
+                for (coup.god_modules[0..gn], 0..) |m, i| {
+                    if (i > 0) try w.writeAll(",");
+                    try w.writeAll("{\"file\":");
+                    try write_json_string(w, m.file);
+                    try w.print(",\"fan_in\":{d},\"fan_out\":{d}}}", .{ m.fan_in, m.fan_out });
+                }
+                try w.writeAll("]}");
             } else {
-                try w.print("Unknown analysis: {s}. Available: security, dead_code, unwrap_audit, test_coverage, architecture, crossref, type_drift, db_schema, migration_parity, manifest_compliance, literal_scan, coupling, cycles", .{analysis_type});
+                try w.print("Unknown analysis: {s}. Available: security, dead_code, unwrap_audit, test_coverage, architecture, crossref, type_drift, db_schema, migration_parity, manifest_compliance, literal_scan, coupling, cycles, duplication, clones, health", .{analysis_type});
             }
         } else if (std.mem.eql(u8, tool, "read_file")) {
             const path = get_string_arg(args, "path") orelse "";
@@ -720,7 +947,7 @@ pub const Server = struct {
             // index_workspace
             "{\"name\":\"index_workspace\",\"description\":\"Index or re-index a workspace directory\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Directory path to index\"}},\"required\":[\"path\"]}}",
             // analyze
-            "{\"name\":\"analyze\",\"description\":\"Run code analysis. Types: security, dead_code, unwrap_audit, test_coverage, architecture, crossref, type_drift, db_schema, migration_parity, manifest_compliance, literal_scan, coupling, cycles\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"analysis\":{\"type\":\"string\",\"description\":\"Analysis type: security, dead_code, unwrap_audit, test_coverage, architecture, crossref, type_drift, db_schema, migration_parity, manifest_compliance, literal_scan, coupling, cycles\"}},\"required\":[\"analysis\"]}}",
+            "{\"name\":\"analyze\",\"description\":\"Run code analysis. Types: security, dead_code, unwrap_audit, test_coverage, architecture, crossref, type_drift, db_schema, migration_parity, manifest_compliance, literal_scan, coupling, cycles, duplication, clones, health\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"analysis\":{\"type\":\"string\",\"description\":\"Analysis type: security, dead_code, unwrap_audit, test_coverage, architecture, crossref, type_drift, db_schema, migration_parity, manifest_compliance, literal_scan, coupling, cycles, duplication, clones, health\"}},\"required\":[\"analysis\"]}}",
             // read_file
             "{\"name\":\"read_file\",\"description\":\"Read file contents with optional line range. Returns content with line numbers.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"File path relative to workspace root\"},\"start_line\":{\"type\":\"integer\",\"description\":\"Start line (1-based, default 1)\"},\"end_line\":{\"type\":\"integer\",\"description\":\"End line (inclusive, default: end of file)\"}},\"required\":[\"path\"]}}",
             // read_symbol
@@ -821,6 +1048,31 @@ fn render_file_plan(w: anytype, plan: *plan_change.FilePlan) !void {
     try render_heads_up(w, plan.file_role, plan.literals);
 }
 
+fn render_file_plan_json(w: anytype, plan: *plan_change.FilePlan) !void {
+    try w.writeAll("{\"target\":");
+    try write_json_string(w, plan.target_path);
+    try w.print(",\"file_role\":\"{s}\",\"fan_in\":{d},\"fan_out\":{d},\"direct\":{d},\"transitive\":{d},\"max_depth\":{d},\"direct_files\":[", .{
+        @tagName(plan.file_role), plan.fan_in, plan.fan_out, plan.direct_impact.len, plan.transitive_impact.len, plan.max_depth_reached,
+    });
+    const cap: usize = 40;
+    const dn = @min(plan.direct_impact.len, cap);
+    for (plan.direct_impact[0..dn], 0..) |f, i| {
+        if (i > 0) try w.writeAll(",");
+        try write_json_string(w, f);
+    }
+    try w.writeAll("]}");
+}
+
+fn render_symbol_plan_json(w: anytype, plan: *plan_change.SymbolPlan) !void {
+    try w.writeAll("{\"target\":");
+    try write_json_string(w, plan.target_name);
+    try w.print(",\"file_role\":\"{s}\",\"fan_in\":{d},\"fan_out\":{d},\"callers_total\":{d},\"direct\":{d},\"transitive\":{d},\"max_depth\":{d},\"primary_file\":", .{
+        @tagName(plan.file_role), plan.fan_in, plan.fan_out, plan.callers_total, plan.direct_impact.len, plan.transitive_impact.len, plan.max_depth_reached,
+    });
+    try write_json_string(w, plan.primary_file orelse "");
+    try w.writeAll("}");
+}
+
 fn render_literals(w: anytype, l: plan_change.LiteralSummary) !void {
     const total = l.urls + l.localhosts + l.ips + l.secrets + l.magic_ports + l.abs_paths + l.todos;
     if (total == 0) return;
@@ -896,7 +1148,7 @@ fn get_int_arg(args: ?std.json.Value, key: []const u8) ?usize {
     };
 }
 
-fn write_json_string(writer: anytype, s: []const u8) !void {
+pub fn write_json_string(writer: anytype, s: []const u8) !void {
     try writer.writeByte('"');
     for (s) |c| {
         switch (c) {
