@@ -13,9 +13,9 @@ const io = @import("src/core/io.zig");
 const VERSION = "0.1.0";
 
 const project_markers = [_][]const u8{
-    ".git",         "build.zig",      "package.json", "go.mod",
-    "Cargo.toml",   "pyproject.toml", "deno.json",    "pom.xml",
-    ".hg",          ".svn",           ".codeindex.json",
+    ".git",       "build.zig",      "package.json",    "go.mod",
+    "Cargo.toml", "pyproject.toml", "deno.json",       "pom.xml",
+    ".hg",        ".svn",           ".codeindex.json",
 };
 
 /// Walk up from `start_abs` looking for a project marker. Returns the owned
@@ -110,14 +110,23 @@ fn watch_loop(ctx: *WatchCtx) void {
 
     while (ctx.running.*) {
         w.poll_events(ctx, watch_callback) catch {};
+        // Modifies/deletes leave stale postings behind (postings are add-only
+        // file-id sets); sweep them once enough accumulate. Runs on this
+        // thread — the sole mutator — so it can't race add_file.
+        if (ctx.exp.needs_compaction()) {
+            ctx.exp.compact() catch |err| {
+                std.debug.print("codeindex: compaction failed: {}\n", .{err});
+            };
+        }
         io.sleep(200 * std.time.ns_per_ms);
     }
 }
 
 pub fn main(init: std.process.Init.Minimal) !void {
-    var gpa = std.heap.DebugAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    // Long-running server: use the thread-safe general allocator, not
+    // DebugAllocator (per-allocation metadata + safety checks are wrong for
+    // production; tests still run under std.testing.allocator's leak checks).
+    const allocator = std.heap.smp_allocator;
 
     io.init(allocator);
     defer io.deinit();

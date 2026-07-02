@@ -149,20 +149,23 @@ pub const Server = struct {
                 try w.writeAll("No query provided.");
             } else {
                 const results = try self.exp.search_content(query, limit);
-                defer self.allocator.free(results);
+                defer {
+                    for (results) |r| self.allocator.free(r.line_text);
+                    self.allocator.free(results);
+                }
                 if (results.len == 0) {
                     try w.writeAll("No results found.");
                 } else {
                     for (results) |r| {
                         if (r.scope_name) |scope| {
                             try w.print("{s}:{d} [{s}:{s}] — {s}\n", .{
-                                r.path, r.line_num,
+                                r.path,                                    r.line_num,
                                 if (r.scope_kind) |k| k.as_str() else "?", scope,
                                 std.mem.trim(u8, r.line_text, " \t\r"),
                             });
                         } else {
                             try w.print("{s}:{d} — {s}\n", .{
-                                r.path, r.line_num,
+                                r.path,                                 r.line_num,
                                 std.mem.trim(u8, r.line_text, " \t\r"),
                             });
                         }
@@ -752,10 +755,10 @@ pub const Server = struct {
                     "\"security_critical\":{d},\"security_total\":{d},\"panic_sites\":{d}," ++
                     "\"circular_deps\":{d},\"god_modules\":{d},\"dead_symbols\":{d}," ++
                     "\"duplicate_names\":{d},\"clone_groups\":{d},\"cloned_functions\":{d},", .{
-                    self.exp.file_count(),        self.exp.symbol_count(), coup.total_edges,
-                    sec.critical,                 sec.total,               unwraps.len,
-                    cyc.cycles.len,               coup.god_modules.len,    dead.len,
-                    dup.total_clusters,           cln.total_groups,        cln.total_cloned_fns,
+                    self.exp.file_count(), self.exp.symbol_count(), coup.total_edges,
+                    sec.critical,          sec.total,               unwraps.len,
+                    cyc.cycles.len,        coup.god_modules.len,    dead.len,
+                    dup.total_clusters,    cln.total_groups,        cln.total_cloned_fns,
                 });
                 // Top reinvented/duplicated definitions — the "are we reusing?" answer.
                 try w.writeAll("\"top_duplication\":[");
