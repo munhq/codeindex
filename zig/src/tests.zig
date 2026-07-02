@@ -1,5 +1,6 @@
 const std = @import("std");
 const testing = std.testing;
+const io_mod = @import("core/io.zig");
 const models = @import("core/models.zig");
 const explorer_mod = @import("index/explorer.zig");
 const version_mod = @import("index/version.zig");
@@ -95,21 +96,62 @@ test "trigram short query returns empty" {
     try testing.expectEqual(@as(usize, 0), results.len);
 }
 
-test "trigram remove file" {
+test "trigram postings are one entry per file" {
+    var idx = explorer_mod.TrigramIndex.init(testing.allocator);
+    defer idx.deinit();
+
+    // Many occurrences of the same trigram in one file → single posting.
+    try idx.add_text(0, "aaaa aaaa aaaa\naaaa aaaa\n");
+    const results = try idx.query("aaa");
+    defer if (results.len > 0) testing.allocator.free(results);
+    try testing.expectEqual(@as(usize, 1), results.len);
+    try testing.expectEqual(@as(u32, 0), results[0]);
+}
+
+test "trigram re-add same file stays deduplicated" {
+    var idx = explorer_mod.TrigramIndex.init(testing.allocator);
+    defer idx.deinit();
+
+    try idx.add_text(0, "hello world");
+    try idx.add_text(0, "hello world"); // watcher re-index of the same file
+    try idx.add_text(1, "hello there");
+
+    const results = try idx.query("hello");
+    defer if (results.len > 0) testing.allocator.free(results);
+    try testing.expectEqual(@as(usize, 2), results.len);
+    // Sorted ascending — the invariant the intersection merge depends on.
+    try testing.expectEqual(@as(u32, 0), results[0]);
+    try testing.expectEqual(@as(u32, 1), results[1]);
+}
+
+test "trigram out-of-order insert keeps postings sorted" {
+    var idx = explorer_mod.TrigramIndex.init(testing.allocator);
+    defer idx.deinit();
+
+    try idx.add_text(7, "hello seven");
+    try idx.add_text(2, "hello two");
+    try idx.add_text(5, "hello five");
+
+    const results = try idx.query("hello");
+    defer if (results.len > 0) testing.allocator.free(results);
+    try testing.expectEqual(@as(usize, 3), results.len);
+    try testing.expectEqual(@as(u32, 2), results[0]);
+    try testing.expectEqual(@as(u32, 5), results[1]);
+    try testing.expectEqual(@as(u32, 7), results[2]);
+}
+
+test "trigram intersection across query trigrams" {
     var idx = explorer_mod.TrigramIndex.init(testing.allocator);
     defer idx.deinit();
 
     try idx.add_text(0, "hello world");
     try idx.add_text(1, "hello there");
 
-    const before = try idx.query("hello");
-    defer if (before.len > 0) testing.allocator.free(before);
-    try testing.expect(before.len >= 2);
-
-    idx.remove_file(0);
-    const after = try idx.query("hello");
-    defer if (after.len > 0) testing.allocator.free(after);
-    try testing.expect(after.len < before.len);
+    // "world" only matches file 0; "hello" matches both.
+    const results = try idx.query("world");
+    defer if (results.len > 0) testing.allocator.free(results);
+    try testing.expectEqual(@as(usize, 1), results.len);
+    try testing.expectEqual(@as(u32, 0), results[0]);
 }
 
 // ── WordIndex ────────────────────────────────────────────────────────────────
@@ -255,7 +297,10 @@ test "explorer search_content" {
     exp.mark_indexing_complete();
 
     const results = try exp.search_content("hello_world", 10);
-    defer testing.allocator.free(results);
+    defer {
+        for (results) |r| testing.allocator.free(r.line_text);
+        testing.allocator.free(results);
+    }
     try testing.expectEqual(@as(usize, 1), results.len);
     try testing.expectEqual(@as(u32, 2), results[0].line_num);
 }
@@ -368,6 +413,148 @@ test "explorer find_word exact lookup" {
     const hits = try exp.find_word("compute", 10);
     defer testing.allocator.free(hits);
     try testing.expectEqual(@as(usize, 1), hits.len);
+}
+
+test "explorer modified file drops stale results" {
+    var exp = explorer_mod.Explorer.init(testing.allocator);
+    defer exp.deinit();
+
+    _ = try exp.add_file(.{
+        .path = try testing.allocator.dupe(u8, "mod.rs"),
+        .language = .rust,
+        .line_count = 1,
+        .byte_size = 20,
+        .symbols = &[_]models.Symbol{},
+        .imports = &[_][]const u8{},
+    }, "fn alpha_token() {}\n");
+
+    // Re-index the same path with new content (watcher modify event).
+    _ = try exp.add_file(.{
+        .path = try testing.allocator.dupe(u8, "mod.rs"),
+        .language = .rust,
+        .line_count = 1,
+        .byte_size = 19,
+        .symbols = &[_]models.Symbol{},
+        .imports = &[_][]const u8{},
+    }, "fn beta_token() {}\n");
+    exp.mark_indexing_complete();
+
+    // Stale trigram postings for alpha_token still exist, but content
+    // verification must filter them out of every query path.
+    const search_old = try exp.search_content("alpha_token", 10);
+    defer testing.allocator.free(search_old);
+    try testing.expectEqual(@as(usize, 0), search_old.len);
+
+    const word_old = try exp.find_word("alpha_token", 10);
+    defer testing.allocator.free(word_old);
+    try testing.expectEqual(@as(usize, 0), word_old.len);
+
+    const search_new = try exp.search_content("beta_token", 10);
+    defer {
+        for (search_new) |r| testing.allocator.free(r.line_text);
+        testing.allocator.free(search_new);
+    }
+    try testing.expectEqual(@as(usize, 1), search_new.len);
+    try testing.expectEqual(@as(usize, 1), exp.dirty_ops);
+}
+
+test "explorer compact sweeps stale postings and preserves results" {
+    var exp = explorer_mod.Explorer.init(testing.allocator);
+    defer exp.deinit();
+
+    _ = try exp.add_file(.{
+        .path = try testing.allocator.dupe(u8, "a.rs"),
+        .language = .rust,
+        .line_count = 1,
+        .byte_size = 20,
+        .symbols = &[_]models.Symbol{},
+        .imports = &[_][]const u8{},
+    }, "fn alpha_token() {}\n");
+    _ = try exp.add_file(.{
+        .path = try testing.allocator.dupe(u8, "a.rs"),
+        .language = .rust,
+        .line_count = 1,
+        .byte_size = 19,
+        .symbols = &[_]models.Symbol{},
+        .imports = &[_][]const u8{},
+    }, "fn beta_token() {}\n");
+    exp.mark_indexing_complete();
+
+    // Stale candidate exists before compaction (filtered only by verification)…
+    const before = try exp.trigrams.query("alpha_token");
+    defer if (before.len > 0) testing.allocator.free(before);
+    try testing.expectEqual(@as(usize, 1), before.len);
+
+    try exp.compact();
+    try testing.expectEqual(@as(usize, 0), exp.dirty_ops);
+
+    // …and is physically gone after: the trigram index has no candidate files.
+    const stale = try exp.trigrams.query("alpha_token");
+    defer if (stale.len > 0) testing.allocator.free(stale);
+    try testing.expectEqual(@as(usize, 0), stale.len);
+
+    // Live content still fully searchable after the swap.
+    const live = try exp.search_content("beta_token", 10);
+    defer {
+        for (live) |r| testing.allocator.free(r.line_text);
+        testing.allocator.free(live);
+    }
+    try testing.expectEqual(@as(usize, 1), live.len);
+}
+
+test "explorer search falls back to disk when content is evicted" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io_mod.io(), .{ .sub_path = "evicted.rs", .data = "fn gamma_token() {}\n" });
+    const real_path = try tmp.dir.realPathFileAlloc(io_mod.io(), "evicted.rs", testing.allocator);
+    defer testing.allocator.free(real_path);
+
+    var exp = explorer_mod.Explorer.init(testing.allocator);
+    defer exp.deinit();
+    // Zero-byte cache: everything is evicted immediately after add_file.
+    exp.max_cache_bytes = 0;
+
+    _ = try exp.add_file(.{
+        .path = try testing.allocator.dupe(u8, real_path),
+        .language = .rust,
+        .line_count = 1,
+        .byte_size = 20,
+        .symbols = &[_]models.Symbol{},
+        .imports = &[_][]const u8{},
+    }, "fn gamma_token() {}\n");
+    exp.mark_indexing_complete();
+
+    // Not in cache — must be re-read from disk, not silently skipped.
+    const results = try exp.search_content("gamma_token", 10);
+    defer {
+        for (results) |r| testing.allocator.free(r.line_text);
+        testing.allocator.free(results);
+    }
+    try testing.expectEqual(@as(usize, 1), results.len);
+
+    const words = try exp.find_word("gamma_token", 10);
+    defer testing.allocator.free(words);
+    try testing.expectEqual(@as(usize, 1), words.len);
+}
+
+test "explorer oversized file gets no postings" {
+    var exp = explorer_mod.Explorer.init(testing.allocator);
+    defer exp.deinit();
+    exp.max_posting_file_bytes = 16; // force the cap for the test
+
+    _ = try exp.add_file(.{
+        .path = try testing.allocator.dupe(u8, "big.json"),
+        .language = .json,
+        .line_count = 1,
+        .byte_size = 32,
+        .symbols = &[_]models.Symbol{},
+        .imports = &[_][]const u8{},
+    }, "{\"key\": \"delta_token_value\"}\n");
+    exp.mark_indexing_complete();
+
+    const candidates = try exp.trigrams.query("delta_token");
+    defer if (candidates.len > 0) testing.allocator.free(candidates);
+    try testing.expectEqual(@as(usize, 0), candidates.len);
 }
 
 test "explorer get_imports and get_imported_by" {
@@ -851,7 +1038,10 @@ test "explorer re-add file updates indexes" {
 
     // New content should be indexed
     const new_results = try exp.search_content("new_name", 5);
-    defer testing.allocator.free(new_results);
+    defer {
+        for (new_results) |r| testing.allocator.free(r.line_text);
+        testing.allocator.free(new_results);
+    }
     try testing.expectEqual(@as(usize, 1), new_results.len);
 }
 

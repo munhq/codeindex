@@ -4,14 +4,36 @@ const version_mod = @import("version.zig");
 const imports_resolver = @import("../resolver/imports.zig");
 const io = @import("../core/io.zig");
 
+/// Cap on a query-time fallback read when a candidate file is not in the
+/// content cache. Matches the read caps used elsewhere in the codebase.
+const max_fallback_read_bytes: usize = 10 * 1024 * 1024;
+
+/// Insert `file_id` into a sorted, deduplicated posting list.
+fn insert_sorted(allocator: std.mem.Allocator, list: *std.ArrayList(u32), file_id: u32) !void {
+    var lo: usize = 0;
+    var hi: usize = list.items.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        if (list.items[mid] < file_id) lo = mid + 1 else hi = mid;
+    }
+    if (lo < list.items.len and list.items[lo] == file_id) return;
+    try list.insert(allocator, lo, file_id);
+}
+
+/// Trigram → set of file ids. Postings hold one u32 per file that contains the
+/// trigram, NOT one entry per occurrence — line numbers are recovered at query
+/// time by scanning the candidate file's content, which the query paths already
+/// do to verify matches. Postings are add-only; a modified file's obsolete
+/// trigrams remain as false candidates (harmless: content verification is
+/// authoritative) until Explorer.compact() rebuilds the maps.
 pub const TrigramIndex = struct {
     allocator: std.mem.Allocator,
-    map: std.AutoHashMap(u24, std.ArrayList(u64)),
+    map: std.AutoHashMap(u24, std.ArrayList(u32)),
 
     pub fn init(allocator: std.mem.Allocator) TrigramIndex {
         return .{
             .allocator = allocator,
-            .map = std.AutoHashMap(u24, std.ArrayList(u64)).init(allocator),
+            .map = std.AutoHashMap(u24, std.ArrayList(u32)).init(allocator),
         };
     }
 
@@ -24,63 +46,53 @@ pub const TrigramIndex = struct {
     }
 
     pub fn add_text(self: *TrigramIndex, file_id: u32, content: []const u8) !void {
-        var line_num: u32 = 0;
+        // Collect the file's unique trigrams first so each posting list is
+        // touched once per file, not once per occurrence.
+        var seen = std.AutoHashMap(u24, void).init(self.allocator);
+        defer seen.deinit();
+
         var line_it = std.mem.splitScalar(u8, content, '\n');
         while (line_it.next()) |line| {
-            if (line.len < 3) {
-                line_num += 1;
-                continue;
-            }
-
+            if (line.len < 3) continue;
             for (0..line.len - 2) |i| {
                 const trigram = @as(u24, line[i]) | (@as(u24, line[i + 1]) << 8) | (@as(u24, line[i + 2]) << 16);
-                const gop = try self.map.getOrPut(trigram);
-                if (!gop.found_existing) {
-                    gop.value_ptr.* = std.ArrayList(u64).empty;
-                }
-                const entry = (@as(u64, file_id) << 32) | line_num;
-                if (gop.value_ptr.items.len == 0 or gop.value_ptr.items[gop.value_ptr.items.len - 1] != entry) {
-                    try gop.value_ptr.append(self.allocator, entry);
-                }
+                try seen.put(trigram, {});
             }
-            line_num += 1;
+        }
+
+        var it = seen.keyIterator();
+        while (it.next()) |trigram| {
+            const gop = try self.map.getOrPut(trigram.*);
+            if (!gop.found_existing) {
+                gop.value_ptr.* = std.ArrayList(u32).empty;
+            }
+            try insert_sorted(self.allocator, gop.value_ptr, file_id);
         }
     }
 
-    pub fn remove_file(self: *TrigramIndex, file_id: u32) void {
-        var it = self.map.iterator();
-        while (it.next()) |entry| {
-            var list = entry.value_ptr;
-            var i: usize = 0;
-            while (i < list.items.len) {
-                if (@as(u32, @intCast(list.items[i] >> 32)) == file_id) {
-                    _ = list.swapRemove(i);
-                } else {
-                    i += 1;
-                }
-            }
-        }
-    }
+    /// Candidate file ids for `text`: the sorted intersection of the posting
+    /// lists of every trigram in the query. Caller frees the returned slice.
+    /// Candidates may be stale (file changed since indexing) — callers must
+    /// verify against real content.
+    pub fn query(self: *TrigramIndex, text: []const u8) ![]u32 {
+        if (text.len < 3) return &[_]u32{};
 
-    pub fn query(self: *TrigramIndex, text: []const u8) ![]u64 {
-        if (text.len < 3) return &[_]u64{};
-
-        var results: ?std.ArrayList(u64) = null;
+        var results: ?std.ArrayList(u32) = null;
         defer if (results) |*r| r.deinit(self.allocator);
 
         for (0..text.len - 2) |i| {
             const trigram = @as(u24, text[i]) | (@as(u24, text[i + 1]) << 8) | (@as(u24, text[i + 2]) << 16);
-            const locations = self.map.get(trigram) orelse return &[_]u64{};
+            const posting = self.map.get(trigram) orelse return &[_]u32{};
 
             if (results == null) {
-                results = try std.ArrayList(u64).initCapacity(self.allocator, locations.items.len);
-                try results.?.appendSlice(self.allocator, locations.items);
+                results = try std.ArrayList(u32).initCapacity(self.allocator, posting.items.len);
+                try results.?.appendSlice(self.allocator, posting.items);
             } else {
-                var new_results = std.ArrayList(u64).empty;
+                var new_results = std.ArrayList(u32).empty;
                 var r_idx: usize = 0;
                 var l_idx: usize = 0;
                 const r_items = results.?.items;
-                const l_items = locations.items;
+                const l_items = posting.items;
 
                 while (r_idx < r_items.len and l_idx < l_items.len) {
                     if (r_items[r_idx] == l_items[l_idx]) {
@@ -99,18 +111,26 @@ pub const TrigramIndex = struct {
             if (results.?.items.len == 0) break;
         }
 
-        return if (results) |*r| try r.toOwnedSlice(self.allocator) else &[_]u64{};
+        return if (results) |*r| try r.toOwnedSlice(self.allocator) else &[_]u32{};
     }
 };
 
+/// Delimiters that split a line into words. Shared by WordIndex.add_text and
+/// the query-time line scans in find_word/find_callers so both sides agree on
+/// what a "word" is.
+pub const word_delimiters = " \t\n\r(){}[];:.,\"'<>?!=+-*/&|^%~#@`";
+
+/// Word → set of file ids. Same design as TrigramIndex: one u32 per file, line
+/// numbers recovered at query time by scanning content, add-only postings
+/// compacted by Explorer.compact().
 pub const WordIndex = struct {
     allocator: std.mem.Allocator,
-    map: std.StringHashMap(std.ArrayList(u64)),
+    map: std.StringHashMap(std.ArrayList(u32)),
 
     pub fn init(allocator: std.mem.Allocator) WordIndex {
         return .{
             .allocator = allocator,
-            .map = std.StringHashMap(std.ArrayList(u64)).init(allocator),
+            .map = std.StringHashMap(std.ArrayList(u32)).init(allocator),
         };
     }
 
@@ -124,48 +144,37 @@ pub const WordIndex = struct {
     }
 
     pub fn add_text(self: *WordIndex, file_id: u32, content: []const u8) !void {
-        var line_num: u32 = 0;
+        // Unique words first (keys borrow from `content`, valid for this call).
+        var seen = std.StringHashMap(void).init(self.allocator);
+        defer seen.deinit();
+
         var line_it = std.mem.splitScalar(u8, content, '\n');
         while (line_it.next()) |line| {
-            var word_it = std.mem.tokenizeAny(u8, line, " \t\n\r(){}[];:.,\"'<>?!=+-*/&|^%~#@`");
+            var word_it = std.mem.tokenizeAny(u8, line, word_delimiters);
             while (word_it.next()) |word| {
                 if (word.len < 2) continue;
-                const entry = (@as(u64, file_id) << 32) | line_num;
-
-                const gop = try self.map.getOrPut(word);
-                if (!gop.found_existing) {
-                    gop.key_ptr.* = try self.allocator.dupe(u8, word);
-                    gop.value_ptr.* = std.ArrayList(u64).empty;
-                }
-
-                if (gop.value_ptr.items.len == 0 or gop.value_ptr.items[gop.value_ptr.items.len - 1] != entry) {
-                    try gop.value_ptr.append(self.allocator, entry);
-                }
+                try seen.put(word, {});
             }
-            line_num += 1;
+        }
+
+        var it = seen.keyIterator();
+        while (it.next()) |word| {
+            const gop = try self.map.getOrPut(word.*);
+            if (!gop.found_existing) {
+                gop.key_ptr.* = try self.allocator.dupe(u8, word.*);
+                gop.value_ptr.* = std.ArrayList(u32).empty;
+            }
+            try insert_sorted(self.allocator, gop.value_ptr, file_id);
         }
     }
 
-    pub fn remove_file(self: *WordIndex, file_id: u32) void {
-        var it = self.map.iterator();
-        while (it.next()) |entry| {
-            var list = entry.value_ptr;
-            var i: usize = 0;
-            while (i < list.items.len) {
-                if (@as(u32, @intCast(list.items[i] >> 32)) == file_id) {
-                    _ = list.swapRemove(i);
-                } else {
-                    i += 1;
-                }
-            }
-        }
-    }
-
-    pub fn search(self: *const WordIndex, word: []const u8) []const u64 {
+    /// File ids that contained `word` when last indexed. May include stale
+    /// entries — callers verify against real content.
+    pub fn search(self: *const WordIndex, word: []const u8) []const u32 {
         if (self.map.get(word)) |list| {
             return list.items;
         }
-        return &[_]u64{};
+        return &[_]u32{};
     }
 };
 
@@ -223,6 +232,17 @@ pub const DepGraph = struct {
             list.clearRetainingCapacity();
         }
     }
+
+    /// Drop every edge in the graph. Used before a full re-resolution pass.
+    pub fn clear_all(self: *DepGraph) void {
+        var it = self.imports.iterator();
+        while (it.next()) |entry| entry.value_ptr.deinit(self.allocator);
+        self.imports.clearRetainingCapacity();
+
+        var it2 = self.reverse_deps.iterator();
+        while (it2.next()) |entry| entry.value_ptr.deinit(self.allocator);
+        self.reverse_deps.clearRetainingCapacity();
+    }
 };
 
 // ── Result types ─────────────────────────────────────────────────────────────
@@ -275,6 +295,13 @@ pub const Explorer = struct {
     max_cache_bytes: usize,
     cache_order: std.ArrayList(u32), // LRU order: oldest at front, newest at back
     status_message: ?[]u8 = null, // surfaced via the `status` tool (refused / capped scans)
+    /// Modifies + deletes since the last compaction. Postings are add-only, so
+    /// each such op leaves stale entries behind; compact() sweeps them once
+    /// this crosses the threshold in needs_compaction().
+    dirty_ops: usize = 0,
+    /// Files larger than this get outlines/content but no trigram/word
+    /// postings — a stray data dump must not dominate the index.
+    max_posting_file_bytes: usize = 512 * 1024,
 
     // Per-index RwLocks for concurrent read access during writes
     trigram_lock: io.RwLock = .{},
@@ -359,7 +386,33 @@ pub const Explorer = struct {
     }
 
     pub fn mark_indexing_complete(self: *Explorer) void {
+        // Resolve the dependency graph in one pass now that every file is known.
+        // Per-file resolution in add_file can only see files indexed *before* it,
+        // so forward edges to later-indexed files would be lost without this.
+        self.resolve_all_imports() catch |err| {
+            std.debug.print("codeindex: dependency resolution failed: {}\n", .{err});
+        };
         self.indexing = false;
+    }
+
+    /// Rebuild the entire dependency graph from scratch against the complete
+    /// file set. Safe to call repeatedly; clears existing edges first.
+    pub fn resolve_all_imports(self: *Explorer) !void {
+        self.file_lock.lockShared();
+        defer self.file_lock.unlockShared();
+        self.outline_lock.lockShared();
+        defer self.outline_lock.unlockShared();
+        self.dep_lock.lock();
+        defer self.dep_lock.unlock();
+
+        self.depgraph.clear_all();
+
+        var it = self.outlines.iterator();
+        while (it.next()) |entry| {
+            const file_id = entry.key_ptr.*;
+            if (self.deleted_files.get(file_id) != null) continue;
+            try self.resolve_imports(file_id, entry.value_ptr.imports);
+        }
     }
 
     pub fn is_indexing(self: *Explorer) bool {
@@ -391,11 +444,13 @@ pub const Explorer = struct {
             }
             try self.outlines.put(existing_id, outline);
 
-            // Clear old index entries and re-add
-            self.trigrams.remove_file(existing_id);
-            self.words.remove_file(existing_id);
-            try self.trigrams.add_text(existing_id, content);
-            try self.words.add_text(existing_id, content);
+            // Postings are add-only sets: new trigrams/words gain this file id,
+            // obsolete ones stay behind as false candidates until compact().
+            if (content.len <= self.max_posting_file_bytes) {
+                try self.trigrams.add_text(existing_id, content);
+                try self.words.add_text(existing_id, content);
+            }
+            self.dirty_ops += 1;
 
             // Update content cache
             if (self.content_cache.getPtr(existing_id)) |old_content| {
@@ -420,8 +475,10 @@ pub const Explorer = struct {
         try self.files.append(self.allocator, path_dup);
         try self.file_map.put(path_dup, file_id);
 
-        try self.trigrams.add_text(file_id, content);
-        try self.words.add_text(file_id, content);
+        if (content.len <= self.max_posting_file_bytes) {
+            try self.trigrams.add_text(file_id, content);
+            try self.words.add_text(file_id, content);
+        }
         try self.outlines.put(file_id, outline);
         const cached_new = try self.allocator.dupe(u8, content);
         try self.content_cache.put(file_id, cached_new);
@@ -439,8 +496,10 @@ pub const Explorer = struct {
     /// cache for an already-registered file. Used when restoring from a snapshot,
     /// which persists outlines/deps but not the in-RAM search indexes.
     pub fn prime_file(self: *Explorer, file_id: u32, content: []const u8) !void {
-        try self.trigrams.add_text(file_id, content);
-        try self.words.add_text(file_id, content);
+        if (content.len <= self.max_posting_file_bytes) {
+            try self.trigrams.add_text(file_id, content);
+            try self.words.add_text(file_id, content);
+        }
         const cached = try self.allocator.dupe(u8, content);
         try self.content_cache.put(file_id, cached);
         self.cache_bytes += cached.len;
@@ -462,10 +521,11 @@ pub const Explorer = struct {
         self.content_lock.lock();
         defer self.content_lock.unlock();
         if (self.file_map.get(path)) |file_id| {
-            // Clean up all indexes
-            self.trigrams.remove_file(file_id);
-            self.words.remove_file(file_id);
+            // Trigram/word postings stay behind (query paths filter on
+            // deleted_files; compact() sweeps them). Only the dep graph needs
+            // eager cleanup — its consumers don't re-verify.
             self.depgraph.clear_file(file_id);
+            self.dirty_ops += 1;
 
             if (self.outlines.getPtr(file_id)) |outline| {
                 outline.deinit(self.allocator);
@@ -487,6 +547,63 @@ pub const Explorer = struct {
             try self.deleted_files.put(file_id, {});
             try self.version.record(path, .deleted);
         }
+    }
+
+    /// Whether enough modifies/deletes accumulated that stale postings are
+    /// worth sweeping. Threshold: a quarter of the file count, floor 64 — so a
+    /// busy watcher compacts amortized-O(1) per event, an idle one never does.
+    /// Racy read is fine: the watcher thread is the only mutator and caller.
+    pub fn needs_compaction(self: *Explorer) bool {
+        return self.dirty_ops > @max(64, self.files.items.len / 4);
+    }
+
+    /// Rebuild the trigram/word indexes from live content, dropping stale
+    /// postings and returning slack capacity to the allocator. Build runs under
+    /// shared locks (queries keep working); only the pointer swap is exclusive.
+    /// Must be called from the mutator (watcher) thread.
+    pub fn compact(self: *Explorer) !void {
+        var new_trigrams = TrigramIndex.init(self.allocator);
+        errdefer new_trigrams.deinit();
+        var new_words = WordIndex.init(self.allocator);
+        errdefer new_words.deinit();
+
+        {
+            self.file_lock.lockShared();
+            defer self.file_lock.unlockShared();
+            self.outline_lock.lockShared();
+            defer self.outline_lock.unlockShared();
+            self.content_lock.lockShared();
+            defer self.content_lock.unlockShared();
+
+            var it = self.outlines.iterator();
+            while (it.next()) |entry| {
+                const file_id = entry.key_ptr.*;
+                if (self.deleted_files.get(file_id) != null) continue;
+                const cached = self.content_cache.get(file_id);
+                const content = cached orelse
+                    (io.readFileAlloc(self.allocator, entry.value_ptr.path, max_fallback_read_bytes) catch continue);
+                defer if (cached == null) self.allocator.free(content);
+                if (content.len > self.max_posting_file_bytes) continue;
+                try new_trigrams.add_text(file_id, content);
+                try new_words.add_text(file_id, content);
+            }
+        }
+
+        self.trigram_lock.lock();
+        self.word_lock.lock();
+        var old_trigrams = self.trigrams;
+        var old_words = self.words;
+        self.trigrams = new_trigrams;
+        self.words = new_words;
+        self.dirty_ops = 0;
+        self.word_lock.unlock();
+        self.trigram_lock.unlock();
+
+        old_trigrams.deinit();
+        old_words.deinit();
+        std.debug.print("codeindex: compacted postings ({d} trigrams, {d} words)\n", .{
+            self.trigrams.map.count(), self.words.map.count(),
+        });
     }
 
     fn resolve_imports(self: *Explorer, file_id: u32, imports: [][]const u8) !void {
@@ -553,13 +670,38 @@ pub const Explorer = struct {
         return &self.outlines;
     }
 
+    /// Map a user-supplied path to a file id. Files are stored with their full
+    /// absolute path, but callers normally pass a workspace-relative path, so we
+    /// fall back to a '/'-boundary suffix match (e.g. "src/foo.rs" matches the
+    /// stored "/ws/src/foo.rs"). Assumes the caller holds file_lock.
+    fn find_file_id(self: *Explorer, path: []const u8) ?u32 {
+        if (path.len == 0) return null;
+        // Exact match — caller passed the stored full path.
+        if (self.file_map.get(path)) |id| {
+            if (self.deleted_files.get(id) == null) return id;
+        }
+        // Suffix match on a path-segment boundary.
+        var it = self.file_map.iterator();
+        while (it.next()) |entry| {
+            const stored = entry.key_ptr.*;
+            const id = entry.value_ptr.*;
+            if (self.deleted_files.get(id) != null) continue;
+            if (stored.len > path.len and
+                stored[stored.len - path.len - 1] == '/' and
+                std.mem.endsWith(u8, stored, path))
+            {
+                return id;
+            }
+        }
+        return null;
+    }
+
     pub fn get_outline(self: *Explorer, path: []const u8) ?models.FileOutline {
         self.outline_lock.lockShared();
         defer self.outline_lock.unlockShared();
         self.file_lock.lockShared();
         defer self.file_lock.unlockShared();
-        const file_id = self.file_map.get(path) orelse return null;
-        if (self.deleted_files.get(file_id) != null) return null;
+        const file_id = self.find_file_id(path) orelse return null;
         return self.outlines.get(file_id);
     }
 
@@ -588,7 +730,9 @@ pub const Explorer = struct {
         return try results.toOwnedSlice(self.allocator);
     }
 
-    /// Search file contents using trigram-accelerated search.
+    /// Search file contents using trigram-accelerated search. Results own
+    /// line_text (caller frees) — content may come from a transient disk read
+    /// when the file isn't in the bounded cache, so slices can't be borrowed.
     pub fn search_content(self: *Explorer, query_text: []const u8, limit: usize) ![]ScopedSearchResult {
         self.trigram_lock.lockShared();
         defer self.trigram_lock.unlockShared();
@@ -597,23 +741,24 @@ pub const Explorer = struct {
         self.outline_lock.lockShared();
         defer self.outline_lock.unlockShared();
         var results = std.ArrayList(ScopedSearchResult).empty;
+        errdefer {
+            for (results.items) |r| self.allocator.free(r.line_text);
+            results.deinit(self.allocator);
+        }
 
-        // Get candidate file+line pairs from trigram index
+        // Candidate files from the trigram index (sorted, deduped, possibly
+        // stale — the content scan below is the source of truth).
         const candidates = try self.trigrams.query(query_text);
         defer if (candidates.len > 0) self.allocator.free(candidates);
 
-        // Deduplicate by file_id and do line-level verification
-        var seen_files = std.AutoHashMap(u32, void).init(self.allocator);
-        defer seen_files.deinit();
-
-        for (candidates) |entry_val| {
-            const file_id = @as(u32, @intCast(entry_val >> 32));
+        outer: for (candidates) |file_id| {
             if (self.deleted_files.get(file_id) != null) continue;
-            if (seen_files.get(file_id) != null) continue;
-            try seen_files.put(file_id, {});
-
-            const content = self.content_cache.get(file_id) orelse continue;
             const outline = self.outlines.get(file_id) orelse continue;
+
+            const cached = self.content_cache.get(file_id);
+            const content = cached orelse
+                (io.readFileAlloc(self.allocator, outline.path, max_fallback_read_bytes) catch continue);
+            defer if (cached == null) self.allocator.free(content);
 
             var line_num: u32 = 1;
             var line_it = std.mem.splitScalar(u8, content, '\n');
@@ -624,13 +769,11 @@ pub const Explorer = struct {
                     try results.append(self.allocator, .{
                         .path = outline.path,
                         .line_num = line_num,
-                        .line_text = line,
+                        .line_text = try self.allocator.dupe(u8, line),
                         .scope_name = if (scope) |s| s.name else null,
                         .scope_kind = if (scope) |s| s.kind else null,
                     });
-                    if (results.items.len >= limit) {
-                        return try results.toOwnedSlice(self.allocator);
-                    }
+                    if (results.items.len >= limit) break :outer;
                 }
                 line_num += 1;
             }
@@ -676,113 +819,130 @@ pub const Explorer = struct {
             results.deinit(self.allocator);
         }
 
-        const hits = self.words.search(name);
-        for (hits) |entry_val| {
-            const file_id: u32 = @intCast(entry_val >> 32);
-            const line_num_0: u32 = @intCast(entry_val & 0xFFFFFFFF);
+        const hit_files = self.words.search(name);
+        outer: for (hit_files) |file_id| {
             if (self.deleted_files.get(file_id) != null) continue;
             if (file_id >= self.files.items.len) continue;
 
-            // Skip lines that fall inside the symbol's own definition.
-            if (def_lines.get(entry_val) != null) continue;
+            const cached = self.content_cache.get(file_id);
+            const content = cached orelse
+                (io.readFileAlloc(self.allocator, self.files.items[file_id], max_fallback_read_bytes) catch continue);
+            defer if (cached == null) self.allocator.free(content);
 
-            const content = self.content_cache.get(file_id) orelse continue;
-            // Scan to the requested line (0-based).
-            var line_text: []const u8 = "";
-            var cur_line: u32 = 0;
-            var it = std.mem.splitScalar(u8, content, '\n');
-            while (it.next()) |l| {
-                if (cur_line == line_num_0) {
-                    line_text = l;
-                    break;
+            var line_num_0: u32 = 0;
+            var line_scan = std.mem.splitScalar(u8, content, '\n');
+            scan: while (line_scan.next()) |line_text| : (line_num_0 += 1) {
+                if (line_text.len == 0) continue;
+                if (std.mem.indexOf(u8, line_text, name) == null) continue;
+
+                // Skip lines that fall inside the symbol's own definition.
+                const line_key: u64 = (@as(u64, file_id) << 32) | @as(u64, line_num_0);
+                if (def_lines.get(line_key) != null) continue :scan;
+
+                // Detect re-export / use-statement context for the whole line.
+                const trimmed_for_ctx = std.mem.trimStart(u8, line_text, " \t");
+                const is_use_line = std.mem.startsWith(u8, trimmed_for_ctx, "use ") or
+                    std.mem.startsWith(u8, trimmed_for_ctx, "pub use ") or
+                    std.mem.startsWith(u8, trimmed_for_ctx, "pub(crate) use ") or
+                    std.mem.startsWith(u8, trimmed_for_ctx, "export ") or
+                    std.mem.startsWith(u8, trimmed_for_ctx, "import ") or
+                    std.mem.startsWith(u8, trimmed_for_ctx, "from ") or
+                    std.mem.indexOf(u8, trimmed_for_ctx, "from \"") != null or
+                    std.mem.indexOf(u8, trimmed_for_ctx, "from '") != null;
+                const is_reexport_line = std.mem.startsWith(u8, trimmed_for_ctx, "pub use ") or
+                    std.mem.startsWith(u8, trimmed_for_ctx, "pub(crate) use ") or
+                    std.mem.startsWith(u8, trimmed_for_ctx, "export ");
+
+                // Find `name` occurrences in the line and classify context.
+                var search_start: usize = 0;
+                var picked: ?[]const u8 = null;
+                while (std.mem.indexOfPos(u8, line_text, search_start, name)) |pos| {
+                    defer search_start = pos + name.len;
+                    // Word boundary on the left
+                    if (pos > 0) {
+                        const p = line_text[pos - 1];
+                        if (std.ascii.isAlphanumeric(p) or p == '_') continue;
+                    }
+                    const end = pos + name.len;
+                    if (end < line_text.len) {
+                        const n = line_text[end];
+                        if (std.ascii.isAlphanumeric(n) or n == '_') continue;
+                    }
+
+                    // Classify: reexport (takes precedence on use/import lines) / call / method / path
+                    var ctx: []const u8 = "other";
+                    if (is_reexport_line) ctx = "reexport" else if (is_use_line) ctx = "import";
+                    // Call: `name(`
+                    if (end < line_text.len and line_text[end] == '(') ctx = "call";
+                    // Method: `.name(` or `->name(`
+                    if (pos > 0 and line_text[pos - 1] == '.' and end < line_text.len and line_text[end] == '(') ctx = "method";
+                    if (pos >= 2 and line_text[pos - 2] == '-' and line_text[pos - 1] == '>' and end < line_text.len and line_text[end] == '(') ctx = "method";
+                    // Path reference: `::name` or `name::` — only if NOT on a use/import line
+                    if (!is_use_line) {
+                        if (pos >= 2 and line_text[pos - 2] == ':' and line_text[pos - 1] == ':') ctx = "path";
+                        if (end + 1 < line_text.len and line_text[end] == ':' and line_text[end + 1] == ':') ctx = "path";
+                    }
+
+                    // Skip "other" to keep signal-to-noise high.
+                    if (!std.mem.eql(u8, ctx, "other")) {
+                        picked = ctx;
+                        break;
+                    }
                 }
-                cur_line += 1;
-            }
-            if (line_text.len == 0) continue;
 
-            // Detect re-export / use-statement context for the whole line.
-            const trimmed_for_ctx = std.mem.trimStart(u8, line_text, " \t");
-            const is_use_line = std.mem.startsWith(u8, trimmed_for_ctx, "use ") or
-                std.mem.startsWith(u8, trimmed_for_ctx, "pub use ") or
-                std.mem.startsWith(u8, trimmed_for_ctx, "pub(crate) use ") or
-                std.mem.startsWith(u8, trimmed_for_ctx, "export ") or
-                std.mem.startsWith(u8, trimmed_for_ctx, "import ") or
-                std.mem.startsWith(u8, trimmed_for_ctx, "from ") or
-                std.mem.indexOf(u8, trimmed_for_ctx, "from \"") != null or
-                std.mem.indexOf(u8, trimmed_for_ctx, "from '") != null;
-            const is_reexport_line = std.mem.startsWith(u8, trimmed_for_ctx, "pub use ") or
-                std.mem.startsWith(u8, trimmed_for_ctx, "pub(crate) use ") or
-                std.mem.startsWith(u8, trimmed_for_ctx, "export ");
-
-            // Find `name` occurrences in the line and classify context.
-            var search_start: usize = 0;
-            var picked: ?[]const u8 = null;
-            while (std.mem.indexOfPos(u8, line_text, search_start, name)) |pos| {
-                defer search_start = pos + name.len;
-                // Word boundary on the left
-                if (pos > 0) {
-                    const p = line_text[pos - 1];
-                    if (std.ascii.isAlphanumeric(p) or p == '_') continue;
+                if (picked) |ctx| {
+                    const trimmed = std.mem.trim(u8, line_text, " \t\r");
+                    try results.append(self.allocator, .{
+                        .path = self.files.items[file_id],
+                        .line_num = line_num_0 + 1, // report 1-based for user-facing display
+                        .line_text = try self.allocator.dupe(u8, trimmed),
+                        .context = ctx,
+                    });
+                    if (results.items.len >= limit) break :outer;
                 }
-                const end = pos + name.len;
-                if (end < line_text.len) {
-                    const n = line_text[end];
-                    if (std.ascii.isAlphanumeric(n) or n == '_') continue;
-                }
-
-                // Classify: reexport (takes precedence on use/import lines) / call / method / path
-                var ctx: []const u8 = "other";
-                if (is_reexport_line) ctx = "reexport" else if (is_use_line) ctx = "import";
-                // Call: `name(`
-                if (end < line_text.len and line_text[end] == '(') ctx = "call";
-                // Method: `.name(` or `->name(`
-                if (pos > 0 and line_text[pos - 1] == '.' and end < line_text.len and line_text[end] == '(') ctx = "method";
-                if (pos >= 2 and line_text[pos - 2] == '-' and line_text[pos - 1] == '>' and end < line_text.len and line_text[end] == '(') ctx = "method";
-                // Path reference: `::name` or `name::` — only if NOT on a use/import line
-                if (!is_use_line) {
-                    if (pos >= 2 and line_text[pos - 2] == ':' and line_text[pos - 1] == ':') ctx = "path";
-                    if (end + 1 < line_text.len and line_text[end] == ':' and line_text[end + 1] == ':') ctx = "path";
-                }
-
-                // Skip "other" to keep signal-to-noise high.
-                if (!std.mem.eql(u8, ctx, "other")) {
-                    picked = ctx;
-                    break;
-                }
-            }
-
-            if (picked) |ctx| {
-                const trimmed = std.mem.trim(u8, line_text, " \t\r");
-                try results.append(self.allocator, .{
-                    .path = self.files.items[file_id],
-                    .line_num = line_num_0 + 1, // report 1-based for user-facing display
-                    .line_text = try self.allocator.dupe(u8, trimmed),
-                    .context = ctx,
-                });
-                if (results.items.len >= limit) break;
             }
         }
         return try results.toOwnedSlice(self.allocator);
     }
 
-    /// Look up an exact word in the inverted index.
+    /// Look up an exact word: files from the inverted index, line numbers
+    /// recovered by scanning content (cache or transient disk read). The scan
+    /// tokenizes with the same delimiters as indexing, so semantics match the
+    /// old per-occurrence index: one hit per line containing the exact word.
     pub fn find_word(self: *Explorer, word: []const u8, limit: usize) ![]WordHit {
         self.word_lock.lockShared();
         defer self.word_lock.unlockShared();
         self.file_lock.lockShared();
         defer self.file_lock.unlockShared();
+        self.content_lock.lockShared();
+        defer self.content_lock.unlockShared();
         var results = std.ArrayList(WordHit).empty;
-        const hits = self.words.search(word);
-        for (hits) |entry_val| {
-            const file_id = @as(u32, @intCast(entry_val >> 32));
-            const line_num = @as(u32, @intCast(entry_val & 0xFFFFFFFF));
+        const hit_files = self.words.search(word);
+        outer: for (hit_files) |file_id| {
             if (self.deleted_files.get(file_id) != null) continue;
             if (file_id >= self.files.items.len) continue;
-            try results.append(self.allocator, .{
-                .path = self.files.items[file_id],
-                .line_num = line_num,
-            });
-            if (results.items.len >= limit) break;
+
+            const cached = self.content_cache.get(file_id);
+            const content = cached orelse
+                (io.readFileAlloc(self.allocator, self.files.items[file_id], max_fallback_read_bytes) catch continue);
+            defer if (cached == null) self.allocator.free(content);
+
+            var line_num: u32 = 0;
+            var line_it = std.mem.splitScalar(u8, content, '\n');
+            while (line_it.next()) |line| : (line_num += 1) {
+                if (std.mem.indexOf(u8, line, word) == null) continue;
+                var word_it = std.mem.tokenizeAny(u8, line, word_delimiters);
+                while (word_it.next()) |token| {
+                    if (std.mem.eql(u8, token, word)) {
+                        try results.append(self.allocator, .{
+                            .path = self.files.items[file_id],
+                            .line_num = line_num,
+                        });
+                        if (results.items.len >= limit) break :outer;
+                        break;
+                    }
+                }
+            }
         }
         return try results.toOwnedSlice(self.allocator);
     }
@@ -793,7 +953,7 @@ pub const Explorer = struct {
         defer self.dep_lock.unlockShared();
         self.file_lock.lockShared();
         defer self.file_lock.unlockShared();
-        const file_id = self.file_map.get(path) orelse return &[_]u32{};
+        const file_id = self.find_file_id(path) orelse return &[_]u32{};
         if (self.depgraph.imports.get(file_id)) |list| {
             return list.items;
         }
@@ -806,7 +966,7 @@ pub const Explorer = struct {
         defer self.dep_lock.unlockShared();
         self.file_lock.lockShared();
         defer self.file_lock.unlockShared();
-        const file_id = self.file_map.get(path) orelse return &[_]u32{};
+        const file_id = self.find_file_id(path) orelse return &[_]u32{};
         if (self.depgraph.reverse_deps.get(file_id)) |list| {
             return list.items;
         }
@@ -830,7 +990,7 @@ pub const Explorer = struct {
         self.file_lock.lockShared();
         defer self.file_lock.unlockShared();
 
-        const file_id = self.file_map.get(path) orelse return ChangeImpact{
+        const file_id = self.find_file_id(path) orelse return ChangeImpact{
             .direct = &[_]u32{},
             .transitive = &[_]u32{},
             .depth_reached = 0,

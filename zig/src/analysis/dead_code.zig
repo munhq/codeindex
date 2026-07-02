@@ -12,16 +12,16 @@ pub const DeadSymbol = struct {
 
 /// Skip list: symbols that are commonly used externally without explicit references.
 const skip_names = [_][]const u8{
-    "main", "new", "default", "init", "deinit", "drop", "clone", "fmt",
-    "from", "into", "try_from", "try_into", "as_ref", "as_mut",
-    "serialize", "deserialize", "build", "run", "start", "stop",
+    "main",  "new",  "default",  "init",     "deinit", "drop",   "clone",     "fmt",
+    "from",  "into", "try_from", "try_into", "as_ref", "as_mut", "serialize", "deserialize",
+    "build", "run",  "start",    "stop",
 };
 
 fn should_skip(name: []const u8, kind: models.SymbolKind) bool {
     // Skip test functions
     if (kind == .@"test") return true;
     // Skip impl blocks
-    if (kind == .@"impl") return true;
+    if (kind == .impl) return true;
     // Skip imports/modules
     if (kind == .import or kind == .module) return true;
     // Skip short names (likely getters/setters)
@@ -47,11 +47,14 @@ pub fn find_dead_code(allocator: std.mem.Allocator, exp: *explorer.Explorer) ![]
         for (outline.symbols) |sym| {
             if (should_skip(sym.name, sym.kind)) continue;
 
-            // Check if symbol appears in word index in other files
+            // Check if symbol appears in word index in other files. Postings
+            // are file-id sets and may be stale toward false positives (a file
+            // that dropped the word keeps its entry until compaction) — for
+            // dead-code detection that errs toward "used", never toward
+            // falsely reporting dead.
             const hits = exp.words.search(sym.name);
             var used_externally = false;
-            for (hits) |hit| {
-                const hit_file_id = @as(u32, @intCast(hit >> 32));
+            for (hits) |hit_file_id| {
                 if (hit_file_id != file_id) {
                     used_externally = true;
                     break;
