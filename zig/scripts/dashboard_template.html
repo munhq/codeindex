@@ -1,0 +1,187 @@
+<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
+<title>codeindex · __NAME__</title>
+<link rel=preconnect href="https://fonts.googleapis.com"><link rel=preconnect href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Martian+Mono:wght@400;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel=stylesheet>
+<script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+<style>
+:root{--ink:#0a0c0f;--panel:#0f1318;--panel2:#141922;--line:#222a35;--line2:#2c3644;--text:#e7ebf1;--dim:#8b95a4;--faint:#5b6573;
+ --amber:#f4b740;--amber-d:#caa13a;--amber-soft:rgba(244,183,64,.10);--ai:#c792ea;
+ --crit:#ff5a5f;--high:#ff9f43;--med:#ffd24a;--low:#4ade80;
+ --mono:'JetBrains Mono',ui-monospace,monospace;--disp:'Martian Mono',monospace;--sans:'IBM Plex Sans',sans-serif;}
+*{box-sizing:border-box}html{scrollbar-color:#2c3644 #0a0c0f}
+body{margin:0;background:var(--ink);color:var(--text);font-family:var(--sans);font-size:14px;line-height:1.55;-webkit-font-smoothing:antialiased}
+body::before{content:"";position:fixed;inset:0;z-index:0;pointer-events:none;background-image:radial-gradient(circle,rgba(255,255,255,.02) 1px,transparent 1px);background-size:24px 24px;mask:radial-gradient(120% 90% at 70% -10%,#000 30%,transparent 80%)}
+body::after{content:"";position:fixed;inset:0;z-index:0;pointer-events:none;background:radial-gradient(80% 60% at 78% -20%,rgba(244,183,64,.06),transparent 60%),radial-gradient(60% 50% at 0% 100%,rgba(199,146,234,.05),transparent 60%)}
+.app{position:relative;z-index:1}
+header{padding:22px 34px 0;border-bottom:1px solid var(--line)}
+.eyebrow{font-family:var(--disp);font-size:10px;letter-spacing:.28em;color:var(--amber);text-transform:uppercase;display:flex;align-items:center;gap:9px}
+.eyebrow .dot{width:6px;height:6px;border-radius:50%;background:var(--low);box-shadow:0 0 8px var(--low);animation:pulse 2.4s infinite}
+@keyframes pulse{50%{opacity:.4}}
+h1{margin:7px 0 0;font-family:var(--disp);font-weight:700;font-size:26px;letter-spacing:-.01em}
+.readout{display:flex;margin:20px 0 4px;flex-wrap:wrap}
+.cell{padding:0 26px 14px 0;margin-right:26px;border-right:1px solid var(--line);min-width:92px}.cell:last-child{border:0}
+.cell .n{font-family:var(--disp);font-weight:700;font-size:24px;letter-spacing:-.02em;line-height:1}
+.cell .l{font-family:var(--disp);font-size:9px;letter-spacing:.18em;color:var(--faint);text-transform:uppercase;margin-top:7px}
+.cell.ai .n{color:var(--ai)}
+nav{display:flex;gap:2px;margin-top:10px}
+nav button{position:relative;background:none;border:0;color:var(--dim);font-family:var(--disp);font-size:11px;letter-spacing:.1em;text-transform:uppercase;padding:12px 16px 14px;cursor:pointer;transition:color .15s}
+nav button:hover{color:var(--text)}nav button.on{color:var(--amber)}
+nav button.on::after{content:"";position:absolute;left:14px;right:14px;bottom:-1px;height:2px;background:var(--amber);box-shadow:0 0 10px var(--amber)}
+nav button .badge{display:inline-block;margin-left:7px;font-size:10px;color:var(--ink);background:var(--amber);border-radius:9px;padding:0 6px;font-weight:700}
+.tab{display:none;padding:26px 34px 60px;animation:rise .4s ease both}.tab.on{display:block}
+@keyframes rise{from{opacity:0;transform:translateY(8px)}}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+.card{background:linear-gradient(180deg,var(--panel2),var(--panel));border:1px solid var(--line);border-radius:14px;padding:16px 18px;box-shadow:inset 0 1px 0 rgba(255,255,255,.03),0 12px 30px -22px #000;animation:rise .5s ease both}
+.card.full{grid-column:1/3}
+.h{font-family:var(--disp);font-size:10px;letter-spacing:.2em;color:var(--dim);text-transform:uppercase;margin:0 0 13px;display:flex;justify-content:space-between;align-items:center;gap:10px}
+.h .r{color:var(--faint);letter-spacing:.06em;font-size:9px}
+.hero{padding:0;overflow:hidden}.hero .h{padding:16px 18px 0}
+#graph{height:600px;position:relative}
+#graph::before{content:"";position:absolute;inset:0;background:radial-gradient(50% 60% at 50% 45%,rgba(244,183,64,.07),transparent 70%);pointer-events:none}
+.gbtn{font-family:var(--disp);font-size:10px;letter-spacing:.1em;text-transform:uppercase;background:var(--panel2);border:1px solid var(--line2);color:var(--text);border-radius:7px;padding:5px 11px;cursor:pointer}
+.gbtn:hover{border-color:var(--amber);color:var(--amber)}
+.bar{display:flex;align-items:center;gap:11px;margin:7px 0}.bar .lbl{width:92px;font-family:var(--mono);font-size:12px}
+.bar .track{flex:1;height:8px;background:#0b0f15;border-radius:6px;overflow:hidden;border:1px solid var(--line)}.bar .fill{height:100%;background:linear-gradient(90deg,var(--amber-d),var(--amber));border-radius:6px}
+.bar .v{width:104px;text-align:right;font-family:var(--mono);font-size:11px;color:var(--dim)}
+.scroll{max-height:560px;overflow:auto;margin:-2px -4px}
+table{width:100%;border-collapse:separate;border-spacing:0}
+th{position:sticky;top:0;background:var(--panel);text-align:left;font-family:var(--disp);font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:var(--faint);padding:8px 10px;border-bottom:1px solid var(--line);z-index:1}
+td{padding:8px 10px;border-bottom:1px solid rgba(34,42,53,.5);vertical-align:top}
+tr.clk{cursor:pointer}tr.clk:hover td{background:rgba(244,183,64,.05)}
+tr.clk td:last-child{position:relative}tr.clk:hover td:last-child::after{content:"fix →";position:absolute;right:8px;top:8px;font-family:var(--disp);font-size:9px;letter-spacing:.1em;color:var(--amber)}
+.mono{font-family:var(--mono);font-size:12px}.dim{color:var(--dim)}
+.chip{display:inline-block;font-family:var(--disp);font-size:9px;letter-spacing:.08em;text-transform:uppercase;padding:2px 8px;border-radius:20px;border:1px solid currentColor;white-space:nowrap}
+.s-crit{color:var(--crit)}.s-high{color:var(--high)}.s-med{color:var(--med)}.s-low{color:var(--low)}.s-ai{color:var(--ai)}
+.dotpill{display:inline-flex;align-items:center;gap:7px;background:#0c1016;border:1px solid var(--line);border-radius:8px;padding:5px 11px;margin:4px 6px 0 0;font-size:13px}.dotpill b{font-family:var(--disp);color:var(--text)}
+.fix{color:var(--low);font-size:12.5px}
+.rb{display:inline-block;width:74px;height:7px;background:#0b0f15;border-radius:4px;border:1px solid var(--line);vertical-align:middle}.rb>i{display:block;height:100%;border-radius:4px;background:linear-gradient(90deg,var(--high),var(--crit))}
+.ledger{display:flex;flex-direction:column;gap:9px}
+.item{display:grid;grid-template-columns:5px 108px 1fr;gap:14px;background:linear-gradient(180deg,var(--panel2),var(--panel));border:1px solid var(--line);border-radius:11px;padding:13px 16px 13px 0;align-items:start;cursor:pointer;animation:rise .5s ease both;transition:border-color .15s,transform .1s}
+.item:hover{border-color:var(--amber-d);transform:translateX(2px)}
+.item .pbar{border-radius:11px 0 0 11px;align-self:stretch}.item .meta{padding-left:14px}
+.item .cat{font-family:var(--disp);font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:var(--dim)}
+.item .pl{font-family:var(--disp);font-size:9px;letter-spacing:.1em;text-transform:uppercase;margin-top:6px}
+.item .ti{font-weight:600;font-size:14px;margin-bottom:4px}.item .lo{font-family:var(--mono);font-size:11px;color:var(--faint);margin-top:6px}
+.p1 .pbar{background:var(--crit);box-shadow:0 0 16px -2px var(--crit)}.p2 .pbar{background:var(--high)}.p3 .pbar{background:var(--med)}.p4 .pbar{background:var(--low)}
+.p1 .pl{color:var(--crit)}.p2 .pl{color:var(--high)}.p3 .pl{color:var(--med)}.p4 .pl{color:var(--low)}
+/* tasks pill + drawer */
+.taskpill{position:fixed;top:18px;right:24px;z-index:30;font-family:var(--disp);font-size:11px;letter-spacing:.06em;text-transform:uppercase;background:rgba(244,183,64,.12);border:1px solid var(--amber-d);color:var(--amber);border-radius:10px;padding:9px 15px;cursor:pointer;backdrop-filter:blur(6px);box-shadow:0 6px 20px -10px #000}
+.taskpill b{font-weight:700}
+.ov{position:fixed;inset:0;background:rgba(0,0,0,.55);opacity:0;pointer-events:none;transition:.2s;z-index:40}.ov.on{opacity:1;pointer-events:auto}
+.drawer{position:fixed;top:0;right:0;height:100%;width:480px;max-width:94vw;background:linear-gradient(180deg,#10141a,#0c0f14);border-left:1px solid var(--line2);z-index:50;transform:translateX(101%);transition:transform .26s cubic-bezier(.2,.85,.25,1);box-shadow:-34px 0 70px -34px #000;display:flex;flex-direction:column}
+.drawer.open{transform:none}
+.dhead{display:flex;justify-content:space-between;align-items:center;padding:16px 22px;border-bottom:1px solid var(--line)}
+.dhead .dk{font-family:var(--disp);font-size:9px;letter-spacing:.2em;text-transform:uppercase;color:var(--amber)}
+.dhead .x{background:none;border:0;color:var(--dim);font-size:24px;cursor:pointer;line-height:1}
+.dbody{padding:18px 22px;overflow:auto}
+.dbody h3{margin:0 0 8px;font-size:16px;font-family:var(--mono);word-break:break-word;line-height:1.4}
+.dmeta{margin-bottom:14px;display:flex;gap:9px;align-items:center;flex-wrap:wrap}
+.dwhy{background:var(--panel);border:1px solid var(--line);border-left:2px solid var(--amber);border-radius:8px;padding:11px 13px;color:var(--dim);font-size:13px;margin-bottom:16px}
+.dpl{font-family:var(--disp);font-size:9px;letter-spacing:.16em;text-transform:uppercase;color:var(--faint);margin-bottom:7px}
+.dbody pre{background:#070a0d;border:1px solid var(--line2);border-radius:9px;padding:13px;font-family:var(--mono);font-size:12px;line-height:1.65;white-space:pre-wrap;color:#cfd6e0;max-height:50vh;overflow:auto;margin:0}
+.dbtns{display:flex;gap:9px;margin-top:13px}
+.dbtns button{flex:1;font-family:var(--disp);font-size:10px;letter-spacing:.1em;text-transform:uppercase;padding:11px;border-radius:8px;cursor:pointer;background:var(--amber);border:1px solid var(--amber);color:#1a1304;font-weight:700}
+.dbtns button.alt{background:transparent;color:var(--amber)}
+.dhint{font-size:11px;color:var(--faint);margin-top:11px}
+</style></head><body><div class=app>
+<button id=taskpill class=taskpill onclick=openTasks()>▸ tasks · <b>0</b></button>
+<header>
+ <div class=eyebrow><span class=dot></span>codeindex // code intelligence</div>
+ <h1>__NAME__</h1>
+ <div class=readout id=readout></div>
+ <nav id=nav></nav>
+</header>
+<div id=tabs></div>
+</div>
+<div class=ov id=ov onclick=closeDrawer()></div>
+<aside class=drawer id=drawer><div class=dhead><span class=dk id=dk></span><button class=x onclick=closeDrawer()>×</button></div><div class=dbody id=dbody></div></aside>
+<script>const D=__DATA__;
+const esc=s=>(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;');
+const sevC={critical:'s-crit',high:'s-high',medium:'s-med',low:'s-low'};
+const sevtag=s=>`<span class="chip ${sevC[s]||'s-low'}">${s}</span>`;
+const priC={1:['crit','s-crit'],2:['high','s-high'],3:['med','s-med'],4:['low','s-low']};
+const tbl=(cols,rows,kind)=>`<div class=scroll><table><thead><tr>${cols.map(c=>`<th>${c}</th>`).join('')}</tr></thead><tbody>${rows.map((r,i)=>`<tr class="${kind?'clk':''}"${kind?` onclick="openF('${kind}',${i})"`:''}>${r.map(c=>`<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+const s=D.status;
+readout.innerHTML=[['files',s.files],['symbols',(s.symbols||0).toLocaleString()],['savings',s.savings_pct+'%'],['dep edges',D.edges.length],['security',D.secSummary.total]]
+ .map(([l,n])=>`<div class=cell><div class=n>${n}</div><div class=l>${l}</div></div>`).join('')
+ +`<div class="cell ai"><div class=n>${D.ai.pct}%</div><div class=l>ai commits</div></div><div class="cell ai"><div class=n>${D.ai.files}</div><div class=l>ai-touched</div></div>`;
+const maxH=Math.max(...D.hotspots.map(x=>x.score),1);const ps=D.planSummary;
+const TABS={};
+TABS.Plan=`
+ <div class=card full style="margin-bottom:18px"><div class=h><span>action plan · ${ps.total} items</span><span class=r>${[['crit',ps.critical,'s-crit'],['high',ps.high,'s-high'],['med',ps.medium,'s-med'],['low',ps.low,'s-low']].map(([l,n,c])=>`<span class="chip ${c}">${l} ${n}</span>`).join(' ')} · click any item → fix prompt</span></div>
+  <p class=dim style="margin:-4px 0 0">A ranked review synthesised from every finding. Click an item for a ready prompt, or hit <b style="color:var(--amber)">tasks</b> (top-right) to copy the whole batch.</p></div>
+ <div class=card full><div class=h>prioritised items</div><div class=ledger>${D.plan.map((p,i)=>`<div class="item p${p.pri}" onclick="openF('plan',${i})"><div class=pbar></div><div class=meta><div class=cat>${p.cat}</div><div class=pl>${priC[p.pri][0]}</div></div><div><div class=ti>${esc(p.title)}</div><div class=fix>↳ ${esc(p.fix)}</div>${(p.loc&&p.loc.length)?`<div class=lo>${p.loc.join('  ·  ')}</div>`:''}</div></div>`).join('')}</div></div>`;
+TABS.Overview=`<div class=grid>
+ <div class="card full hero"><div class=h><span>dependency graph · packages <span class=dim style="text-transform:none;letter-spacing:0">— click a node to drill into files</span></span><button class=gbtn id=gback style="display:none">← packages</button></div><div id=graph></div></div>
+ <div class=card><div class=h>languages</div>${D.languages.slice(0,13).map(l=>{const m=Math.max(...D.languages.map(x=>x.symbols),1);return `<div class=bar><span class=lbl>${l.lang}</span><span class=track><span class=fill style="width:${Math.max(2,Math.round(l.symbols/m*100))}%"></span></span><span class=v>${l.symbols} · ${l.files}f</span></div>`}).join('')}</div>
+ <div class=card><div class=h>ai authorship <span class=r>git markers</span></div><div style="font-family:var(--disp);font-size:30px;color:var(--ai);font-weight:700;line-height:1">${D.ai.pct}%</div><p style="margin:8px 0 0">of commits AI-authored <span class=dim>(${D.ai.commits}/${D.ai.total})</span> · <b style="color:var(--ai)">${D.ai.filepct}%</b> of files AI-touched <span class=dim>(${D.ai.files})</span></p><p class=dim style="margin:8px 0 0;font-size:12.5px">Cross-referenced into Hotspots — see <i>AI-built &amp; risky</i> code at a glance.</p></div>
+ <div class="card full"><div class=h>health snapshot</div>${Object.entries({'god modules':D.health.god_modules,'circular deps':D.health.circular_deps,'panic sites':D.health.panic_sites,'dead symbols':D.health.dead_symbols,'duplicate names':D.health.duplicate_names,'clone groups':D.health.clone_groups,'hardcoded IPs':D.literal.ips,'hardcoded URLs':D.literal.urls,'secrets':D.literal.secrets,'TODOs':D.literal.todos}).map(([k,v])=>`<span class=dotpill>${k} <b>${v??0}</b></span>`).join('')}</div></div>`;
+TABS.Hotspots=`<div class=card full><div class=h><span>hotspots · churn × complexity</span><span class=r>click a row → fix prompt</span></div>
+ <p class=dim style="margin:-4px 0 12px">Files changed often <i>and</i> dense — where risk concentrates.</p>
+ ${tbl(['risk','file','lang','changes','cx','suggestion'],D.hotspots.map(h=>[`<span class=rb><i style="width:${Math.round(h.score/maxH*100)}%"></i></span>`,`<span class=mono>${h.file}</span>${h.ai?' <span class="chip s-ai">ai</span>':''}`,`<span class=dim>${h.lang}</span>`,h.churn,h.cx,`<span class=fix>${esc(h.sugg)}</span>`]),'hot')}</div>`;
+TABS.Security=`<div class=grid>
+ <div class="card full"><div class=h><span>security findings · ${D.secSummary.total}</span><span class=r>${[['crit',D.secSummary.critical,'s-crit'],['high',D.secSummary.high,'s-high'],['med',D.secSummary.medium,'s-med'],['low',D.secSummary.low,'s-low']].map(([l,n,c])=>`<span class="chip ${c}">${l} ${n||0}</span>`).join(' ')} · click → fix prompt</span></div>
+  ${tbl(['severity','rule','location'],D.security.map(f=>[sevtag(f.sev),`<span class=mono>${f.rule}</span>`,`<span class="mono dim">${f.file}:${f.line}</span>`]),'sec')}</div>
+ <div class="card full"><div class=h><span>hardcoded literals</span><span class=r>click → fix prompt</span></div>${tbl(['category','snippet','location'],D.literals.map(f=>[`<span class=dim>${f.cat}</span>`,`<span class=mono>${esc(f.snip)}</span>`,`<span class="mono dim">${f.file}:${f.line}</span>`]),'lit')}</div></div>`;
+TABS.Quality=`<div class=grid>
+ <div class=card><div class=h><span>copy-paste clones</span><span class=r>click → fix prompt</span></div>${tbl(['function(s)','lines','copies'],D.clones.map(c=>[`<span class=mono>${c.names.join(', ')}</span><div class="mono dim" style="margin-top:3px">${c.files.join(' · ')}</div>`,c.lines,c.count]),'clone')}</div>
+ <div class=card><div class=h><span>reinvention · same name, many files</span><span class=r>click → fix prompt</span></div>${tbl(['name','kind','files'],D.duplication.map(d=>[`<span class=mono>${d.name}</span>`,`<span class=dim>${d.kind}</span>`,d.count]),'dup')}</div>
+ <div class="card full"><div class=h><span>dead code <span class=r style="color:var(--faint)">heuristic</span></span><span class=r>click → verify &amp; remove</span></div>${tbl(['name','kind','location'],D.dead.map(d=>[`<span class=mono>${d.name}</span>`,`<span class=dim>${d.kind}</span>`,`<span class="mono dim">${d.file}:${d.line}</span>`]),'dead')}</div></div>`;
+TABS.Structure=`<div class=grid>
+ <div class=card><div class=h><span>god modules</span><span class=r>click → split plan</span></div>${tbl(['file','in','out','I'],D.coupling.god_modules.map(m=>[`<span class=mono>${m.file}</span>`,m.in,m.out,m.I]),'god')}</div>
+ <div class=card><div class=h>stable cores</div>${tbl(['file','in','out','I'],D.coupling.stable_cores.map(m=>[`<span class=mono>${m.file}</span>`,m.in,m.out,m.I]),'stable')}</div>
+ <div class=card><div class=h>unstable drivers</div>${tbl(['file','in','out','I'],D.coupling.unstable_drivers.map(m=>[`<span class=mono>${m.file}</span>`,m.in,m.out,m.I]),'driver')}</div>
+ <div class=card><div class=h><span>circular chains <span class=r>${D.cycles.length}</span></span><span class=r>click → break it</span></div><div class=scroll>${D.cycles.map((c,i)=>`<div class=clk style="margin:7px 0;cursor:pointer;padding:4px;border-radius:6px" onclick="openF('cyc',${i})" onmouseover="this.style.background='rgba(244,183,64,.05)'" onmouseout="this.style.background=''"><span class="chip s-high">#${i+1}</span> <span class=mono>${c.join(' → ')}</span></div>`).join('')||'<div class=dim>none</div>'}</div></div></div>`;
+const order=['Plan','Overview','Hotspots','Security','Quality','Structure'];const badge={Plan:ps.total,Security:D.secSummary.total};
+order.forEach((k,i)=>{const b=document.createElement('button');b.innerHTML=k+(badge[k]?`<span class=badge>${badge[k]}</span>`:'');if(i==0)b.className='on';
+ b.onclick=()=>{document.querySelectorAll('nav button').forEach(x=>x.classList.remove('on'));document.querySelectorAll('.tab').forEach(x=>x.classList.remove('on'));b.classList.add('on');document.getElementById('tab-'+k).classList.add('on');if(k=='Overview')setTimeout(drawPkg,30);};
+ nav.append(b);const d=document.createElement('div');d.className='tab'+(i==0?' on':'');d.id='tab-'+k;d.innerHTML=TABS[k];tabs.append(d);});
+document.querySelectorAll('#tab-Plan .item').forEach((el,i)=>el.style.animationDelay=(i*26)+'ms');
+/* ── actionability: per-finding agent prompts + task queue ── */
+const ARR={sec:D.security,lit:D.literals,clone:D.clones,dup:D.duplication,dead:D.dead,hot:D.hotspots,god:D.coupling.god_modules,stable:D.coupling.stable_cores,driver:D.coupling.unstable_drivers,cyc:D.cycles,plan:D.plan};
+const KL={sec:'security finding',lit:'hardcoded literal',clone:'copy-paste clone',dup:'reinvention',dead:'dead code',hot:'hotspot',god:'god module',stable:'stable core',driver:'unstable driver',cyc:'circular dependency',plan:'action item'};
+const SECFIX={hardcoded_secret_assignment:'Move it to env/secret-manager and rotate the exposed credential.',private_key_block:'Remove the committed key, rotate it, load from a vault.',aws_access_key:'Revoke the AWS key and switch to IAM roles.',solidity_tx_origin_auth:'Replace tx.origin auth with msg.sender.',solidity_delegatecall:'Audit the delegatecall target — ensure trusted & immutable.',solidity_low_level_call:'Check the return value; use a safe wrapper.',command_injection:'Never pass untrusted input to exec/system.'};
+const WHY={sec:'Leaked credential or unsafe pattern — exploitable. Remediate now; rotate if a secret.',lit:'Hardcoded endpoint/secret breaks across environments and can leak.',clone:'Duplicated logic drifts out of sync — a fix in one copy leaves the others buggy.',dup:'The same thing reimplemented many times — consolidate to one source of truth.',god:'Over-coupled module: hard to change safely and concentrates risk.',stable:'Heavily depended-on — changes here ripple widely; keep it stable and well-tested.',driver:'High fan-out: depends on a lot, so it breaks easily as those change.',cyc:'Circular dependency blocks modular build/test and signals tangled design.',dead:'Unused code is maintenance drag and review noise.',hot:'Frequently-changed complex code is statistically where bugs land.',plan:'Prioritised action synthesised from the findings.'};
+function P(kind,it){switch(kind){
+ case 'sec':return `Fix a ${it.sev} security finding (${it.rule}) at ${it.file}:${it.line}. Open the file, explain the concrete risk, and show the minimal diff. ${SECFIX[it.rule]||'Review and remediate.'}`;
+ case 'lit':return `Hardcoded ${it.cat} at ${it.file}:${it.line}: \`${it.snip}\`. Move it to configuration/secret management and replace the literal. Show the diff.`;
+ case 'clone':return `These function(s) ${it.names.join(', ')} (${it.lines} lines) are copy-pasted ${it.count}× across:\n${it.files.map(f=>'  - '+f).join('\n')}\nUse codeindex find_callers / get_imported_by to confirm every usage, extract ONE shared implementation, and replace all call sites. Show the new function and the edits.`;
+ case 'dup':return `\`${it.name}\` (${it.kind}) is reimplemented in ${it.count} files. Find all definitions (codeindex find_symbol "${it.name}"), consolidate into one shared utility, and update imports. Show the diff.`;
+ case 'dead':return `Verify whether ${it.name} (${it.kind}) at ${it.file}:${it.line} is truly unused — check reflection, FFI, dynamic dispatch and exported API (codeindex find_callers "${it.name}"). If unused, remove it and any now-dead references.`;
+ case 'hot':return `${it.file} is a hotspot — changed ${it.churn}× with complexity ${it.cx}. ${it.sugg}\nRun codeindex get_change_impact on it first, add tests for its critical paths, then propose targeted refactors to reduce complexity. Show a plan + the first diff.`;
+ case 'god':case 'stable':case 'driver':return `${it.file} has fan-in ${it.in}, fan-out ${it.out} (instability ${it.I}). Use codeindex get_imports/get_imported_by to map its dependencies, then propose how to split it into cohesive units and which dependencies to invert behind interfaces.`;
+ case 'cyc':return `Break this circular dependency:\n  ${it.join(' → ')} → ${it[0]}\nIdentify the shared type/interface to extract into a new module and show the change.`;
+ case 'plan':return it.task+((it.loc&&it.loc.length)?'\nLocations: '+it.loc.join(', '):'');}}
+function titleOf(kind,it){return ({sec:()=>it.rule,lit:()=>it.cat+' literal',clone:()=>it.names.join(', '),dup:()=>it.name,dead:()=>it.name,hot:()=>it.file.split('/').pop(),god:()=>it.file.split('/').pop(),stable:()=>it.file.split('/').pop(),driver:()=>it.file.split('/').pop(),cyc:()=>'Circular dependency ('+it.length+' files)',plan:()=>it.title})[kind]();}
+function locOf(kind,it){return ({sec:()=>it.file+':'+it.line,lit:()=>it.file+':'+it.line,clone:()=>it.files.join(' · '),dup:()=>'',dead:()=>it.file+':'+it.line,hot:()=>it.file,god:()=>it.file,stable:()=>it.file,driver:()=>it.file,cyc:()=>it.join(' → '),plan:()=>(it.loc||[]).join(' · ')})[kind]();}
+let CUR='',Q=[];
+function openF(kind,i){const it=ARR[kind][i];CUR=P(kind,it);
+ const sev=kind=='sec'?sevtag(it.sev):(kind=='plan'?`<span class="chip ${priC[it.pri][1]}">${priC[it.pri][0]}</span>`:'');
+ document.getElementById('dk').textContent=KL[kind];
+ document.getElementById('dbody').innerHTML=`<h3>${esc(titleOf(kind,it))}</h3><div class=dmeta>${sev}<span class="mono dim">${esc(locOf(kind,it))}</span></div><div class=dwhy>${WHY[kind]}</div><div class=dpl>Prompt for your agent</div><pre id=dprompt>${esc(CUR)}</pre><div class=dbtns><button onclick="copyEl('dprompt',this)">copy prompt</button><button class=alt onclick="addTask(this)">+ add to tasks</button></div><div class=dhint>Paste into Claude Code / your agent. It references codeindex tools so the agent can verify before editing.</div>`;
+ openDrawer();}
+function openTasks(){const all=[...Q.map(t=>({t,q:1})),...D.plan.map(p=>({t:p.task}))];
+ document.getElementById('dk').textContent='task queue';
+ document.getElementById('dbody').innerHTML=`<h3>${all.length} tasks <span class=dim style="font-size:12px">${Q.length} queued · ${D.plan.length} from plan</span></h3><div class=dbtns style="margin:6px 0 14px"><button onclick="copyEl('alltasks',this)">copy all</button><button class=alt onclick=exportTasks()>export .md</button></div><pre id=alltasks>${all.map((x,i)=>`${String(i+1).padStart(2,'0')}. ${esc(x.t)}${x.q?'   «added»':''}`).join('\n')}</pre><div class=dhint>Hand the whole list to an agent, or click individual findings to queue more.</div>`;
+ openDrawer();}
+function openDrawer(){document.getElementById('ov').classList.add('on');document.getElementById('drawer').classList.add('open');}
+function closeDrawer(){document.getElementById('ov').classList.remove('on');document.getElementById('drawer').classList.remove('open');}
+function copyEl(id,btn){navigator.clipboard.writeText(document.getElementById(id).innerText);if(btn){const o=btn.textContent;btn.textContent='copied ✓';setTimeout(()=>btn.textContent=o,1300);}}
+function addTask(btn){if(CUR){Q.push(CUR);pill();if(btn){btn.textContent='added ✓';setTimeout(()=>btn.textContent='+ add to tasks',1300);}}}
+function pill(){document.getElementById('taskpill').innerHTML='▸ tasks · <b>'+(D.plan.length+Q.length)+'</b>';}
+function exportTasks(){const all=[...Q,...D.plan.map(p=>p.task)].map((t,i)=>(i+1)+'. '+t).join('\n');const b=new Blob(['# codeindex — action plan ('+D.name+')\n\n'+all+'\n'],{type:'text/markdown'});const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='codeindex-tasks.md';a.click();}
+document.addEventListener('keydown',e=>{if(e.key=='Escape')closeDrawer();});
+pill();
+let net=null;
+function show(nodes,edges){if(net)net.destroy();net=new vis.Network(document.getElementById('graph'),{nodes:new vis.DataSet(nodes),edges:new vis.DataSet(edges)},{
+ nodes:{shape:'dot',scaling:{min:5,max:40},font:{color:'#cfd6e0',size:12,face:'JetBrains Mono'},borderWidth:1.5,color:{background:'#f4b740',border:'#caa13a',highlight:{background:'#ffd27a',border:'#fff'},hover:{background:'#ffce6b',border:'#f4b740'}}},
+ edges:{arrows:{to:{scaleFactor:.5}},color:{color:'rgba(140,150,165,.18)',highlight:'#f4b740',hover:'#f4b740'},smooth:{type:'continuous'},scaling:{min:.5,max:5},width:.5},
+ physics:{stabilization:{iterations:160},barnesHut:{gravitationalConstant:-9500,springLength:155,centralGravity:.25}},interaction:{hover:true,tooltipDelay:120}});
+ net.on('click',p=>{if(!p.nodes.length)return;const n=net.body.data.nodes.get(p.nodes[0])||{};if(n.pkg)drawFiles(n.pkg);});}
+function drawPkg(){document.getElementById('gback').style.display='none';show(D.nodes,D.edges);}
+function drawFiles(pk){document.getElementById('gback').style.display='inline-block';const inpk=new Set(D.pkgFiles[pk]||[]),vis_=new Set(inpk);
+ D.fileEdges.forEach(([a,b])=>{if(inpk.has(a))vis_.add(b);if(inpk.has(b))vis_.add(a)});
+ const arr=[...vis_].slice(0,120),idx={};const nodes=arr.map((f,i)=>{idx[f]=i;const m=D.fileMeta[f]||{};return {id:i,label:f.split('/').pop(),title:f,value:(m.sym||0)+1,color:inpk.has(f)?undefined:{background:'#3a4250',border:'#4c5666'}}});
+ const seen=new Set(),edges=[];D.fileEdges.forEach(([a,b])=>{if(idx[a]!=null&&idx[b]!=null){const k=idx[a]+'-'+idx[b];if(!seen.has(k)){seen.add(k);edges.push({from:idx[a],to:idx[b]})}}});show(nodes,edges);}
+document.getElementById('gback').onclick=drawPkg;setTimeout(drawPkg,40);
+</script></body></html>

@@ -58,6 +58,8 @@ clone html         https://github.com/tree-sitter/tree-sitter-html
 clone hcl          https://github.com/MichaHoffmann/tree-sitter-hcl
 clone dockerfile   https://github.com/camdencheek/tree-sitter-dockerfile
 clone markdown     https://github.com/tree-sitter-grammars/tree-sitter-markdown
+clone solidity     https://github.com/JoranHonig/tree-sitter-solidity
+clone proto        https://github.com/coder3101/tree-sitter-proto
 clone sql          https://github.com/DerekStride/tree-sitter-sql
 clone make         https://github.com/alemuller/tree-sitter-make
 clone nix          https://github.com/nix-community/tree-sitter-nix

@@ -27,6 +27,7 @@ pub const Language = enum {
     sql,
     dockerfile,
     protobuf,
+    solidity,
     nix,
     r,
     scala,
@@ -59,9 +60,18 @@ pub const Language = enum {
         if (std.mem.eql(u8, basename, "Makefile") or std.mem.eql(u8, basename, "makefile")) return .make;
         if (std.mem.eql(u8, basename, "Dockerfile") or std.mem.startsWith(u8, basename, "Dockerfile.")) return .dockerfile;
         if (std.mem.eql(u8, basename, "CMakeLists.txt")) return .cmake;
+        // .env, .env.local, .env.production … — KEY=value, parse as INI so they
+        // get indexed (and scanned for secrets, which is where secrets live).
+        if (std.mem.eql(u8, basename, ".env") or std.mem.startsWith(u8, basename, ".env.")) return .ini;
 
         if (extension.len == 0) return .unknown;
-        const ext = extension[1..]; // skip the dot
+        // Lowercase the extension so case variants (.R, .PY, .H, .Cpp) match.
+        var lower_buf: [16]u8 = undefined;
+        const raw_ext = extension[1..]; // skip the dot
+        const ext = if (raw_ext.len <= lower_buf.len) blk: {
+            for (raw_ext, 0..) |c, i| lower_buf[i] = std.ascii.toLower(c);
+            break :blk lower_buf[0..raw_ext.len];
+        } else raw_ext;
 
         if (std.mem.eql(u8, ext, "rs")) return .rust;
         if (std.mem.eql(u8, ext, "py") or std.mem.eql(u8, ext, "pyi")) return .python;
@@ -69,8 +79,9 @@ pub const Language = enum {
         if (std.mem.eql(u8, ext, "js") or std.mem.eql(u8, ext, "jsx") or std.mem.eql(u8, ext, "mjs") or std.mem.eql(u8, ext, "cjs")) return .javascript;
         if (std.mem.eql(u8, ext, "go")) return .go;
         if (std.mem.eql(u8, ext, "sh") or std.mem.eql(u8, ext, "bash")) return .bash;
-        if (std.mem.eql(u8, ext, "c")) return .c;
-        if (std.mem.eql(u8, ext, "cpp") or std.mem.eql(u8, ext, "cc") or std.mem.eql(u8, ext, "cxx")) return .cpp;
+        if (std.mem.eql(u8, ext, "c") or std.mem.eql(u8, ext, "h")) return .c;
+        if (std.mem.eql(u8, ext, "cpp") or std.mem.eql(u8, ext, "cc") or std.mem.eql(u8, ext, "cxx") or
+            std.mem.eql(u8, ext, "hpp") or std.mem.eql(u8, ext, "hh") or std.mem.eql(u8, ext, "hxx")) return .cpp;
         if (std.mem.eql(u8, ext, "java")) return .java;
         if (std.mem.eql(u8, ext, "rb")) return .ruby;
         if (std.mem.eql(u8, ext, "php")) return .php;
@@ -88,6 +99,7 @@ pub const Language = enum {
         if (std.mem.eql(u8, ext, "sql")) return .sql;
         if (std.mem.eql(u8, ext, "dockerfile")) return .dockerfile;
         if (std.mem.eql(u8, ext, "proto")) return .protobuf;
+        if (std.mem.eql(u8, ext, "sol")) return .solidity;
         if (std.mem.eql(u8, ext, "nix")) return .nix;
         if (std.mem.eql(u8, ext, "r")) return .r;
         if (std.mem.eql(u8, ext, "scala")) return .scala;
@@ -96,7 +108,7 @@ pub const Language = enum {
         if (std.mem.eql(u8, ext, "ex") or std.mem.eql(u8, ext, "exs")) return .elixir;
         if (std.mem.eql(u8, ext, "clj")) return .clojure;
         if (std.mem.eql(u8, ext, "dart")) return .dart;
-        if (std.mem.eql(u8, ext, "hcl") or std.mem.eql(u8, ext, "tf")) return .hcl;
+        if (std.mem.eql(u8, ext, "hcl") or std.mem.eql(u8, ext, "tf") or std.mem.eql(u8, ext, "tfvars")) return .hcl;
         if (std.mem.eql(u8, ext, "make") or std.mem.eql(u8, ext, "mk") or std.mem.eql(u8, ext, "makefile")) return .make;
         if (std.mem.eql(u8, ext, "cmake")) return .cmake;
         if (std.mem.eql(u8, ext, "md") or std.mem.eql(u8, ext, "markdown")) return .markdown;

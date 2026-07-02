@@ -48,12 +48,15 @@ extern fn tree_sitter_regex() *const anyopaque;
 // comment grammar removed (broken scanner includes)
 extern fn tree_sitter_haskell() *const anyopaque;
 extern fn tree_sitter_markdown() *const anyopaque;
+extern fn tree_sitter_solidity() *const anyopaque;
+extern fn tree_sitter_proto() *const anyopaque;
 
 // Embed tags.scm queries (symbol extraction)
 const rust_tags = @embedFile("../../vendor/grammars/rust/queries/tags.scm");
 const python_tags = @embedFile("../../vendor/grammars/python/queries/tags.scm");
 const go_tags = @embedFile("../../vendor/grammars/go/queries/tags.scm");
-const ts_tags = @embedFile("../../vendor/grammars/typescript/queries/tags.scm");
+// Custom (vendored typescript tags.scm only matched ambient/.d.ts signatures).
+const ts_tags = @embedFile("queries/typescript_tags.scm");
 const c_tags = @embedFile("../../vendor/grammars/c/queries/tags.scm");
 const cpp_tags = @embedFile("../../vendor/grammars/cpp/queries/tags.scm");
 const java_tags = @embedFile("../../vendor/grammars/java/queries/tags.scm");
@@ -65,6 +68,27 @@ const scala_tags = @embedFile("../../vendor/grammars/scala/queries/tags.scm");
 const elixir_tags = @embedFile("../../vendor/grammars/elixir/queries/tags.scm");
 const r_tags = @embedFile("../../vendor/grammars/r/queries/tags.scm");
 const swift_tags = @embedFile("../../vendor/grammars/swift/queries/tags.scm");
+const nix_tags = @embedFile("queries/nix_tags.scm");
+
+// Custom tags queries written in-tree (upstream grammars ship none). Stored
+// under src/parser/queries/ so they are version-controlled and survive a
+// vendor re-fetch, unlike the embeds above which come from fetched grammars.
+const zig_tags = @embedFile("queries/zig_tags.scm");
+const json_tags = @embedFile("queries/json_tags.scm");
+const toml_tags = @embedFile("queries/toml_tags.scm");
+const yaml_tags = @embedFile("queries/yaml_tags.scm");
+const css_tags = @embedFile("queries/css_tags.scm");
+const scss_tags = @embedFile("queries/scss_tags.scm");
+const html_tags = @embedFile("queries/html_tags.scm");
+const sql_tags = @embedFile("queries/sql_tags.scm");
+const bash_tags = @embedFile("queries/bash_tags.scm");
+const hcl_tags = @embedFile("queries/hcl_tags.scm");
+const dockerfile_tags = @embedFile("queries/dockerfile_tags.scm");
+const make_tags = @embedFile("queries/make_tags.scm");
+const markdown_tags = @embedFile("queries/markdown_tags.scm");
+const ini_tags = @embedFile("queries/ini_tags.scm");
+const solidity_tags = @embedFile("queries/solidity_tags.scm");
+const proto_tags = @embedFile("queries/proto_tags.scm");
 
 pub const Parser = struct {
     allocator: std.mem.Allocator,
@@ -83,13 +107,18 @@ pub const Parser = struct {
     }
 
     pub fn parse_file(self: *Parser, path: []const u8, language: models.Language) !models.FileOutline {
+        const content = try io.readFileAlloc(self.allocator, path, 1024 * 1024 * 10); // 10MB limit
+        defer self.allocator.free(content);
+        return self.parse_source(path, language, content);
+    }
+
+    /// Parse already-loaded source. Split out from parse_file so it can be
+    /// tested directly with literal source (no temp files).
+    pub fn parse_source(self: *Parser, path: []const u8, language: models.Language, content: []const u8) !models.FileOutline {
         const lang = try self.get_ts_language(language);
         if (!ts.ts_parser_set_language(self.parser, @ptrCast(lang))) {
             return error.TSLanguageSetFailed;
         }
-
-        const content = try io.readFileAlloc(self.allocator, path, 1024 * 1024 * 10); // 10MB limit
-        defer self.allocator.free(content);
 
         const tree = ts.ts_parser_parse_string(self.parser, null, content.ptr, @intCast(content.len)) orelse return error.TSParseFailed;
         defer ts.ts_tree_delete(tree);
@@ -113,6 +142,12 @@ pub const Parser = struct {
             var error_offset: u32 = 0;
             var error_type: ts.TSQueryError = ts.TSQueryErrorNone;
             const query = ts.ts_query_new(@ptrCast(lang), query_source.ptr, @intCast(query_source.len), &error_offset, &error_type) orelse {
+                // A malformed query yields zero symbols silently otherwise — log
+                // which language and byte offset failed so it can be fixed.
+                std.debug.print(
+                    "codeindex: tags query failed to compile for {s} (ts error {d} at byte {d})\n",
+                    .{ @tagName(language), error_type, error_offset },
+                );
                 return self.create_outline(path, language, content, &symbols, &imports);
             };
             defer ts.ts_query_delete(query);
@@ -138,7 +173,11 @@ pub const Parser = struct {
                     if (std.mem.eql(u8, tag, "name")) {
                         const start_byte = ts.ts_node_start_byte(capture.node);
                         const end_byte = ts.ts_node_end_byte(capture.node);
-                        current_name = content[start_byte..end_byte];
+                        var nm = content[start_byte..end_byte];
+                        // Strip surrounding quotes from string-based labels
+                        // (HCL block labels, etc.) so symbols read cleanly.
+                        if (nm.len >= 2 and nm[0] == '"' and nm[nm.len - 1] == '"') nm = nm[1 .. nm.len - 1];
+                        current_name = nm;
                         name_node = capture.node;
                     } else if (std.mem.startsWith(u8, tag, "definition.")) {
                         const kind_str = tag["definition.".len..];
@@ -151,17 +190,28 @@ pub const Parser = struct {
                     }
                 }
 
-                if (current_name) |name| {
-                    // Use definition node for line range (full function body),
-                    // fall back to name node if no definition capture
-                    const range_node = def_node orelse name_node;
-                    if (range_node) |node| {
-                        try symbols.append(self.allocator, models.Symbol{
-                            .name = try self.allocator.dupe(u8, name),
-                            .kind = current_kind,
-                            .line_start = ts.ts_node_start_point(node).row,
-                            .line_end = ts.ts_node_end_point(node).row,
-                        });
+                // Only emit *definitions*. Tags queries also carry @reference.*
+                // patterns (call-sites, import targets) for call-graph use; those
+                // have a @name but no @definition, and must not become symbols.
+                if (def_node) |node| {
+                    if (current_name) |name| {
+                        const line_start: usize = ts.ts_node_start_point(node).row;
+                        // Dedupe: the same definition can match multiple patterns.
+                        var dup = false;
+                        for (symbols.items) |s| {
+                            if (s.line_start == line_start and std.mem.eql(u8, s.name, name)) {
+                                dup = true;
+                                break;
+                            }
+                        }
+                        if (!dup) {
+                            try symbols.append(self.allocator, models.Symbol{
+                                .name = try self.allocator.dupe(u8, name),
+                                .kind = current_kind,
+                                .line_start = line_start,
+                                .line_end = ts.ts_node_end_point(node).row,
+                            });
+                        }
                     }
                 }
             }
@@ -172,7 +222,8 @@ pub const Parser = struct {
 
     fn map_kind(self: *Parser, kind_str: []const u8) models.SymbolKind {
         _ = self;
-        if (std.mem.eql(u8, kind_str, "function") or std.mem.eql(u8, kind_str, "method")) return .function;
+        if (std.mem.eql(u8, kind_str, "function")) return .function;
+        if (std.mem.eql(u8, kind_str, "method")) return .method;
         if (std.mem.eql(u8, kind_str, "class") or std.mem.eql(u8, kind_str, "interface")) return .class;
         if (std.mem.eql(u8, kind_str, "struct")) return .@"struct";
         if (std.mem.eql(u8, kind_str, "enum")) return .@"enum";
@@ -245,6 +296,8 @@ pub const Parser = struct {
             .gitignore => tree_sitter_gitignore(),
             .haskell => tree_sitter_haskell(),
             .markdown => tree_sitter_markdown(),
+            .solidity => tree_sitter_solidity(),
+            .protobuf => tree_sitter_proto(),
             else => return error.UnsupportedLanguage,
         };
     }
@@ -268,10 +321,26 @@ pub const Parser = struct {
             .r => r_tags,
             .swift => swift_tags,
             .dart => @embedFile("../../vendor/grammars/dart/queries/tags.scm"),
+            .nix => nix_tags,
+            // Custom in-tree queries (upstream grammars ship no tags.scm).
+            .zig => zig_tags,
+            .json => json_tags,
+            .toml => toml_tags,
+            .yaml => yaml_tags,
+            .css => css_tags,
+            .scss => scss_tags,
+            .html => html_tags,
+            .sql => sql_tags,
+            .bash => bash_tags,
+            .hcl => hcl_tags,
+            .dockerfile => dockerfile_tags,
+            .make => make_tags,
+            .markdown => markdown_tags,
+            .ini => ini_tags,
+            .solidity => solidity_tags,
+            .protobuf => proto_tags,
             // Text-only indexing (have parser but no tags.scm)
-            .bash, .toml, .json, .yaml, .css, .html, .hcl,
-            .dockerfile, .haskell, .markdown, .sql, .make, .nix,
-            .scss, .jinja2, .ini, .diff, .gitignore => "",
+            .haskell, .jinja2, .diff, .gitignore => "",
             else => "",
         };
     }
