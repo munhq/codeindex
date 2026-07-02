@@ -69,6 +69,8 @@ pub fn build(b: *std.Build) void {
         .{ .name = "gitignore", .path = "vendor/grammars/gitignore/src" },
         .{ .name = "diff", .path = "vendor/grammars/diff/src" },
         .{ .name = "regex", .path = "vendor/grammars/regex/src" },
+        .{ .name = "solidity", .path = "vendor/grammars/solidity/src" },
+        .{ .name = "proto", .path = "vendor/grammars/proto/src" },
     };
 
     const grammar_mod = b.createModule(.{
@@ -129,7 +131,7 @@ pub fn build(b: *std.Build) void {
 
     // ── Tests ────────────────────────────────────────────────────────
     const test_mod = b.addModule("tests", .{
-        .root_source_file = b.path("src/tests.zig"),
+        .root_source_file = b.path("tests_main.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -146,4 +148,11 @@ pub fn build(b: *std.Build) void {
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
+
+    // ── End-to-end MCP stdio test ────────────────────────────────────
+    // Spawns the built binary and drives the real JSON-RPC protocol.
+    const e2e = b.addSystemCommand(&.{ "python3", "test/e2e.py" });
+    e2e.addArtifactArg(exe); // pass the freshly built binary path
+    const e2e_step = b.step("e2e", "Run end-to-end MCP stdio tests");
+    e2e_step.dependOn(&e2e.step);
 }

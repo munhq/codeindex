@@ -15,6 +15,9 @@ pub const Filter = struct {
         // Package / dependency caches that are not hidden (hidden ones like
         // .cargo/.rustup/.npm/.m2/.gradle/.venv are already skipped by skip_hidden).
         "venv", "site-packages", "Pods", "_build", "elm-stuff", "bower_components",
+        // Terraform/IaC + build-image artifacts (mkosi builds a full OS rootfs
+        // under mkosi.tools — thousands of system files that aren't project code).
+        ".terraform", "mkosi.tools", "mkosi.cache", "mkosi.output", ".mkosi",
     };
 
     // Path fragments matched anywhere in a path. Used to prune language package
