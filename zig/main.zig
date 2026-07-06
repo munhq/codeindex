@@ -43,6 +43,68 @@ fn find_project_root(allocator: std.mem.Allocator, start_abs: []const u8) ?[]u8 
     return null;
 }
 
+// A directory holding this many independent git repositories is treated as a
+// parent/workspace folder (e.g. ~/code) rather than a single project, and is
+// refused. A directory that is ITSELF a git repo counts as one repo and stops
+// the descent there, so monorepos and repos-with-submodules are exempt — their
+// .git is at the root, never below it. Override with --workspace / env.
+const repo_parent_threshold: u32 = 3;
+const repo_scan_max_depth: u8 = 4;
+const repo_scan_max_dirs: u32 = 20_000; // backstop against pathological trees
+
+/// Count independent git repos at or below `dir`, stopping at `limit`. A dir
+/// that contains a `.git` is one repo and is not descended into (its nested
+/// submodules must not inflate the count). Prunes dependency/build noise.
+fn count_repos(dir: *io.Dir, depth: u8, count: *u32, visited: *u32) void {
+    if (count.* >= repo_parent_threshold) return;
+    visited.* += 1;
+    if (visited.* > repo_scan_max_dirs) return;
+
+    // Is this directory itself a repo? If so, count it and stop here.
+    if (dir.openDir(io.io(), ".git", .{})) |g| {
+        var gg = g;
+        gg.close(io.io());
+        count.* += 1;
+        return;
+    } else |_| {}
+
+    if (depth >= repo_scan_max_depth) return;
+
+    const noise = [_][]const u8{ "node_modules", "vendor", "target", "dist", "build" };
+    var it = dir.iterate();
+    while (true) {
+        const maybe = it.next(io.io()) catch return;
+        const entry = maybe orelse return;
+        if (entry.kind != .directory) continue;
+        const name = entry.name;
+        if (name.len == 0 or name[0] == '.') continue; // hidden (incl. .git, handled above)
+        var skip = false;
+        for (noise) |n| {
+            if (std.mem.eql(u8, name, n)) {
+                skip = true;
+                break;
+            }
+        }
+        if (skip) continue;
+
+        var sub = dir.openDir(io.io(), name, .{ .iterate = true }) catch continue;
+        defer sub.close(io.io());
+        count_repos(&sub, depth + 1, count, visited);
+        if (count.* >= repo_parent_threshold) return;
+    }
+}
+
+/// True if `root` is not itself a git repo but contains `repo_parent_threshold`+
+/// independent repos beneath it — i.e. it looks like a parent/workspace folder.
+fn looks_like_repo_parent(root: []const u8) bool {
+    var d = io.cwd().openDir(io.io(), root, .{ .iterate = true }) catch return false;
+    defer d.close(io.io());
+    var count: u32 = 0;
+    var visited: u32 = 0;
+    count_repos(&d, 0, &count, &visited);
+    return count >= repo_parent_threshold;
+}
+
 fn print_help() !void {
     try io.writeAll(io.stdout(),
         \\codeindex — fast tree-sitter code index with an MCP server
@@ -184,6 +246,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
             refused_reason = "workspace resolves to your home directory";
         } else if (no_project_root) {
             refused_reason = "no enclosing project found (no .git/build.zig/package.json/Cargo.toml/go.mod/… marker walking up from the launch directory)";
+        } else if (std.mem.eql(u8, cfg.workspace_root, ".") and looks_like_repo_parent(eff)) {
+            // A marker exists here, but the directory is not itself a git repo
+            // and holds several independent repos — a parent/workspace folder
+            // (e.g. a stray package.json in ~/code). Indexing it would pull in
+            // every project at once.
+            refused_reason = "the launch directory is not a git repo but contains several independent git repositories — it looks like a parent/workspace folder, not a single project";
         }
     } else |_| {}
 
