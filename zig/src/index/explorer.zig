@@ -20,6 +20,56 @@ fn insert_sorted(allocator: std.mem.Allocator, list: *std.ArrayList(u32), file_i
     try list.insert(allocator, lo, file_id);
 }
 
+/// Maps every '/'-boundary path suffix (and each full path) to the file ids
+/// carrying it, so the import-resolution fallback can match a specifier to
+/// indexed files in O(1) instead of substring-scanning every path. Built once
+/// per full `resolve_all_imports` pass and torn down at its end.
+///
+/// Keys are slices into the caller's stable path storage (Explorer.files),
+/// which lives for the whole pass under the file lock — so keys are not copied.
+const SuffixIndex = struct {
+    map: std.StringHashMap(std.ArrayList(u32)),
+    allocator: std.mem.Allocator,
+
+    fn build(allocator: std.mem.Allocator, file_map: *const std.StringHashMap(u32)) !SuffixIndex {
+        var map = std.StringHashMap(std.ArrayList(u32)).init(allocator);
+        errdefer {
+            var vit = map.valueIterator();
+            while (vit.next()) |list| list.deinit(allocator);
+            map.deinit();
+        }
+        var it = file_map.iterator();
+        while (it.next()) |entry| {
+            const path = entry.key_ptr.*;
+            const id = entry.value_ptr.*;
+            // Register the full path, then each suffix beginning just past a '/'.
+            var start: usize = 0;
+            while (start < path.len) {
+                const suffix = path[start..];
+                const gop = try map.getOrPut(suffix);
+                if (!gop.found_existing) gop.value_ptr.* = std.ArrayList(u32).empty;
+                try gop.value_ptr.append(allocator, id);
+                const next_slash = std.mem.indexOfScalar(u8, suffix, '/') orelse break;
+                start += next_slash + 1;
+            }
+        }
+        return .{ .map = map, .allocator = allocator };
+    }
+
+    fn deinit(self: *SuffixIndex) void {
+        var it = self.map.valueIterator();
+        while (it.next()) |list| list.deinit(self.allocator);
+        self.map.deinit();
+    }
+
+    /// File ids whose path equals `key` or ends with `/key` (i.e. `key` is a
+    /// path-segment-aligned suffix). Null if none.
+    fn lookup(self: *const SuffixIndex, key: []const u8) ?[]const u32 {
+        if (self.map.get(key)) |list| return list.items;
+        return null;
+    }
+};
+
 /// Trigram → set of file ids. Postings hold one u32 per file that contains the
 /// trigram, NOT one entry per occurrence — line numbers are recovered at query
 /// time by scanning the candidate file's content, which the query paths already
@@ -407,11 +457,17 @@ pub const Explorer = struct {
 
         self.depgraph.clear_all();
 
+        // Build the suffix index once for the whole pass; the fallback below
+        // then resolves each unmatched specifier in O(1) instead of scanning
+        // every path (which was O(files²) on large trees).
+        var suffix_index = try SuffixIndex.build(self.allocator, &self.file_map);
+        defer suffix_index.deinit();
+
         var it = self.outlines.iterator();
         while (it.next()) |entry| {
             const file_id = entry.key_ptr.*;
             if (self.deleted_files.get(file_id) != null) continue;
-            try self.resolve_imports(file_id, entry.value_ptr.imports);
+            try self.resolve_imports(file_id, entry.value_ptr.imports, &suffix_index);
         }
     }
 
@@ -464,7 +520,7 @@ pub const Explorer = struct {
             self.evict_cache();
 
             self.depgraph.clear_file(existing_id);
-            try self.resolve_imports(existing_id, outline.imports);
+            try self.resolve_imports(existing_id, outline.imports, null);
 
             try self.version.record(outline.path, op);
             return existing_id;
@@ -486,7 +542,7 @@ pub const Explorer = struct {
         self.cache_touch(file_id);
         self.evict_cache();
 
-        try self.resolve_imports(file_id, outline.imports);
+        try self.resolve_imports(file_id, outline.imports, null);
 
         try self.version.record(outline.path, op);
         return file_id;
@@ -606,7 +662,13 @@ pub const Explorer = struct {
         });
     }
 
-    fn resolve_imports(self: *Explorer, file_id: u32, imports: [][]const u8) !void {
+    /// Resolve `file_id`'s imports into dependency edges. `suffix_index` enables
+    /// the language-agnostic fallback used during a full pass; pass null on the
+    /// incremental single-file path, where building the index per change would
+    /// reintroduce O(files) work under churn. The primary per-language resolver
+    /// runs either way, so real imports still resolve incrementally — only the
+    /// fuzzy suffix heuristic is deferred to the next full pass.
+    fn resolve_imports(self: *Explorer, file_id: u32, imports: [][]const u8, suffix_index: ?*const SuffixIndex) !void {
         const outline = self.outlines.get(file_id) orelse return;
         const source_path = outline.path;
 
@@ -627,14 +689,18 @@ pub const Explorer = struct {
                 }
             }
 
-            // Fallback: if resolver found nothing and the import is long enough to be specific,
-            // try a path-segment substring match. Skip short bare identifiers (too broad).
+            // Fallback: resolver found nothing. If the specifier is long enough
+            // to be specific, match indexed files whose path ends with it on a
+            // '/' boundary (e.g. "foo/bar/baz.ts"). This is an O(1) suffix-index
+            // lookup — and more precise than the old substring-anywhere scan,
+            // which produced spurious infix edges. Skip short bare identifiers.
             if (resolved.len == 0 and imp.len >= 6) {
-                var it = self.file_map.iterator();
-                while (it.next()) |entry| {
-                    if (entry.value_ptr.* == file_id) continue; // never self-loop
-                    if (std.mem.indexOf(u8, entry.key_ptr.*, imp) != null) {
-                        try self.depgraph.add_dependency(file_id, entry.value_ptr.*);
+                if (suffix_index) |idx| {
+                    if (idx.lookup(imp)) |target_ids| {
+                        for (target_ids) |target_id| {
+                            if (target_id == file_id) continue; // never self-loop
+                            try self.depgraph.add_dependency(file_id, target_id);
+                        }
                     }
                 }
             }

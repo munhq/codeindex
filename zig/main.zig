@@ -12,10 +12,17 @@ const io = @import("src/core/io.zig");
 
 const VERSION = "0.1.0";
 
+// NOTE: `.codeindex.json` (the snapshot, see config.zig) is deliberately NOT a
+// marker. It used to be, which self-poisoned: running codeindex in a directory
+// wrote `.codeindex.json` there, and that same file then made the directory a
+// permanent "project root" — so a stray run in e.g. ~/code turned the whole
+// multi-project parent into one 50k-file index on every subsequent launch.
+// Project roots are defined only by real project files; use --workspace or
+// CODEINDEX_WORKSPACE to index a marker-less directory explicitly.
 const project_markers = [_][]const u8{
-    ".git",       "build.zig",      "package.json",    "go.mod",
-    "Cargo.toml", "pyproject.toml", "deno.json",       "pom.xml",
-    ".hg",        ".svn",           ".codeindex.json",
+    ".git",       "build.zig",      "package.json", "go.mod",
+    "Cargo.toml", "pyproject.toml", "deno.json",    "pom.xml",
+    ".hg",        ".svn",
 };
 
 /// Walk up from `start_abs` looking for a project marker. Returns the owned
@@ -147,12 +154,21 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // Resolve the effective workspace and guard against scanning a whole home
     // directory. When the default workspace ("." = cwd) is used, locate the
     // enclosing project root and chdir into it so all paths stay project-relative.
+    //
+    // If no project marker exists anywhere up the tree, the launch dir is not a
+    // single project — it is a marker-less parent (e.g. ~/code holding dozens of
+    // repos). Indexing it pulls every project into one index (tens of thousands
+    // of files) and makes import resolution quadratic. Flag it for refusal below
+    // rather than silently scanning the lot.
+    var no_project_root = false;
     if (std.mem.eql(u8, cfg.workspace_root, ".")) {
         if (io.realpathAlloc(allocator, ".")) |abs| {
             defer allocator.free(abs);
             if (find_project_root(allocator, abs)) |proj| {
                 defer allocator.free(proj);
                 io.changeCurDir(proj) catch {};
+            } else {
+                no_project_root = true;
             }
         } else |_| {}
     }
@@ -166,6 +182,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
             refused_reason = "workspace resolves to the filesystem root";
         } else if (home != null and std.mem.eql(u8, eff, home.?)) {
             refused_reason = "workspace resolves to your home directory";
+        } else if (no_project_root) {
+            refused_reason = "no enclosing project found (no .git/build.zig/package.json/Cargo.toml/go.mod/… marker walking up from the launch directory)";
         }
     } else |_| {}
 
