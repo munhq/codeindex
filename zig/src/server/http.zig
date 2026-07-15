@@ -22,6 +22,7 @@ const treesitter = @import("../parser/treesitter.zig");
 const filter_mod = @import("../core/filter.zig");
 const scanner = @import("../index/scanner.zig");
 const io = @import("../core/io.zig");
+const reload = @import("../core/reload.zig");
 
 pub const Server = struct {
     allocator: std.mem.Allocator,
@@ -41,6 +42,13 @@ pub const Server = struct {
     pub fn run_mcp(self: *Server) !void {
         const stdout_file = io.stdout();
 
+        // Arm SIGHUP hot-reload: re-exec this binary in place on signal, keeping
+        // the client's stdio socket, so a rebuilt binary rolls out to running
+        // servers without a session restart. Safe only between requests — see
+        // reload.zig; the enter_wait/leave_wait bracket around read() below marks
+        // the one window where an immediate re-exec can't truncate a response.
+        reload.arm(self.allocator);
+
         // Read stdin with a direct blocking syscall on fd 0 rather than through
         // the std.Io.Threaded backend. The index build + file watcher run that
         // backend concurrently on another thread; sharing it for the MCP read
@@ -51,7 +59,16 @@ pub const Server = struct {
         defer carry.deinit(self.allocator);
 
         while (true) {
-            const n = std.posix.read(std.posix.STDIN_FILENO, &read_buf) catch break;
+            // Apply a reload that arrived mid-request (deferred so the prior
+            // response flushed intact), then mark this thread parked so a signal
+            // during the blocking read re-execs immediately.
+            reload.check_pending();
+            reload.enter_wait();
+            const n = std.posix.read(std.posix.STDIN_FILENO, &read_buf) catch {
+                reload.leave_wait();
+                break;
+            };
+            reload.leave_wait();
             if (n == 0) break; // EOF
 
             try carry.appendSlice(self.allocator, read_buf[0..n]);
