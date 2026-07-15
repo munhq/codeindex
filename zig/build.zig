@@ -127,7 +127,29 @@ pub fn build(b: *std.Build) void {
         .name = "codeindex",
         .root_module = mod,
     });
-    b.installArtifact(exe);
+
+    // Atomic install. The default installArtifact copies onto the destination
+    // in place (open O_TRUNC + write). codeindex is a long-lived server that
+    // runs straight from zig-out/bin, and overwriting a mapped executable in
+    // place can SIGBUS every running instance when it faults in a page from the
+    // now-truncated file. Stage to a temp on the same filesystem and rename()
+    // over the target instead — atomic, and running processes keep the old inode
+    // until they exit (or hot-reload). Replaces b.installArtifact(exe).
+    const install_bin = b.addSystemCommand(&.{
+        "sh", "-c",
+        \\set -eu
+        \\src="$1"; dst="$2"
+        \\mkdir -p "$(dirname "$dst")"
+        \\tmp="$(mktemp "$dst.XXXXXX")"
+        \\cat "$src" > "$tmp"
+        \\chmod 0755 "$tmp"
+        \\mv -f "$tmp" "$dst"
+        ,
+        "codeindex-install",
+    });
+    install_bin.addFileArg(exe.getEmittedBin()); // $1 = freshly built binary
+    install_bin.addArg(b.getInstallPath(.bin, "codeindex")); // $2 = zig-out/bin/codeindex
+    b.getInstallStep().dependOn(&install_bin.step);
 
     // ── Tests ────────────────────────────────────────────────────────
     const test_mod = b.addModule("tests", .{
