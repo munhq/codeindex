@@ -116,12 +116,15 @@ fn print_help() !void {
         \\  --mcp                 Run as an MCP server over stdio
         \\  --workspace <DIR>     Directory to index (default: enclosing project root)
         \\  --project-id <ID>     Project identifier
+        \\  --idle-evict-secs <N> Evict in-RAM postings to the OS after N seconds
+        \\                        idle; next query rebuilds them (default 300, 0=off)
         \\  -v, --version         Print version and exit
         \\  -h, --help            Print this help and exit
         \\
         \\ENVIRONMENT:
-        \\  CODEINDEX_WORKSPACE   Same as --workspace
-        \\  CODEINDEX_PROJECT_ID  Same as --project-id
+        \\  CODEINDEX_WORKSPACE        Same as --workspace
+        \\  CODEINDEX_PROJECT_ID       Same as --project-id
+        \\  CODEINDEX_IDLE_EVICT_SECS  Same as --idle-evict-secs
         \\
     );
 }
@@ -188,6 +191,33 @@ fn watch_loop(ctx: *WatchCtx) void {
             };
         }
         io.sleep(200 * std.time.ns_per_ms);
+    }
+}
+
+const IdleCtx = struct {
+    exp: *explorer.Explorer,
+    running: *bool,
+    idle_ms: i64,
+};
+
+/// Return the in-RAM trigram/word postings to the OS once the MCP server has
+/// gone `idle_ms` without a tool call; the next query transparently rebuilds
+/// them (see explorer.evict / reprime_all). This is what stops an idle server
+/// from pinning its peak RSS in swap for days — smp_allocator never unmaps the
+/// sub-64KB posting slabs on a plain free, so a page-backed arena that we drop
+/// wholesale is the only thing that actually returns the pages. Own thread;
+/// no-op when idle_ms <= 0.
+fn idle_loop(ctx: *IdleCtx) void {
+    // Short poll cadence so shutdown (running=false) is observed promptly; the
+    // real threshold is idle_ms, measured from the last recorded activity.
+    const poll_ns: u64 = 5 * std.time.ns_per_s;
+    while (ctx.running.*) {
+        io.sleep(poll_ns);
+        if (!ctx.running.*) break;
+        if (ctx.idle_ms <= 0) continue;
+        if (ctx.exp.is_indexing() or ctx.exp.is_evicted()) continue;
+        const idle = io.milliTimestamp() - ctx.exp.last_activity_ms.load(.acquire);
+        if (idle >= ctx.idle_ms) ctx.exp.evict();
     }
 }
 
@@ -270,7 +300,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // reprime (one disk read per file to rebuild the search indexes) and the
     // cold index both run off the `initialize`/`tools/list` path. Query tools
     // already block on is_indexing() until the data is ready (see http.zig).
-    var exp = explorer.Explorer.init(allocator);
+    var exp = try explorer.Explorer.init(allocator);
     defer exp.deinit();
 
     // Cheap check: is there a snapshot to prefer over a full scan? (The heavy
@@ -369,9 +399,22 @@ pub fn main(init: std.process.Init.Minimal) !void {
         // client's connection timeout on large or cold-cache workspaces).
         var worker: ?std.Thread = null;
         if (refused_reason == null) worker = try std.Thread.spawn(.{}, BuildCtx.build_then_watch, .{&build_ctx});
+
+        // Idle-eviction monitor: reclaims the postings arena after inactivity.
+        // Shares `watch_running` as its stop flag so it winds down with the worker.
+        var idle_ctx = IdleCtx{
+            .exp = &exp,
+            .running = &watch_running,
+            .idle_ms = cfg.idle_evict_secs * std.time.ms_per_s,
+        };
+        var idle_thread: ?std.Thread = null;
+        if (refused_reason == null and cfg.idle_evict_secs > 0)
+            idle_thread = try std.Thread.spawn(.{}, idle_loop, .{&idle_ctx});
+
         defer {
             watch_running = false;
             if (worker) |t| t.join();
+            if (idle_thread) |t| t.join();
         }
 
         var srv = server.Server.init(allocator, &exp);

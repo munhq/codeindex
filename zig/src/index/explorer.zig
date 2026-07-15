@@ -77,20 +77,29 @@ const SuffixIndex = struct {
 /// trigrams remain as false candidates (harmless: content verification is
 /// authoritative) until Explorer.compact() rebuilds the maps.
 pub const TrigramIndex = struct {
-    allocator: std.mem.Allocator,
+    /// Persistent store for postings + map buckets. When the Explorer owns this
+    /// index, `store` is a page-backed arena so the whole index can be returned
+    /// to the OS in one munmap on idle eviction / compaction (see Explorer).
+    store: std.mem.Allocator,
+    /// Transient allocator for the per-file `seen` set and query result slices —
+    /// NEVER the arena, or reads/adds would grow it unbounded (arena free is a
+    /// no-op) and query results would be freed by the caller with a different
+    /// allocator. Query callers free the returned slice with this same allocator.
+    scratch: std.mem.Allocator,
     map: std.AutoHashMap(u24, std.ArrayList(u32)),
 
-    pub fn init(allocator: std.mem.Allocator) TrigramIndex {
+    pub fn init(store: std.mem.Allocator, scratch: std.mem.Allocator) TrigramIndex {
         return .{
-            .allocator = allocator,
-            .map = std.AutoHashMap(u24, std.ArrayList(u32)).init(allocator),
+            .store = store,
+            .scratch = scratch,
+            .map = std.AutoHashMap(u24, std.ArrayList(u32)).init(store),
         };
     }
 
     pub fn deinit(self: *TrigramIndex) void {
         var it = self.map.iterator();
         while (it.next()) |entry| {
-            entry.value_ptr.deinit(self.allocator);
+            entry.value_ptr.deinit(self.store);
         }
         self.map.deinit();
     }
@@ -98,7 +107,7 @@ pub const TrigramIndex = struct {
     pub fn add_text(self: *TrigramIndex, file_id: u32, content: []const u8) !void {
         // Collect the file's unique trigrams first so each posting list is
         // touched once per file, not once per occurrence.
-        var seen = std.AutoHashMap(u24, void).init(self.allocator);
+        var seen = std.AutoHashMap(u24, void).init(self.scratch);
         defer seen.deinit();
 
         var line_it = std.mem.splitScalar(u8, content, '\n');
@@ -116,7 +125,7 @@ pub const TrigramIndex = struct {
             if (!gop.found_existing) {
                 gop.value_ptr.* = std.ArrayList(u32).empty;
             }
-            try insert_sorted(self.allocator, gop.value_ptr, file_id);
+            try insert_sorted(self.store, gop.value_ptr, file_id);
         }
     }
 
@@ -128,15 +137,15 @@ pub const TrigramIndex = struct {
         if (text.len < 3) return &[_]u32{};
 
         var results: ?std.ArrayList(u32) = null;
-        defer if (results) |*r| r.deinit(self.allocator);
+        defer if (results) |*r| r.deinit(self.scratch);
 
         for (0..text.len - 2) |i| {
             const trigram = @as(u24, text[i]) | (@as(u24, text[i + 1]) << 8) | (@as(u24, text[i + 2]) << 16);
             const posting = self.map.get(trigram) orelse return &[_]u32{};
 
             if (results == null) {
-                results = try std.ArrayList(u32).initCapacity(self.allocator, posting.items.len);
-                try results.?.appendSlice(self.allocator, posting.items);
+                results = try std.ArrayList(u32).initCapacity(self.scratch, posting.items.len);
+                try results.?.appendSlice(self.scratch, posting.items);
             } else {
                 var new_results = std.ArrayList(u32).empty;
                 var r_idx: usize = 0;
@@ -146,7 +155,7 @@ pub const TrigramIndex = struct {
 
                 while (r_idx < r_items.len and l_idx < l_items.len) {
                     if (r_items[r_idx] == l_items[l_idx]) {
-                        try new_results.append(self.allocator, r_items[r_idx]);
+                        try new_results.append(self.scratch, r_items[r_idx]);
                         r_idx += 1;
                         l_idx += 1;
                     } else if (r_items[r_idx] < l_items[l_idx]) {
@@ -155,13 +164,13 @@ pub const TrigramIndex = struct {
                         l_idx += 1;
                     }
                 }
-                results.?.deinit(self.allocator);
+                results.?.deinit(self.scratch);
                 results = new_results;
             }
             if (results.?.items.len == 0) break;
         }
 
-        return if (results) |*r| try r.toOwnedSlice(self.allocator) else &[_]u32{};
+        return if (results) |*r| try r.toOwnedSlice(self.scratch) else &[_]u32{};
     }
 };
 
@@ -174,28 +183,33 @@ pub const word_delimiters = " \t\n\r(){}[];:.,\"'<>?!=+-*/&|^%~#@`";
 /// numbers recovered at query time by scanning content, add-only postings
 /// compacted by Explorer.compact().
 pub const WordIndex = struct {
-    allocator: std.mem.Allocator,
+    /// Persistent store for postings, map buckets, and duped word keys — a
+    /// page-backed arena when owned by the Explorer (see TrigramIndex.store).
+    store: std.mem.Allocator,
+    /// Transient allocator for the per-file `seen` set (never the arena).
+    scratch: std.mem.Allocator,
     map: std.StringHashMap(std.ArrayList(u32)),
 
-    pub fn init(allocator: std.mem.Allocator) WordIndex {
+    pub fn init(store: std.mem.Allocator, scratch: std.mem.Allocator) WordIndex {
         return .{
-            .allocator = allocator,
-            .map = std.StringHashMap(std.ArrayList(u32)).init(allocator),
+            .store = store,
+            .scratch = scratch,
+            .map = std.StringHashMap(std.ArrayList(u32)).init(store),
         };
     }
 
     pub fn deinit(self: *WordIndex) void {
         var it = self.map.iterator();
         while (it.next()) |entry| {
-            self.allocator.free(entry.key_ptr.*);
-            entry.value_ptr.deinit(self.allocator);
+            self.store.free(entry.key_ptr.*);
+            entry.value_ptr.deinit(self.store);
         }
         self.map.deinit();
     }
 
     pub fn add_text(self: *WordIndex, file_id: u32, content: []const u8) !void {
         // Unique words first (keys borrow from `content`, valid for this call).
-        var seen = std.StringHashMap(void).init(self.allocator);
+        var seen = std.StringHashMap(void).init(self.scratch);
         defer seen.deinit();
 
         var line_it = std.mem.splitScalar(u8, content, '\n');
@@ -211,10 +225,10 @@ pub const WordIndex = struct {
         while (it.next()) |word| {
             const gop = try self.map.getOrPut(word.*);
             if (!gop.found_existing) {
-                gop.key_ptr.* = try self.allocator.dupe(u8, word.*);
+                gop.key_ptr.* = try self.store.dupe(u8, word.*);
                 gop.value_ptr.* = std.ArrayList(u32).empty;
             }
-            try insert_sorted(self.allocator, gop.value_ptr, file_id);
+            try insert_sorted(self.store, gop.value_ptr, file_id);
         }
     }
 
@@ -361,11 +375,39 @@ pub const Explorer = struct {
     content_lock: io.RwLock = .{},
     file_lock: io.RwLock = .{},
 
-    pub fn init(allocator: std.mem.Allocator) Explorer {
+    /// Page-backed arena holding all trigram + word postings. Freed wholesale on
+    /// compact()/evict() so the memory returns to the OS in one munmap — the
+    /// process allocator (smp) never unmaps the sub-64KB posting slabs on a plain
+    /// free, which is what made idle servers hold their peak RSS forever. Heap
+    /// pointer (not inline) so its address is stable: ArenaAllocator.allocator()
+    /// captures &arena, so a struct move would dangle every posting's allocator.
+    index_arena: *std.heap.ArenaAllocator,
+    /// Serializes the three posting rebuilders — compact() (watcher thread),
+    /// evict() (idle-monitor thread), reprime_all() (MCP thread) — against each
+    /// other. Queries never take it; they use the shared trigram/word RwLocks and
+    /// are blocked only during each rebuilder's brief exclusive pointer swap.
+    rebuild_mutex: io.Mutex = .{},
+    /// When true, the postings are empty (arena reclaimed) and must be rebuilt
+    /// before the next content/word/trigram query. Flipped only under the
+    /// exclusive trigram+word locks so watcher writes observe it consistently.
+    evicted: std.atomic.Value(bool) = .init(false),
+    /// Wall-clock ms of the last MCP tool call; the idle-monitor evicts once the
+    /// gap exceeds the configured idle window. Written by the MCP thread, read by
+    /// the idle-monitor thread.
+    last_activity_ms: std.atomic.Value(i64) = .init(0),
+
+    pub fn init(allocator: std.mem.Allocator) !Explorer {
+        // The posting arena is heap-allocated for a stable address (see the
+        // index_arena field doc) and child-allocated from the page allocator so
+        // every arena chunk is a direct mmap that deinit() returns to the OS.
+        const arena = try allocator.create(std.heap.ArenaAllocator);
+        errdefer allocator.destroy(arena);
+        arena.* = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         return .{
             .allocator = allocator,
-            .trigrams = TrigramIndex.init(allocator),
-            .words = WordIndex.init(allocator),
+            .index_arena = arena,
+            .trigrams = TrigramIndex.init(arena.allocator(), allocator),
+            .words = WordIndex.init(arena.allocator(), allocator),
             .depgraph = DepGraph.init(allocator),
             .files = std.ArrayList([]const u8).empty,
             .file_map = std.StringHashMap(u32).init(allocator),
@@ -377,12 +419,15 @@ pub const Explorer = struct {
             .cache_bytes = 0,
             .max_cache_bytes = 50 * 1024 * 1024,
             .cache_order = std.ArrayList(u32).empty,
+            .last_activity_ms = .init(io.milliTimestamp()),
         };
     }
 
     pub fn deinit(self: *Explorer) void {
-        self.trigrams.deinit();
-        self.words.deinit();
+        // Postings live in index_arena — free them wholesale (one munmap per
+        // chunk), so we do NOT iterate trigrams/words to free them individually.
+        self.index_arena.deinit();
+        self.allocator.destroy(self.index_arena);
         self.depgraph.deinit();
         for (self.files.items) |f| self.allocator.free(f);
         self.files.deinit(self.allocator);
@@ -502,7 +547,10 @@ pub const Explorer = struct {
 
             // Postings are add-only sets: new trigrams/words gain this file id,
             // obsolete ones stay behind as false candidates until compact().
-            if (content.len <= self.max_posting_file_bytes) {
+            // While evicted the postings arena is empty; skip posting updates
+            // (reprime_all rebuilds them from the still-warm content cache on the
+            // next query) but keep the outline/content/version updates current.
+            if (!self.evicted.load(.acquire) and content.len <= self.max_posting_file_bytes) {
                 try self.trigrams.add_text(existing_id, content);
                 try self.words.add_text(existing_id, content);
             }
@@ -531,7 +579,8 @@ pub const Explorer = struct {
         try self.files.append(self.allocator, path_dup);
         try self.file_map.put(path_dup, file_id);
 
-        if (content.len <= self.max_posting_file_bytes) {
+        // Skip posting updates while evicted (see the modified-branch note above).
+        if (!self.evicted.load(.acquire) and content.len <= self.max_posting_file_bytes) {
             try self.trigrams.add_text(file_id, content);
             try self.words.add_text(file_id, content);
         }
@@ -552,7 +601,10 @@ pub const Explorer = struct {
     /// cache for an already-registered file. Used when restoring from a snapshot,
     /// which persists outlines/deps but not the in-RAM search indexes.
     pub fn prime_file(self: *Explorer, file_id: u32, content: []const u8) !void {
-        if (content.len <= self.max_posting_file_bytes) {
+        // Defensive: prime_file runs during snapshot restore (evicted == false),
+        // but honor the flag anyway so a stray call while evicted can't build a
+        // partial index on top of the empty arena.
+        if (!self.evicted.load(.acquire) and content.len <= self.max_posting_file_bytes) {
             try self.trigrams.add_text(file_id, content);
             try self.words.add_text(file_id, content);
         }
@@ -618,10 +670,36 @@ pub const Explorer = struct {
     /// shared locks (queries keep working); only the pointer swap is exclusive.
     /// Must be called from the mutator (watcher) thread.
     pub fn compact(self: *Explorer) !void {
-        var new_trigrams = TrigramIndex.init(self.allocator);
-        errdefer new_trigrams.deinit();
-        var new_words = WordIndex.init(self.allocator);
-        errdefer new_words.deinit();
+        self.rebuild_mutex.lock();
+        defer self.rebuild_mutex.unlock();
+        // Nothing to sweep while evicted: the arena is empty and reprime_all()
+        // rebuilds a clean index on the next query. rebuild_mutex makes the three
+        // rebuilders mutually exclusive, so `evicted` can't flip under us here.
+        if (self.evicted.load(.acquire)) return;
+
+        try self.rebuild_postings(false);
+        std.debug.print("codeindex: compacted postings ({d} trigrams, {d} words)\n", .{
+            self.trigrams.map.count(), self.words.map.count(),
+        });
+    }
+
+    /// Build a fresh trigram+word index into a brand-new page-backed arena, then
+    /// swap it in under the exclusive posting locks and munmap the old arena in
+    /// one shot. The live index keeps serving queries throughout the build; only
+    /// the pointer swap is exclusive. Caller MUST hold rebuild_mutex.
+    ///
+    /// `from_empty` skips the content-cache lookup and always reads from disk —
+    /// used by reprime_all after eviction dropped the postings (the cache is
+    /// still warm, but reading uniformly keeps the path simple). When false
+    /// (compact) it prefers the cache and falls back to disk, as before.
+    fn rebuild_postings(self: *Explorer, from_empty: bool) !void {
+        const new_arena = try self.allocator.create(std.heap.ArenaAllocator);
+        errdefer self.allocator.destroy(new_arena);
+        new_arena.* = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        errdefer new_arena.deinit();
+        const st = new_arena.allocator();
+        var new_trigrams = TrigramIndex.init(st, self.allocator);
+        var new_words = WordIndex.init(st, self.allocator);
 
         {
             self.file_lock.lockShared();
@@ -635,7 +713,7 @@ pub const Explorer = struct {
             while (it.next()) |entry| {
                 const file_id = entry.key_ptr.*;
                 if (self.deleted_files.get(file_id) != null) continue;
-                const cached = self.content_cache.get(file_id);
+                const cached = if (from_empty) null else self.content_cache.get(file_id);
                 const content = cached orelse
                     (io.readFileAlloc(self.allocator, entry.value_ptr.path, max_fallback_read_bytes) catch continue);
                 defer if (cached == null) self.allocator.free(content);
@@ -647,19 +725,78 @@ pub const Explorer = struct {
 
         self.trigram_lock.lock();
         self.word_lock.lock();
-        var old_trigrams = self.trigrams;
-        var old_words = self.words;
+        const old_arena = self.index_arena;
+        self.index_arena = new_arena;
         self.trigrams = new_trigrams;
         self.words = new_words;
         self.dirty_ops = 0;
+        // Clear evicted in the SAME critical section as the swap so add_file's
+        // evicted check (also under trigram_lock) can never see the new live
+        // index while the flag still says "empty" — a file created by the watcher
+        // during a reprime would otherwise miss its postings. No-op for compact
+        // (already false). This is why rebuild_postings, not reprime_all, owns it.
+        self.evicted.store(false, .release);
         self.word_lock.unlock();
         self.trigram_lock.unlock();
 
-        old_trigrams.deinit();
-        old_words.deinit();
-        std.debug.print("codeindex: compacted postings ({d} trigrams, {d} words)\n", .{
-            self.trigrams.map.count(), self.words.map.count(),
-        });
+        // Old postings freed here, after the swap, so no query ever touches a
+        // dangling arena. One munmap per chunk → RSS actually drops.
+        old_arena.deinit();
+        self.allocator.destroy(old_arena);
+    }
+
+    /// Idle-monitor entry point: drop all postings and return their arena to the
+    /// OS. Structural state (outlines/file_map/deps/version) and the warm content
+    /// cache are kept, so reprime_all() rebuilds quickly from RAM. Safe to call
+    /// from any thread; a no-op if already evicted or still indexing.
+    pub fn evict(self: *Explorer) void {
+        self.rebuild_mutex.lock();
+        defer self.rebuild_mutex.unlock();
+        if (self.evicted.load(.acquire)) return;
+        if (self.indexing) return; // never evict mid-build
+
+        const new_arena = self.allocator.create(std.heap.ArenaAllocator) catch return;
+        new_arena.* = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        const st = new_arena.allocator();
+        const new_trigrams = TrigramIndex.init(st, self.allocator);
+        const new_words = WordIndex.init(st, self.allocator);
+
+        self.trigram_lock.lock();
+        self.word_lock.lock();
+        const old_arena = self.index_arena;
+        self.index_arena = new_arena;
+        self.trigrams = new_trigrams;
+        self.words = new_words;
+        self.dirty_ops = 0;
+        self.evicted.store(true, .release);
+        self.word_lock.unlock();
+        self.trigram_lock.unlock();
+
+        old_arena.deinit();
+        self.allocator.destroy(old_arena);
+        std.debug.print("codeindex: idle — evicted postings, arena returned to OS\n", .{});
+    }
+
+    /// Rebuild the postings dropped by evict(). No-op if not evicted. Called from
+    /// the MCP thread before serving a query once activity resumes.
+    pub fn reprime_all(self: *Explorer) !void {
+        self.rebuild_mutex.lock();
+        defer self.rebuild_mutex.unlock();
+        if (!self.evicted.load(.acquire)) return; // already primed by a prior call
+
+        std.debug.print("codeindex: repriming postings after idle eviction\n", .{});
+        // rebuild_postings clears `evicted` atomically with the swap.
+        try self.rebuild_postings(true);
+    }
+
+    /// Record MCP activity; resets the idle-eviction timer. Called per tool call.
+    pub fn note_activity(self: *Explorer) void {
+        self.last_activity_ms.store(io.milliTimestamp(), .release);
+    }
+
+    /// Whether the postings are currently evicted (empty, pending reprime).
+    pub fn is_evicted(self: *Explorer) bool {
+        return self.evicted.load(.acquire);
     }
 
     /// Resolve `file_id`'s imports into dependency edges. `suffix_index` enables
