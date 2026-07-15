@@ -109,7 +109,7 @@ pub const Snapshot = struct {
 
     /// Load explorer state from a JSON snapshot into a fresh Explorer.
     pub fn load(allocator: std.mem.Allocator, path: []const u8) !explorer_mod.Explorer {
-        var exp = explorer_mod.Explorer.init(allocator);
+        var exp = try explorer_mod.Explorer.init(allocator);
         errdefer exp.deinit();
         try load_into(&exp, allocator, path);
         return exp;

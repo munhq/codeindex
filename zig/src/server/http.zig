@@ -99,11 +99,20 @@ pub const Server = struct {
     }
 
     fn handle_tool_call(self: *Server, writer: anytype, id: ?std.json.Value, tool: []const u8, args: ?std.json.Value) !void {
-        // Wait for indexing to complete before processing query tools
+        // `status` is exempt from activity tracking, the indexing wait, and the
+        // reprime: it reports counts from outlines (no postings needed) and must
+        // stay a cheap health check that never blocks — and a client that only
+        // polls status should still be allowed to go idle so the server evicts.
         if (!std.mem.eql(u8, tool, "status")) {
+            // Reset the idle-eviction timer for real queries.
+            self.exp.note_activity();
+            // Wait for indexing to complete before processing query tools
             while (self.exp.is_indexing()) {
                 io.sleep(100 * std.time.ns_per_ms);
             }
+            // A prior idle period may have evicted the postings to reclaim RAM;
+            // rebuild them before serving. No-op when not evicted.
+            try self.exp.reprime_all();
         }
 
         var out = std.Io.Writer.Allocating.init(self.allocator);
@@ -390,10 +399,18 @@ pub const Server = struct {
             }
         } else if (std.mem.eql(u8, tool, "index_workspace")) {
             const path = get_string_arg(args, "path");
+            if (path != null) {
+                if (index_refusal_reason(self.allocator, path.?)) |reason| {
+                    try w.print("Indexing refused: {s}. Pass a specific project directory.", .{reason});
+                    self.exp.mark_indexing_complete();
+                    try self.write_tool_result(writer, id, out.written(), true);
+                    return;
+                }
+            }
             if (path != null and self.parser != null and self.filter != null) {
                 // Clear the active explorer and re-index the new path
                 self.exp.deinit();
-                self.exp.* = explorer.Explorer.init(self.allocator);
+                self.exp.* = try explorer.Explorer.init(self.allocator);
 
                 const res = scanner.index_tree(self.allocator, self.exp, self.parser.?, self.filter.?, path.?, 10 * 1024 * 1024, .{}) catch {
                     try w.print("Failed to index: {s}", .{path.?});
@@ -1131,6 +1148,20 @@ fn write_id(writer: anytype, id: ?std.json.Value) !void {
     } else {
         try writer.writeAll("null");
     }
+}
+
+/// Mirror of main.zig's startup workspace guard. The `index_workspace` tool
+/// accepts an arbitrary path, so the home/root refusal must run here too —
+/// an explicit tool-call path used to bypass the startup check and scan all
+/// of $HOME at 100% CPU until the caller's timeout killed the process.
+fn index_refusal_reason(allocator: std.mem.Allocator, path: []const u8) ?[]const u8 {
+    const eff = io.realpathAlloc(allocator, path) catch return null;
+    defer allocator.free(eff);
+    if (eff.len <= 1) return "path resolves to the filesystem root";
+    const home = io.getEnv(allocator, "HOME");
+    defer if (home) |h| allocator.free(h);
+    if (home != null and std.mem.eql(u8, eff, home.?)) return "path resolves to your home directory";
+    return null;
 }
 
 fn get_string_arg(args: ?std.json.Value, key: []const u8) ?[]const u8 {

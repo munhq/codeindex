@@ -46,7 +46,7 @@ fn make_outline(allocator: std.mem.Allocator, path: []const u8, lang: models.Lan
 
 /// Build an Explorer with a few files. Content strings should match the symbols.
 fn build_test_explorer(allocator: std.mem.Allocator, files: []const struct { outline: models.FileOutline, content: []const u8 }) !explorer_mod.Explorer {
-    var exp = explorer_mod.Explorer.init(allocator);
+    var exp = try explorer_mod.Explorer.init(allocator);
     for (files) |f| {
         _ = try exp.add_file(f.outline, f.content);
     }
@@ -78,7 +78,7 @@ test "language detection from extensions" {
 // ── TrigramIndex ─────────────────────────────────────────────────────────────
 
 test "trigram insert and search" {
-    var idx = explorer_mod.TrigramIndex.init(testing.allocator);
+    var idx = explorer_mod.TrigramIndex.init(testing.allocator, testing.allocator);
     defer idx.deinit();
 
     try idx.add_text(0, "hello world function");
@@ -88,7 +88,7 @@ test "trigram insert and search" {
 }
 
 test "trigram short query returns empty" {
-    var idx = explorer_mod.TrigramIndex.init(testing.allocator);
+    var idx = explorer_mod.TrigramIndex.init(testing.allocator, testing.allocator);
     defer idx.deinit();
 
     try idx.add_text(0, "hello world");
@@ -97,7 +97,7 @@ test "trigram short query returns empty" {
 }
 
 test "trigram postings are one entry per file" {
-    var idx = explorer_mod.TrigramIndex.init(testing.allocator);
+    var idx = explorer_mod.TrigramIndex.init(testing.allocator, testing.allocator);
     defer idx.deinit();
 
     // Many occurrences of the same trigram in one file → single posting.
@@ -109,7 +109,7 @@ test "trigram postings are one entry per file" {
 }
 
 test "trigram re-add same file stays deduplicated" {
-    var idx = explorer_mod.TrigramIndex.init(testing.allocator);
+    var idx = explorer_mod.TrigramIndex.init(testing.allocator, testing.allocator);
     defer idx.deinit();
 
     try idx.add_text(0, "hello world");
@@ -125,7 +125,7 @@ test "trigram re-add same file stays deduplicated" {
 }
 
 test "trigram out-of-order insert keeps postings sorted" {
-    var idx = explorer_mod.TrigramIndex.init(testing.allocator);
+    var idx = explorer_mod.TrigramIndex.init(testing.allocator, testing.allocator);
     defer idx.deinit();
 
     try idx.add_text(7, "hello seven");
@@ -141,7 +141,7 @@ test "trigram out-of-order insert keeps postings sorted" {
 }
 
 test "trigram intersection across query trigrams" {
-    var idx = explorer_mod.TrigramIndex.init(testing.allocator);
+    var idx = explorer_mod.TrigramIndex.init(testing.allocator, testing.allocator);
     defer idx.deinit();
 
     try idx.add_text(0, "hello world");
@@ -157,7 +157,7 @@ test "trigram intersection across query trigrams" {
 // ── WordIndex ────────────────────────────────────────────────────────────────
 
 test "word insert and search" {
-    var idx = explorer_mod.WordIndex.init(testing.allocator);
+    var idx = explorer_mod.WordIndex.init(testing.allocator, testing.allocator);
     defer idx.deinit();
 
     try idx.add_text(0, "fn hello_world() { }");
@@ -166,7 +166,7 @@ test "word insert and search" {
 }
 
 test "word search is case sensitive" {
-    var idx = explorer_mod.WordIndex.init(testing.allocator);
+    var idx = explorer_mod.WordIndex.init(testing.allocator, testing.allocator);
     defer idx.deinit();
 
     try idx.add_text(0, "fn HelloWorld() {}");
@@ -175,7 +175,7 @@ test "word search is case sensitive" {
 }
 
 test "word short words skipped" {
-    var idx = explorer_mod.WordIndex.init(testing.allocator);
+    var idx = explorer_mod.WordIndex.init(testing.allocator, testing.allocator);
     defer idx.deinit();
 
     try idx.add_text(0, "a b c");
@@ -225,7 +225,7 @@ test "version store hot_files returns newest" {
 // ── Explorer ─────────────────────────────────────────────────────────────────
 
 test "explorer add and query file" {
-    var exp = explorer_mod.Explorer.init(testing.allocator);
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
     defer exp.deinit();
 
     const sym = models.Symbol{
@@ -255,7 +255,7 @@ test "explorer add and query file" {
 }
 
 test "explorer find_symbol" {
-    var exp = explorer_mod.Explorer.init(testing.allocator);
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
     defer exp.deinit();
 
     var syms = try testing.allocator.alloc(models.Symbol, 1);
@@ -283,7 +283,7 @@ test "explorer find_symbol" {
 }
 
 test "explorer search_content" {
-    var exp = explorer_mod.Explorer.init(testing.allocator);
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
     defer exp.deinit();
 
     _ = try exp.add_file(.{
@@ -306,7 +306,7 @@ test "explorer search_content" {
 }
 
 test "explorer remove_file" {
-    var exp = explorer_mod.Explorer.init(testing.allocator);
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
     defer exp.deinit();
 
     _ = try exp.add_file(.{
@@ -397,7 +397,7 @@ test "depgraph no duplicates" {
 // ── Explorer advanced queries ────────────────────────────────────────────────
 
 test "explorer find_word exact lookup" {
-    var exp = explorer_mod.Explorer.init(testing.allocator);
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
     defer exp.deinit();
 
     _ = try exp.add_file(.{
@@ -416,7 +416,7 @@ test "explorer find_word exact lookup" {
 }
 
 test "explorer modified file drops stale results" {
-    var exp = explorer_mod.Explorer.init(testing.allocator);
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
     defer exp.deinit();
 
     _ = try exp.add_file(.{
@@ -459,7 +459,7 @@ test "explorer modified file drops stale results" {
 }
 
 test "explorer compact sweeps stale postings and preserves results" {
-    var exp = explorer_mod.Explorer.init(testing.allocator);
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
     defer exp.deinit();
 
     _ = try exp.add_file(.{
@@ -509,7 +509,7 @@ test "explorer search falls back to disk when content is evicted" {
     const real_path = try tmp.dir.realPathFileAlloc(io_mod.io(), "evicted.rs", testing.allocator);
     defer testing.allocator.free(real_path);
 
-    var exp = explorer_mod.Explorer.init(testing.allocator);
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
     defer exp.deinit();
     // Zero-byte cache: everything is evicted immediately after add_file.
     exp.max_cache_bytes = 0;
@@ -538,7 +538,7 @@ test "explorer search falls back to disk when content is evicted" {
 }
 
 test "explorer oversized file gets no postings" {
-    var exp = explorer_mod.Explorer.init(testing.allocator);
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
     defer exp.deinit();
     exp.max_posting_file_bytes = 16; // force the cap for the test
 
@@ -558,7 +558,7 @@ test "explorer oversized file gets no postings" {
 }
 
 test "explorer get_imports and get_imported_by" {
-    var exp = explorer_mod.Explorer.init(testing.allocator);
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
     defer exp.deinit();
 
     const o1 = try make_outline(testing.allocator, "src/main.rs", .rust, &.{
@@ -581,7 +581,7 @@ test "explorer get_imports and get_imported_by" {
 }
 
 test "explorer file_path lookup" {
-    var exp = explorer_mod.Explorer.init(testing.allocator);
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
     defer exp.deinit();
 
     _ = try exp.add_file(.{
@@ -602,7 +602,7 @@ test "explorer file_path lookup" {
 }
 
 test "explorer get_change_impact" {
-    var exp = explorer_mod.Explorer.init(testing.allocator);
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
     defer exp.deinit();
 
     const o_main = try make_outline(testing.allocator, "src/main.rs", .rust, &.{
@@ -624,7 +624,7 @@ test "explorer get_change_impact" {
 }
 
 test "explorer total_content_bytes and total_line_count" {
-    var exp = explorer_mod.Explorer.init(testing.allocator);
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
     defer exp.deinit();
 
     _ = try exp.add_file(.{
@@ -650,7 +650,7 @@ test "explorer total_content_bytes and total_line_count" {
 }
 
 test "explorer get_hot_files" {
-    var exp = explorer_mod.Explorer.init(testing.allocator);
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
     defer exp.deinit();
 
     _ = try exp.add_file(.{
@@ -678,7 +678,7 @@ test "explorer get_hot_files" {
 // ── Security scan ─────────────────────────────────────────────────────────────
 
 test "security scan detects hardcoded secrets" {
-    var exp = explorer_mod.Explorer.init(testing.allocator);
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
     defer exp.deinit();
 
     _ = try exp.add_file(.{
@@ -701,7 +701,7 @@ test "security scan detects hardcoded secrets" {
 }
 
 test "security scan detects unsafe blocks" {
-    var exp = explorer_mod.Explorer.init(testing.allocator);
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
     defer exp.deinit();
 
     _ = try exp.add_file(.{
@@ -724,7 +724,7 @@ test "security scan detects unsafe blocks" {
 }
 
 test "security scan skips test files" {
-    var exp = explorer_mod.Explorer.init(testing.allocator);
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
     defer exp.deinit();
 
     _ = try exp.add_file(.{
@@ -760,7 +760,7 @@ test "security scan summary counts by severity" {
 // ── Unwrap audit ──────────────────────────────────────────────────────────────
 
 test "unwrap audit finds .unwrap() in non-test Rust" {
-    var exp = explorer_mod.Explorer.init(testing.allocator);
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
     defer exp.deinit();
 
     _ = try exp.add_file(.{
@@ -780,7 +780,7 @@ test "unwrap audit finds .unwrap() in non-test Rust" {
 }
 
 test "unwrap audit skips non-rust files" {
-    var exp = explorer_mod.Explorer.init(testing.allocator);
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
     defer exp.deinit();
 
     _ = try exp.add_file(.{
@@ -801,7 +801,7 @@ test "unwrap audit skips non-rust files" {
 // ── Dead code ─────────────────────────────────────────────────────────────────
 
 test "dead code finds unreferenced symbols" {
-    var exp = explorer_mod.Explorer.init(testing.allocator);
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
     defer exp.deinit();
 
     const o_a = try make_outline(testing.allocator, "a.rs", .rust, &.{
@@ -824,7 +824,7 @@ test "dead code finds unreferenced symbols" {
 }
 
 test "dead code skips short names and test symbols" {
-    var exp = explorer_mod.Explorer.init(testing.allocator);
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
     defer exp.deinit();
 
     const o = try make_outline(testing.allocator, "lib.rs", .rust, &.{
@@ -847,7 +847,7 @@ test "dead code skips short names and test symbols" {
 // ── Cycles ───────────────────────────────────────────────────────────────────
 
 test "cycles detects two-file circular dependency" {
-    var exp = explorer_mod.Explorer.init(testing.allocator);
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
     defer exp.deinit();
 
     const o_a = try make_outline(testing.allocator, "src/a.rs", .rust, &.{}, &.{"crate::b"});
@@ -863,7 +863,7 @@ test "cycles detects two-file circular dependency" {
 }
 
 test "cycles returns empty for acyclic graph" {
-    var exp = explorer_mod.Explorer.init(testing.allocator);
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
     defer exp.deinit();
 
     const o_a = try make_outline(testing.allocator, "src/a.rs", .rust, &.{}, &.{"crate::b"});
@@ -881,7 +881,7 @@ test "cycles returns empty for acyclic graph" {
 // ── Coupling ──────────────────────────────────────────────────────────────────
 
 test "coupling computes fan_in and fan_out" {
-    var exp = explorer_mod.Explorer.init(testing.allocator);
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
     defer exp.deinit();
 
     const o_a = try make_outline(testing.allocator, "src/a.rs", .rust, &.{}, &.{"crate::b"});
@@ -910,7 +910,7 @@ test "coupling computes fan_in and fan_out" {
 // ── Test coverage ─────────────────────────────────────────────────────────────
 
 test "test_coverage classifies files" {
-    var exp = explorer_mod.Explorer.init(testing.allocator);
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
     defer exp.deinit();
 
     const o_src = try make_outline(testing.allocator, "src/lib.rs", .rust, &.{
@@ -942,7 +942,7 @@ test "test_coverage classifies files" {
 // ── Architecture ──────────────────────────────────────────────────────────────
 
 test "architecture detects layer violations" {
-    var exp = explorer_mod.Explorer.init(testing.allocator);
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
     defer exp.deinit();
 
     // domain importing from gateway = violation (infrastructure -> presentation)
@@ -959,7 +959,7 @@ test "architecture detects layer violations" {
 }
 
 test "architecture no violations for correct layering" {
-    var exp = explorer_mod.Explorer.init(testing.allocator);
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
     defer exp.deinit();
 
     // gateway importing from domain = correct (presentation -> domain)
@@ -1008,7 +1008,7 @@ test "symbol kind as_str round-trip" {
 // ── Explorer update / remove ──────────────────────────────────────────────────
 
 test "explorer re-add file updates indexes" {
-    var exp = explorer_mod.Explorer.init(testing.allocator);
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
     defer exp.deinit();
 
     _ = try exp.add_file(.{
@@ -1046,7 +1046,7 @@ test "explorer re-add file updates indexes" {
 }
 
 test "explorer remove file cleans all indexes" {
-    var exp = explorer_mod.Explorer.init(testing.allocator);
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
     defer exp.deinit();
 
     _ = try exp.add_file(.{
@@ -1070,7 +1070,7 @@ test "explorer remove file cleans all indexes" {
 }
 
 test "explorer set_status and indexing flag" {
-    var exp = explorer_mod.Explorer.init(testing.allocator);
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
     defer exp.deinit();
 
     try testing.expect(exp.is_indexing());
@@ -1174,7 +1174,7 @@ test "parser: nix extracts attribute bindings" {
 // query lookup (files are stored with full paths; callers pass relative paths).
 
 test "deps resolve regardless of index order and query by relative path" {
-    var exp = explorer_mod.Explorer.init(testing.allocator);
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
     defer exp.deinit();
 
     // Stored with full paths, as the scanner does. lib & foo are indexed BEFORE
@@ -1198,7 +1198,7 @@ test "deps resolve regardless of index order and query by relative path" {
 }
 
 test "find_file_id does not match across path-segment boundaries" {
-    var exp = explorer_mod.Explorer.init(testing.allocator);
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
     defer exp.deinit();
     const o = try make_outline(testing.allocator, "/ws/src/barfoo.rs", .rust, &.{}, &.{});
     _ = try exp.add_file(o, "fn x() {}\n");
@@ -1209,7 +1209,7 @@ test "find_file_id does not match across path-segment boundaries" {
 }
 
 test "zig @import resolves relative paths" {
-    var exp = explorer_mod.Explorer.init(testing.allocator);
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
     defer exp.deinit();
     // snapshot.zig imports ../index/explorer.zig and ../core/io.zig; std is ignored.
     const o_snap = try make_outline(testing.allocator, "/ws/src/storage/snapshot.zig", .zig, &.{}, &.{ "std", "../index/explorer.zig", "../core/io.zig" });
@@ -1241,7 +1241,7 @@ test "axis A: bash/dockerfile/make/markdown/ini/hcl symbols" {
 // ── Axis B: import resolution for the remaining languages ────────────────────────
 
 fn expect_resolves(lang: models.Language, importer: []const u8, imps: []const []const u8, target: []const u8) !void {
-    var exp = explorer_mod.Explorer.init(testing.allocator);
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
     defer exp.deinit();
     const o1 = try make_outline(testing.allocator, importer, lang, &.{}, imps);
     const o2 = try make_outline(testing.allocator, target, lang, &.{}, &.{});
@@ -1459,7 +1459,7 @@ test "axis B: typescript ESM .js import maps to .ts source" {
 }
 
 test "analyze: duplication flags reinvented free functions, not interface methods" {
-    var exp = explorer_mod.Explorer.init(testing.allocator);
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
     defer exp.deinit();
     // getEnv as a free function in two files = reinvention.
     _ = try exp.add_file(try make_outline(testing.allocator, "/ws/a/util.go", .go, &.{.{ .name = "getEnv", .kind = .function, .line_start = 0, .line_end = 1 }}, &.{}), "x\n");
