@@ -32,7 +32,13 @@ jobs:
           version: 0.16.0
 
       - name: Fetch vendor dependencies
-        run: cd zig && ./fetch-vendor.sh
+        env:
+          # Anonymous https clones get throttled on Actions runners and git
+          # falls back to a credential prompt, which fails the job.
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          git config --global url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
+          cd zig && ./fetch-vendor.sh
 
       - name: Build
         run: cd zig && zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }}
