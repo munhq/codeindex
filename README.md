@@ -1,8 +1,8 @@
 # codeindex
 
-A fast, structural code intelligence engine that runs as an **MCP server** for AI coding agents.
+A structural code intelligence engine that runs as an **MCP server** for AI coding agents.
 
-It indexes your codebase with tree-sitter (40+ languages), builds a trigram full-text index, an inverted word index, and a dependency graph — then exposes **19 MCP tools** your AI agent can call to understand your code without dumping entire files into context.
+It indexes your codebase with tree-sitter (40+ languages), builds a trigram full-text index, an inverted word index, and a dependency graph — then exposes them through **19 MCP tools**.
 
 ```
  ┌─────────────┐      MCP (stdio)       ┌──────────────┐
@@ -120,7 +120,7 @@ It refuses to index your entire home directory or the filesystem root — pass `
 - **Dependency graph**: file-level import resolution with forward and reverse edges
 - **Version store**: tracks file changes with sequence numbers for incremental updates
 - **Live watcher**: re-indexes on file create/modify/delete (background thread in MCP mode)
-- **Snapshot**: persists the full index to `.codeindex.json` for instant startup on reload
+- **Snapshot**: persists the full index to `.codeindex.json`, so a restart loads the snapshot instead of re-indexing
 - **MCP server**: JSON-RPC over stdio, implements the MCP 2024-11-05 protocol
 
 ## Building from source
