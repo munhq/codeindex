@@ -61,6 +61,17 @@ clone html         https://github.com/tree-sitter/tree-sitter-html
 clone hcl          https://github.com/tree-sitter-grammars/tree-sitter-hcl
 clone dockerfile   https://github.com/camdencheek/tree-sitter-dockerfile
 clone markdown     https://github.com/tree-sitter-grammars/tree-sitter-markdown
+# The markdown repository is a split grammar: the block parser lives in a
+# tree-sitter-markdown/ subdirectory, the inline parser in
+# tree-sitter-markdown-inline/. The build expects src/ at the grammar root,
+# so lift the block parser up after a fresh clone.
+if [ ! -d "$VENDOR_DIR/grammars/markdown/src" ] && [ -d "$VENDOR_DIR/grammars/markdown/tree-sitter-markdown/src" ]; then
+    mv "$VENDOR_DIR/grammars/markdown/tree-sitter-markdown/src" "$VENDOR_DIR/grammars/markdown/src"
+    if [ -d "$VENDOR_DIR/grammars/markdown/tree-sitter-markdown/queries" ]; then
+        mv "$VENDOR_DIR/grammars/markdown/tree-sitter-markdown/queries" "$VENDOR_DIR/grammars/markdown/queries"
+    fi
+    echo "  flatten markdown (split grammar)"
+fi
 clone solidity     https://github.com/JoranHonig/tree-sitter-solidity
 clone proto        https://github.com/coder3101/tree-sitter-proto
 clone sql          https://github.com/DerekStride/tree-sitter-sql
