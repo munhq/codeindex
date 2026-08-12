@@ -1,0 +1,41 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Cache vendored grammars
+        uses: actions/cache@v4
+        with:
+          path: zig/vendor
+          key: vendor-${{ hashFiles('zig/fetch-vendor.sh') }}
+
+      - name: Fetch vendored grammars
+        run: cd zig && ./fetch-vendor.sh
+
+      - name: Format check
+        run: cd zig && zig fmt --check src/
+
+      - name: Build
+        run: cd zig && zig build
+
+      # `zig build test` runs the tests through the build runner's IPC protocol
+      # on stdout, which the linked tree-sitter C sources corrupt through their
+      # debug printf paths. Build the test binary and run it directly instead —
+      # same tests, no protocol in the way.
+      - name: Unit tests
+        run: |
+          cd zig
+          zig build test-bin
+          ./zig-out/bin/test

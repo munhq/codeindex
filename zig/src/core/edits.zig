@@ -4,7 +4,7 @@ const io = @import("io.zig");
 pub const FileEdit = struct {
     path: []const u8,
     line_start: usize, // 1-indexed
-    line_end: usize,   // 1-indexed
+    line_end: usize, // 1-indexed
     new_content: []const u8,
 };
 
@@ -90,7 +90,7 @@ pub const EditEngine = struct {
 
     fn apply_line_edit(self: *EditEngine, content: []const u8, line_start: usize, line_end: usize, new_content: []const u8) ![]u8 {
         if (line_start == 0) return error.InvalidLineStart;
-        
+
         var lines = std.ArrayList([]const u8).empty;
         defer lines.deinit(self.allocator);
 

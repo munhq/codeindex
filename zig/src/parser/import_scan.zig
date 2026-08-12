@@ -123,8 +123,7 @@ fn extract_bash(allocator: std.mem.Allocator, content: []const u8, imports: *std
     while (line_it.next()) |line| {
         const t = std.mem.trim(u8, line, " \t\r");
         var rest: ?[]const u8 = null;
-        if (std.mem.startsWith(u8, t, "source ")) rest = t["source ".len..]
-        else if (std.mem.startsWith(u8, t, ". ")) rest = t[". ".len..];
+        if (std.mem.startsWith(u8, t, "source ")) rest = t["source ".len..] else if (std.mem.startsWith(u8, t, ". ")) rest = t[". ".len..];
         if (rest) |r| {
             var tok = std.mem.trim(u8, r, " \t\"'");
             if (std.mem.indexOfAny(u8, tok, " \t")) |s| tok = tok[0..s];
@@ -139,9 +138,7 @@ fn extract_make(allocator: std.mem.Allocator, content: []const u8, imports: *std
     while (line_it.next()) |line| {
         const t = std.mem.trim(u8, line, " \t\r");
         var rest: ?[]const u8 = null;
-        if (std.mem.startsWith(u8, t, "include ")) rest = t["include ".len..]
-        else if (std.mem.startsWith(u8, t, "-include ")) rest = t["-include ".len..]
-        else if (std.mem.startsWith(u8, t, "sinclude ")) rest = t["sinclude ".len..];
+        if (std.mem.startsWith(u8, t, "include ")) rest = t["include ".len..] else if (std.mem.startsWith(u8, t, "-include ")) rest = t["-include ".len..] else if (std.mem.startsWith(u8, t, "sinclude ")) rest = t["sinclude ".len..];
         if (rest) |r| {
             var part_it = std.mem.splitScalar(u8, std.mem.trim(u8, r, " \t"), ' ');
             while (part_it.next()) |p| {

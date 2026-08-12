@@ -227,7 +227,7 @@ pub const Parser = struct {
         if (std.mem.eql(u8, kind_str, "class") or std.mem.eql(u8, kind_str, "interface")) return .class;
         if (std.mem.eql(u8, kind_str, "struct")) return .@"struct";
         if (std.mem.eql(u8, kind_str, "enum")) return .@"enum";
-        if (std.mem.eql(u8, kind_str, "macro")) return .@"macro";
+        if (std.mem.eql(u8, kind_str, "macro")) return .macro;
         if (std.mem.eql(u8, kind_str, "module")) return .module;
         if (std.mem.eql(u8, kind_str, "constant")) return .constant;
         if (std.mem.eql(u8, kind_str, "variable")) return .variable;
@@ -240,14 +240,7 @@ pub const Parser = struct {
         return .unknown;
     }
 
-    fn create_outline(
-        self: *Parser,
-        path: []const u8,
-        language: models.Language,
-        content: []const u8,
-        symbols: *std.ArrayList(models.Symbol),
-        imports: *std.ArrayList([]const u8)
-    ) !models.FileOutline {
+    fn create_outline(self: *Parser, path: []const u8, language: models.Language, content: []const u8, symbols: *std.ArrayList(models.Symbol), imports: *std.ArrayList([]const u8)) !models.FileOutline {
         return models.FileOutline{
             .path = try self.allocator.dupe(u8, path),
             .language = language,

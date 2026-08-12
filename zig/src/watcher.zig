@@ -88,7 +88,7 @@ pub const Watcher = struct {
             if (err == error.WouldBlock) return;
             return err;
         };
-        
+
         if (n == 0) return;
 
         var i: usize = 0;

@@ -33,7 +33,7 @@ pub const Report = struct {
 };
 
 const credential_patterns = [_][]const u8{
-    "password", "secret", "api_key", "token", "private_key",
+    "password",   "secret",     "api_key",    "token", "private_key",
     "access_key", "auth_token", "credential",
 };
 

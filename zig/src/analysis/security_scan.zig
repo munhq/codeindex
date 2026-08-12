@@ -203,7 +203,6 @@ fn aws_access_key(line: []const u8) bool {
     return false;
 }
 
-
 pub fn summarize(findings: []const Finding) Summary {
     var s = Summary{};
     s.total = findings.len;

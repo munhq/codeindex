@@ -31,15 +31,15 @@ pub const Report = struct {
 };
 
 const route_patterns = [_][]const u8{
-    ".get(\"",   ".post(\"",  ".put(\"",   ".delete(\"", ".patch(\"",
-    ".route(\"", ".GET(\"",   ".POST(\"",  ".PUT(\"",    ".DELETE(\"",
-    "HandleFunc(\"",          "Handle(\"",
-    "r.Get(\"",  "r.Post(\"", "r.Put(\"",  "r.Delete(\"",
+    ".get(\"",       ".post(\"",  ".put(\"",  ".delete(\"", ".patch(\"",
+    ".route(\"",     ".GET(\"",   ".POST(\"", ".PUT(\"",    ".DELETE(\"",
+    "HandleFunc(\"", "Handle(\"", "r.Get(\"", "r.Post(\"",  "r.Put(\"",
+    "r.Delete(\"",
 };
 
 const fetch_patterns = [_][]const u8{
-    "fetch(\"",  "fetch(`",  "axios.get(",  "axios.post(", "axios.put(", "axios.delete(",
-    "http.get(", "http.post(", "http.put(", "http.delete(",
+    "fetch(\"",  "fetch(`",    "axios.get(", "axios.post(",  "axios.put(", "axios.delete(",
+    "http.get(", "http.post(", "http.put(",  "http.delete(",
 };
 
 pub fn analyze(allocator: std.mem.Allocator, exp: *explorer.Explorer) !Report {
