@@ -17,11 +17,11 @@ It indexes your codebase with tree-sitter (40+ languages), builds a trigram full
                                          snapshot persistence
 ```
 
-## Why?
+## Why
 
-AI coding agents waste tokens reading entire files. codeindex gives them **structural awareness** — symbol outlines, definitions, callers, blast radius, dependency chains — in a few hundred tokens instead of thousands.
+AI coding agents spend tokens reading entire files. codeindex answers structural questions — symbol outlines, definitions, callers, blast radius, dependency chains — in a few hundred tokens instead of thousands.
 
-One `plan_change` call returns: where a symbol is defined, every call site, the file's architectural role (god module / stable core / island / driver), hardcoded literals to watch out for, and the full transitive blast radius if the file changes. That's a refactor plan in a single tool call.
+One `plan_change` call returns: where a symbol is defined, every call site, the file's architectural role (god module / stable core / island / driver), hardcoded literals to check, and the full transitive blast radius if the file changes.
 
 ## Quickstart
 
@@ -50,7 +50,7 @@ claude mcp add codeindex -- ~/.local/bin/codeindex --mcp
 }
 ```
 
-That's it. The next time your agent starts, codeindex indexes your project in the background and serves structural queries.
+The next time your agent starts, codeindex indexes your project in the background and serves structural queries.
 
 ## MCP Tools
 
