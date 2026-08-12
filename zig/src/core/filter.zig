@@ -7,17 +7,18 @@ pub const Filter = struct {
     skip_hidden: bool = true,
 
     const builtin_skip_dirs = [_][]const u8{
-        ".git", ".zig-cache", "zig-out", "node_modules", "target",
-        ".mypy_cache", "__pycache__", ".tox", ".pytest_cache",
-        "vendor", "dist", "build", ".next", ".nuxt",
-        ".svelte-kit", ".parcel-cache", ".turbo",
-        "coverage", ".nyc_output", ".cache",
+        ".git",             ".zig-cache",    "zig-out",     "node_modules",  "target",
+        ".mypy_cache",      "__pycache__",   ".tox",        ".pytest_cache", "vendor",
+        "dist",             "build",         ".next",       ".nuxt",         ".svelte-kit",
+        ".parcel-cache",    ".turbo",        "coverage",    ".nyc_output",   ".cache",
         // Package / dependency caches that are not hidden (hidden ones like
         // .cargo/.rustup/.npm/.m2/.gradle/.venv are already skipped by skip_hidden).
-        "venv", "site-packages", "Pods", "_build", "elm-stuff", "bower_components",
+        "venv",             "site-packages", "Pods",        "_build",        "elm-stuff",
+        "bower_components",
         // Terraform/IaC + build-image artifacts (mkosi builds a full OS rootfs
         // under mkosi.tools — thousands of system files that aren't project code).
-        ".terraform", "mkosi.tools", "mkosi.cache", "mkosi.output", ".mkosi",
+        ".terraform",    "mkosi.tools", "mkosi.cache",   "mkosi.output",
+        ".mkosi",
     };
 
     // Path fragments matched anywhere in a path. Used to prune language package
@@ -29,14 +30,12 @@ pub const Filter = struct {
     };
 
     const builtin_skip_extensions = [_][]const u8{
-        ".exe", ".dll", ".so", ".dylib", ".o", ".a", ".lib",
-        ".pyc", ".pyo", ".class", ".jar", ".war",
-        ".wasm", ".min.js", ".min.css",
-        ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".svg",
-        ".mp3", ".mp4", ".avi", ".mov", ".webm",
-        ".zip", ".tar", ".gz", ".bz2", ".xz", ".rar", ".7z",
-        ".pdf", ".doc", ".docx", ".xls", ".xlsx",
-        ".sqlite", ".db", ".lock",
+        ".exe",     ".dll",  ".so",    ".dylib", ".o",      ".a",    ".lib",
+        ".pyc",     ".pyo",  ".class", ".jar",   ".war",    ".wasm", ".min.js",
+        ".min.css", ".png",  ".jpg",   ".jpeg",  ".gif",    ".bmp",  ".ico",
+        ".svg",     ".mp3",  ".mp4",   ".avi",   ".mov",    ".webm", ".zip",
+        ".tar",     ".gz",   ".bz2",   ".xz",    ".rar",    ".7z",   ".pdf",
+        ".doc",     ".docx", ".xls",   ".xlsx",  ".sqlite", ".db",   ".lock",
     };
 
     pub fn init(allocator: std.mem.Allocator) Filter {

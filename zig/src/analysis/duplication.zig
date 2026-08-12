@@ -39,10 +39,10 @@ fn relevant_kind(kind: models.SymbolKind) bool {
 
 /// Names too generic to mean duplication (overrides, conventional methods).
 const generic = [_][]const u8{
-    "new",     "default",  "init",   "deinit", "drop",    "clone",   "main",
-    "build",   "from",     "into",   "with",   "next",    "value",   "name",
-    "run",     "start",    "stop",   "close",  "open",    "get",     "set",
-    "handle",  "process",  "create", "update", "delete",  "list",    "format",
+    "new",      "default", "init",     "deinit",    "drop",        "clone", "main",
+    "build",    "from",    "into",     "with",      "next",        "value", "name",
+    "run",      "start",   "stop",     "close",     "open",        "get",   "set",
+    "handle",   "process", "create",   "update",    "delete",      "list",  "format",
     "toString", "equals",  "hashCode", "serialize", "deserialize",
 };
 
@@ -58,8 +58,7 @@ fn is_generic(name: []const u8) bool {
 /// (HTML tags, CSS selectors, JSON/YAML keys) repeat by nature, not by copy-paste.
 fn is_code(lang: models.Language) bool {
     return switch (lang) {
-        .html, .css, .scss, .json, .yaml, .toml, .ini, .markdown, .sql,
-        .dockerfile, .make, .xml, .jinja2, .gitignore, .diff, .hcl => false,
+        .html, .css, .scss, .json, .yaml, .toml, .ini, .markdown, .sql, .dockerfile, .make, .xml, .jinja2, .gitignore, .diff, .hcl => false,
         else => true,
     };
 }

@@ -171,6 +171,14 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
 
+    // The unit tests also install as a binary. `zig build test` runs them through
+    // the build runner's IPC protocol on stdout, which the linked tree-sitter C
+    // sources corrupt via their debug printf paths. Building the binary and
+    // executing it directly runs the same tests without that protocol.
+    const install_tests = b.addInstallArtifact(tests, .{});
+    const test_bin_step = b.step("test-bin", "Build the unit-test binary into zig-out/bin");
+    test_bin_step.dependOn(&install_tests.step);
+
     // ── End-to-end MCP stdio test ────────────────────────────────────
     // Spawns the built binary and drives the real JSON-RPC protocol.
     const e2e = b.addSystemCommand(&.{ "python3", "test/e2e.py" });

@@ -524,11 +524,11 @@ fn normalize_path(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
 // ── Python ───────────────────────────────────────────────────────────────────
 
 const python_stdlib = [_][]const u8{
-    "os", "sys", "re", "json", "math", "datetime", "collections", "itertools",
-    "functools", "typing", "pathlib", "subprocess", "io", "time", "hashlib",
-    "logging", "unittest", "abc", "enum", "dataclasses", "asyncio", "socket",
-    "http", "urllib", "xml", "csv", "sqlite3", "threading", "multiprocessing",
-    "argparse", "copy", "string", "random", "struct", "operator", "inspect",
+    "os",        "sys",    "re",       "json",        "math",            "datetime", "collections", "itertools",
+    "functools", "typing", "pathlib",  "subprocess",  "io",              "time",     "hashlib",     "logging",
+    "unittest",  "abc",    "enum",     "dataclasses", "asyncio",         "socket",   "http",        "urllib",
+    "xml",       "csv",    "sqlite3",  "threading",   "multiprocessing", "argparse", "copy",        "string",
+    "random",    "struct", "operator", "inspect",
 };
 
 fn resolve_python(allocator: std.mem.Allocator, import_str: []const u8, source_path: []const u8, known_files: []const []const u8) ![][]const u8 {
@@ -639,4 +639,3 @@ fn copy_replacing(buf: []u8, start: usize, src: []const u8, find: []const u8, re
     }
     return pos - start;
 }
-

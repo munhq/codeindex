@@ -81,7 +81,8 @@ fn extract_types(allocator: std.mem.Allocator, exp: *explorer.Explorer) ![]TypeI
                     std.mem.startsWith(u8, trimmed, "#[") or
                     std.mem.eql(u8, trimmed, "{") or
                     std.mem.eql(u8, trimmed, "}") or
-                    std.mem.eql(u8, trimmed, "},")){
+                    std.mem.eql(u8, trimmed, "},"))
+                {
                     continue;
                 }
 
