@@ -5,6 +5,34 @@ export GIT_TERMINAL_PROMPT=0
 set -euo pipefail
 
 VENDOR_DIR="$(cd "$(dirname "$0")" && pwd)/vendor"
+
+# Default path: download the pinned vendor snapshot. The clone path below
+# (--from-source) tracks upstream default branches, and upstream moves:
+# several grammars no longer ship generated parsers on their default branch,
+# and tree-sitter core changed its include layout. The snapshot is the exact
+# tree the build is tested against.
+SNAPSHOT_URL="https://github.com/munhq/codeindex/releases/download/grammars-20260812/vendor-snapshot-20260812.tar.gz"
+SNAPSHOT_SHA256="569c6a56628a8f449f06992435010de01faf2899e5277b5927090c57d52888ed"
+
+if [ "${1:-}" != "--from-source" ]; then
+    if [ -d "$VENDOR_DIR/tree-sitter" ] && [ -d "$VENDOR_DIR/grammars" ]; then
+        echo "vendor/ already present, nothing to do (use --from-source to refetch from upstream)"
+        exit 0
+    fi
+    echo "Downloading vendor snapshot..."
+    tmp="$(mktemp)"
+    trap 'rm -f "$tmp"' EXIT
+    curl -fsSL "$SNAPSHOT_URL" -o "$tmp"
+    if command -v sha256sum >/dev/null; then
+        echo "$SNAPSHOT_SHA256  $tmp" | sha256sum -c - >/dev/null
+    else
+        echo "$SNAPSHOT_SHA256  $tmp" | shasum -a 256 -c - >/dev/null
+    fi
+    tar -xzf "$tmp" -C "$(dirname "$VENDOR_DIR")"
+    echo "Done. $(ls -d "$VENDOR_DIR/grammars"/*/ | wc -l) grammars unpacked."
+    exit 0
+fi
+
 mkdir -p "$VENDOR_DIR/grammars"
 
 clone() {
@@ -13,13 +41,18 @@ clone() {
     # trips `set -u` with "a: unbound variable".
     local name="$1"
     local url="$2"
+    local branch="${3:-}"
     local dir="$VENDOR_DIR/grammars/$name"
     if [ -d "$dir" ]; then
         echo "  skip $name (exists)"
         return
     fi
     echo "  fetch $name"
-    git clone --depth 1 --quiet "$url" "$dir"
+    if [ -n "$branch" ]; then
+        git clone --depth 1 --quiet --branch "$branch" "$url" "$dir"
+    else
+        git clone --depth 1 --quiet "$url" "$dir"
+    fi
 }
 
 echo "Fetching tree-sitter..."
@@ -48,7 +81,9 @@ clone lua          https://github.com/tree-sitter-grammars/tree-sitter-lua
 clone scala        https://github.com/tree-sitter/tree-sitter-scala
 clone elixir       https://github.com/elixir-lang/tree-sitter-elixir
 clone r            https://github.com/r-lib/tree-sitter-r
-clone swift        https://github.com/alex-pinkus/tree-sitter-swift
+# swift does not commit the generated parser on its default branch;
+# the with-generated-files branch carries src/parser.c.
+clone swift        https://github.com/alex-pinkus/tree-sitter-swift with-generated-files
 clone dart         https://github.com/UserNobody14/tree-sitter-dart
 clone haskell      https://github.com/tree-sitter/tree-sitter-haskell
 
@@ -74,7 +109,9 @@ if [ ! -d "$VENDOR_DIR/grammars/markdown/src" ] && [ -d "$VENDOR_DIR/grammars/ma
 fi
 clone solidity     https://github.com/JoranHonig/tree-sitter-solidity
 clone proto        https://github.com/coder3101/tree-sitter-proto
-clone sql          https://github.com/DerekStride/tree-sitter-sql
+# sql does not commit the generated parser on its default branch;
+# the gh-pages branch carries src/parser.c.
+clone sql          https://github.com/DerekStride/tree-sitter-sql gh-pages
 clone make         https://github.com/alemuller/tree-sitter-make
 clone nix          https://github.com/nix-community/tree-sitter-nix
 clone scss         https://github.com/serenadeai/tree-sitter-scss
