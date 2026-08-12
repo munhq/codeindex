@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+
+# A missing repository must fail, not prompt for credentials in CI.
+export GIT_TERMINAL_PROMPT=0
 set -euo pipefail
 
 VENDOR_DIR="$(cd "$(dirname "$0")" && pwd)/vendor"
@@ -40,11 +43,11 @@ clone java         https://github.com/tree-sitter/tree-sitter-java
 clone ruby         https://github.com/tree-sitter/tree-sitter-ruby
 clone bash         https://github.com/tree-sitter/tree-sitter-bash
 clone c_sharp      https://github.com/tree-sitter/tree-sitter-c-sharp
-clone kotlin       https://github.com/tree-sitter/tree-sitter-kotlin
-clone lua          https://github.com/tree-sitter/tree-sitter-lua
+clone kotlin       https://github.com/fwcd/tree-sitter-kotlin
+clone lua          https://github.com/tree-sitter-grammars/tree-sitter-lua
 clone scala        https://github.com/tree-sitter/tree-sitter-scala
-clone elixir       https://github.com/tree-sitter/tree-sitter-elixir
-clone r            https://github.com/tree-sitter/tree-sitter-r
+clone elixir       https://github.com/elixir-lang/tree-sitter-elixir
+clone r            https://github.com/r-lib/tree-sitter-r
 clone swift        https://github.com/alex-pinkus/tree-sitter-swift
 clone dart         https://github.com/UserNobody14/tree-sitter-dart
 clone haskell      https://github.com/tree-sitter/tree-sitter-haskell
@@ -52,10 +55,10 @@ clone haskell      https://github.com/tree-sitter/tree-sitter-haskell
 # Config/data/infra
 clone toml         https://github.com/tree-sitter/tree-sitter-toml
 clone json         https://github.com/tree-sitter/tree-sitter-json
-clone yaml         https://github.com/tree-sitter/tree-sitter-yaml
+clone yaml         https://github.com/tree-sitter-grammars/tree-sitter-yaml
 clone css          https://github.com/tree-sitter/tree-sitter-css
 clone html         https://github.com/tree-sitter/tree-sitter-html
-clone hcl          https://github.com/MichaHoffmann/tree-sitter-hcl
+clone hcl          https://github.com/tree-sitter-grammars/tree-sitter-hcl
 clone dockerfile   https://github.com/camdencheek/tree-sitter-dockerfile
 clone markdown     https://github.com/tree-sitter-grammars/tree-sitter-markdown
 clone solidity     https://github.com/JoranHonig/tree-sitter-solidity
