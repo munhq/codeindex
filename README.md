@@ -153,6 +153,12 @@ cd zig && zig build test
 | **Refactor planner** | Yes (`plan_change`) | No | No | No | No |
 | **Languages** | 40+ | 20+ | 50+ | Varies | Varies |
 
+## Pairs with chat-recall
+
+codeindex answers questions about the code in front of you. **[chat-recall](https://github.com/munhq/chat-recall)** answers questions about the work you already did — it indexes your Claude Code, Gemini CLI, Codex, OpenCode and Antigravity sessions into one searchable history and exposes that over MCP too.
+
+Together they cover both halves of what an agent forgets: codeindex stops it re-reading files it could have outlined, and chat-recall stops it redoing work it already finished. chat-recall detects a codeindex binary on your PATH and registers four extra code-intelligence tools when it finds one — neither requires the other.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
