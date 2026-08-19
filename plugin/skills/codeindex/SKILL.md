@@ -46,16 +46,21 @@ Ask what the question actually is, then pick:
   Read the outline first, then `read_symbol` the one you want.
 - **"Where is this string/identifier used?"** → `find_word` for an exact
   identifier, `search` for free text. Both beat `Grep` on token cost.
-- **"What calls X?"** → `find_callers` (heuristic, no full name resolution —
-  treat it as a candidate list, not proof).
-- **"What breaks if I change this file?"** → `get_change_impact` for the
-  transitive blast radius, or `plan_change` for the full picture in one call
-  (definition, call sites, file role, literals, blast radius).
+- **"What calls X?"** → `find_callers` (`name`). Heuristic, with no full name
+  resolution — treat the result as a candidate list, not proof.
+- **"What breaks if I change this file?"** → `get_change_impact` (`path`,
+  optional `max_depth`) for the transitive blast radius, or `plan_change` for
+  the whole picture in one call (definition, call sites, file role, literals,
+  blast radius).
 
-Dependency questions: `get_imports` (what this file needs) and `get_imported_by`
-(what needs this file). Orientation: `get_tree`, `get_hot_files`, `status`.
-Audits: `analyze` with one of 13 analyses (`security`, `dead_code`, `cycles`,
-`architecture`, `unwrap_audit`, …).
+Dependency questions: `get_imports` (`path`) for what a file needs, and
+`get_imported_by` (`path`) for what needs it. Orientation: `get_tree`,
+`get_hot_files`, `status`. Audits: `analyze` with one of 13 analyses
+(`security`, `dead_code`, `cycles`, `architecture`, `unwrap_audit`, …).
+
+Every file-scoped tool above takes **`path`**, relative to the workspace root.
+It is never `file`. A wrong argument name costs a turn and then sends you back
+to `Read`, which is the outcome this skill exists to avoid.
 
 ## When NOT to use it
 
