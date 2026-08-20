@@ -29,7 +29,13 @@ OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
 ARTIFACT="${BINARY}-${ARCH}-${OS}"
 
 DL_TMP="$(mktemp "$DEST.dl.XXXXXX")"
-if gh release download v0.1.0 --repo "$REPO" -p "$ARTIFACT" -O "$DL_TMP" 2>/dev/null; then
+# Two faults made this download fail every time, so every install fell through
+# to a source build and never said why. It asked for tag v0.1.0, which never
+# existed as a release — no tag at all makes gh resolve the latest. And gh
+# refuses -O onto a path that already exists, which mktemp above had just
+# created, so --clobber is required rather than defensive.
+if command -v gh &>/dev/null &&
+   gh release download --repo "$REPO" -p "$ARTIFACT" -O "$DL_TMP" --clobber 2>/dev/null; then
     atomic_install "$DL_TMP"
     rm -f "$DL_TMP"
     echo "Installed prebuilt binary to $DEST"
@@ -40,10 +46,11 @@ else
         echo "Error: zig not found. Install: https://ziglang.org/download/" >&2
         exit 1
     fi
-    cd zig
-    ./fetch-vendor.sh
-    zig build -Doptimize=ReleaseFast
-    atomic_install zig-out/bin/codeindex
+    # A subshell, because `cd zig` used to leak into the rest of the script and
+    # `claude mcp add` below registered the server against the zig
+    # subdirectory instead of the user scope.
+    ( cd "$SRC_DIR/zig" && ./fetch-vendor.sh && zig build -Doptimize=ReleaseFast )
+    atomic_install "$SRC_DIR/zig/zig-out/bin/codeindex"
     echo "Built and installed to $DEST"
 fi
 
@@ -66,12 +73,15 @@ else
 fi
 
 if command -v claude &>/dev/null; then
-    # Re-adding the same name errors instead of replacing, so drop any previous
-    # entry first and keep the script re-runnable.
+    # -s user, because `claude mcp add` defaults to local scope and would
+    # register the server for one directory only. Re-adding a name that exists
+    # errors instead of replacing it, so drop any previous entry in either
+    # scope first and keep the script re-runnable.
+    claude mcp remove -s user codeindex 2>/dev/null || true
     claude mcp remove codeindex 2>/dev/null || true
-    claude mcp add codeindex -- "$INSTALL_DIR/$BINARY" --mcp
-    echo "Registered with Claude Code"
+    claude mcp add -s user codeindex -- "$INSTALL_DIR/$BINARY" --mcp
+    echo "Registered with Claude Code (user scope)"
 else
     echo "Claude Code not found — register manually:"
-    echo "  claude mcp add codeindex -- $INSTALL_DIR/$BINARY --mcp"
+    echo "  claude mcp add -s user codeindex -- $INSTALL_DIR/$BINARY --mcp"
 fi
