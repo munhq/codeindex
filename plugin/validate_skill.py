@@ -116,24 +116,54 @@ def main():
 
     # 3. Execute the routes the skill tells an agent to take.
     print("\n--- live calls ---")
-    # Pick the largest source file: a tiny config file has no symbols, and an
-    # empty outline would look like a tool failure.
-    cands = []
-    for root, dirs, files in os.walk(workspace):
-        dirs[:] = [d for d in dirs
-                   if d not in {".git", "node_modules", "target", "dist", "vendor"}]
-        for f in files:
-            if f.endswith((".ts", ".rs", ".py", ".zig", ".go")) and "test" not in f:
-                fp = os.path.join(root, f)
-                try:
-                    cands.append((os.path.getsize(fp), fp))
-                except OSError:
-                    pass
-    cands.sort(reverse=True)
-    src = os.path.relpath(cands[0][1], workspace) if cands else None
+    # Indexing runs in the background, and status reports files:0 while it does.
+    # A probe issued immediately therefore asks an empty index, and every answer
+    # comes back as "No outline found" — which reads as a broken tool rather
+    # than an unfinished index. Wait for the index before probing anything.
+    indexed, deadline = 0, time.time() + 120
+    while time.time() < deadline:
+        try:
+            doc = json.loads(ci.call("status", {}))
+        except Exception:
+            break
+        indexed = doc.get("files", 0)
+        if indexed and not doc.get("indexing"):
+            break
+        time.sleep(1)
+    print(f"  index: {indexed} file(s)")
+    if not indexed:
+        fails.append("workspace is not indexed, so no route could be checked")
+
+    # Pick the probe file from the INDEX, not from the filesystem. The largest
+    # file on disk is often generated — a build cache, or a C import
+    # translation — and the index never held it, so the outline came back empty
+    # and the validator blamed the tool for its own choice of probe.
+    src = None
+    if indexed:
+        try:
+            entries = [e for e in json.loads(ci.call("get_tree", {}))
+                       if e.get("symbols")]
+        except Exception:
+            entries = []
+        entries.sort(key=lambda e: e.get("symbols", 0), reverse=True)
+        if entries:
+            src = entries[0]["path"]
+            if os.path.isabs(src):
+                src = os.path.relpath(src, workspace)
     print(f"  probe file: {src}")
 
-    out = ci.call("get_outline", {"path": src})
+    # The index must describe the workspace that was asked for. A snapshot left
+    # in a project root by another project loads without complaint and answers
+    # every call, so every documented route "works" while every answer is about
+    # the wrong repository. Check containment, or this validator passes a server
+    # that returns another project's code.
+    if src and not os.path.exists(os.path.join(workspace, src)):
+        print(f"  FAIL index holds {src}, which is not in the workspace")
+        fails.append(f"index holds `{src}`, which does not exist under "
+                     f"{workspace} — the loaded snapshot describes another "
+                     f"project, so every answer is about the wrong repository")
+
+    out = ci.call("get_outline", {"path": src}) if src else ""
     ok = bool(out) and out.lstrip().startswith("{")
     print(f"  {'OK  ' if ok else 'FAIL'} get_outline(path=...)")
     if not ok:
