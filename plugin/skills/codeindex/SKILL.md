@@ -22,11 +22,17 @@ Most Read calls answer a question that did not need the whole file.
 | tool | tokens per call |
 |---|---|
 | `Read` | 1,563 |
-| `mcp__codeindex__get_outline` | 113 |
-| `mcp__codeindex__find_symbol` | 102 |
-| `mcp__codeindex__search` | 79 |
-| `mcp__codeindex__find_word` | 41 |
-| `mcp__codeindex__read_symbol` | **35** |
+| `get_outline` | 113 |
+| `find_symbol` | 102 |
+| `search` | 79 |
+| `find_word` | 41 |
+| `read_symbol` | **35** |
+
+The codeindex tools are named bare throughout this skill. Their live prefix
+depends on the install: `mcp__codeindex__` when the server is registered
+directly, `mcp__plugin_codeindex_codeindex__` when the plugin registers it. Take
+the exact name from your own tool list — a name written for the other install
+fails the call and sends you back to `Read`.
 
 A token you never put into context is never billed. A token you put in and later
 compress has already been re-sent on every intervening turn, and editing it
@@ -55,8 +61,9 @@ Ask what the question actually is, then pick:
 
 Dependency questions: `get_imports` (`path`) for what a file needs, and
 `get_imported_by` (`path`) for what needs it. Orientation: `get_tree`,
-`get_hot_files`, `status`. Audits: `analyze` with one of 13 analyses
-(`security`, `dead_code`, `cycles`, `architecture`, `unwrap_audit`, …).
+`get_hot_files`, `status`. Audits: `analyze` with one of 16 analyses
+(`security`, `dead_code`, `cycles`, `architecture`, `unwrap_audit`, `clones`,
+`duplication`, `health`, …).
 
 Every file-scoped tool above takes **`path`**, relative to the workspace root.
 It is never `file`. A wrong argument name costs a turn and then sends you back
@@ -69,7 +76,7 @@ Three cases where reaching for codeindex is wrong, and one is a trap:
 1. **You need exact file content** — you are about to `Edit`, the whitespace
    matters, or you need lines the outline does not carry. Use `Read`. Being
    cheap is worthless if you then edit the wrong text.
-2. **`mcp__codeindex__read_file` is not a cheaper `Read`.** Measured at 1,109
+2. **`read_file` is not a cheaper `Read`.** Measured at 1,109
    tokens per call against Read's 1,563 — the same job at a similar price. The
    saving comes from asking a *narrower question*, not from swapping the file
    reader. Prefer `read_symbol`.

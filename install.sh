@@ -85,25 +85,6 @@ install_skill() {
     printf '%s %s\n' "codeindex" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$target/$MARKER"
     echo "installed skill -> $target"
 }
-SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-BINARIES=("distil-mcp:mcp" "distil-bench:bench")
-
-mkdir -p "$INSTALL_DIR"
-
-# Install file $1 as $INSTALL_DIR/$2 atomically. distil-mcp is a long-lived
-# server, so a client can hold the target mapped while this runs. Writing it in
-# place can SIGBUS that process when it faults in a page of a half-written file.
-# Stage on the same filesystem and rename() over the target: the running
-# instance keeps the old inode until it exits.
-atomic_install() {
-    local src="$1" dest="$INSTALL_DIR/$2" tmp
-    tmp="$(mktemp "$dest.XXXXXX")"
-    cat "$src" > "$tmp"
-    chmod 0755 "$tmp"
-    mv -f "$tmp" "$dest"
-}
-
 # Install $1 to $DEST atomically. codeindex runs as a long-lived server, so a
 # running instance may have $DEST mapped; overwriting it in place can SIGBUS
 # that process when it faults in a page from the truncated file. Stage to a temp
@@ -147,13 +128,38 @@ else
     echo "Built and installed to $DEST"
 fi
 
+# Is the Claude Code plugin already installed?
+#
+# The plugin ships the same skill and registers the same MCP server. When both
+# paths run, Claude Code loads two copies of everything: `claude mcp list` shows
+# `codeindex` and `plugin:codeindex:codeindex` both connected, so 16 tool schemas
+# become 32 (about 1.3k tokens of duplicate schema in every session), the skill
+# appears twice, and two servers watch one workspace and write one snapshot. A
+# tool whose whole purpose is to spend less context must not spend it twice on
+# itself. So the plugin wins where it is present, and this script installs only
+# the binary the plugin's launcher resolves.
+plugin_installed() {
+    command -v claude >/dev/null 2>&1 || return 1
+    claude plugin list 2>/dev/null | grep -q "codeindex@"
+}
+
+if plugin_installed; then
+    PLUGIN_OWNS=1
+    echo "codeindex plugin detected — it provides the skill and the MCP server."
+    echo "Installed the binary only, so the plugin launcher resolves it locally."
+else
+    PLUGIN_OWNS=0
+fi
+
 # Install the Agent Skills alongside the binary.
 #
 # This is not optional dressing. A server that registers without telling an
 # agent when to reach for it stays idle, and an idle server saves nothing
 # however cheap its calls are. Measured on real sessions, the servers that ship
 # skills get called and the ones that only register do not.
-if [ -d "$SRC_DIR/plugin/skills" ]; then
+if [ "$PLUGIN_OWNS" = "1" ]; then
+    echo "Skipping skill install: the plugin ships it."
+elif [ -d "$SRC_DIR/plugin/skills" ]; then
     targets="$(skill_dirs)"
     if [ -z "$targets" ]; then
         echo "Warning: no Claude skills directory found; skills not installed" >&2
@@ -168,7 +174,18 @@ else
     echo "Warning: no plugin/skills directory found; skills not installed" >&2
 fi
 
-if command -v claude &>/dev/null; then
+if [ "$PLUGIN_OWNS" = "1" ]; then
+    # The plugin's .mcp.json already registers the server. Registering a second
+    # one here is what produced the duplicate `codeindex` entry; remove any left
+    # over from an earlier run of this script so the duplication self-heals.
+    if claude mcp list 2>/dev/null | grep -qE '^codeindex:'; then
+        claude mcp remove -s user codeindex 2>/dev/null || true
+        claude mcp remove codeindex 2>/dev/null || true
+        echo "Removed the duplicate user-scope MCP server; the plugin provides it."
+    else
+        echo "Skipping MCP registration: the plugin provides it."
+    fi
+elif command -v claude &>/dev/null; then
     # -s user, because `claude mcp add` defaults to local scope and would
     # register the server for one directory only. Re-adding a name that exists
     # errors instead of replacing it, so drop any previous entry in either
