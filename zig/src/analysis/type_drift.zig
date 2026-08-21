@@ -62,7 +62,10 @@ fn extract_types(allocator: std.mem.Allocator, exp: *explorer.Explorer) ![]TypeI
             var lines_it = std.mem.splitScalar(u8, content, '\n');
             while (lines_it.next()) |line| {
                 line_num += 1;
-                if (line_num <= sym.line_start or line_num >= sym.line_end) continue;
+                // line_num counts from 1; symbol ranges are 0-based. Compare in
+                // the 1-based space so the body is bounded by the signature and
+                // the closing line rather than shifted one line up.
+                if (line_num <= sym.start_1() or line_num >= sym.end_1()) continue;
                 const trimmed = std.mem.trim(u8, line, " \t\r");
                 if (trimmed.len == 0) continue;
 
@@ -152,7 +155,7 @@ fn extract_types(allocator: std.mem.Allocator, exp: *explorer.Explorer) ![]TypeI
                     .name = sym.name,
                     .language = outline.language,
                     .file = outline.path,
-                    .line = sym.line_start,
+                    .line = sym.start_1(),
                     .fields = try fields.toOwnedSlice(allocator),
                 });
             } else {

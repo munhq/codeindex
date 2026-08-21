@@ -16,6 +16,7 @@ const treesitter = @import("parser/treesitter.zig");
 const import_scan = @import("parser/import_scan.zig");
 const duplication = @import("analysis/duplication.zig");
 const clones = @import("analysis/clones.zig");
+const scanner_mod = @import("index/scanner.zig");
 
 // ── Test helpers ──────────────────────────────────────────────────────────────
 
@@ -1547,4 +1548,340 @@ test "security: env-style secret detection (catches .env leaks)" {
     try testing.expect(security_scan.env_secret("API_KEY=your_api_key_here") == null); // placeholder
     try testing.expect(security_scan.env_secret("PORT=8080") == null); // not a secret name
     try testing.expect(security_scan.env_secret("let token = getToken();") == null); // function call
+}
+
+// ── Outline quality: locals are not structure ───────────────────────────────────
+// A tags query matches at any depth, so patterns written for container-level
+// bindings also captured every function local. That put temporaries in outlines
+// and in find_symbol, and inflated symbol_count. See treesitter.drop_local_bindings.
+
+// Reuses expect_no_symbol above: a leaked local is the same defect class as a
+// leaked call-site — a name in the outline that is not part of the file's shape.
+
+test "parser: zig function locals are not symbols" {
+    const src =
+        \\const std = @import("std");
+        \\const TOP: u32 = 1;
+        \\pub fn save() void {
+        \\    var buf: [8]u8 = undefined;
+        \\    const w = &buf;
+        \\    _ = w;
+        \\}
+        \\
+    ;
+    // Container-level declarations stay.
+    try expect_symbol(.zig, src, "std");
+    try expect_symbol(.zig, src, "TOP");
+    try expect_symbol(.zig, src, "save");
+    // Locals inside the function body go.
+    try expect_no_symbol(.zig, src, "buf");
+    try expect_no_symbol(.zig, src, "w");
+}
+
+test "parser: a type declared inside a function is kept" {
+    // `const X = struct { … }` inside a function is real structure, not a
+    // temporary: it encloses definitions of its own, which is the test used to
+    // tell the two apart without per-grammar node names.
+    const src =
+        \\pub fn main() void {
+        \\    const Ctx = struct {
+        \\        field: u32,
+        \\        fn run(self: @This()) void {
+        \\            const scratch = self.field;
+        \\            _ = scratch;
+        \\        }
+        \\    };
+        \\    _ = Ctx;
+        \\}
+        \\
+    ;
+    try expect_symbol(.zig, src, "Ctx");
+    try expect_symbol(.zig, src, "run");
+    try expect_no_symbol(.zig, src, "scratch");
+}
+
+test "parser: typescript function locals are not symbols" {
+    const src =
+        \\export const TOP = 1;
+        \\export function f(): number {
+        \\  const localA = 2;
+        \\  let localB = 3;
+        \\  return localA + localB;
+        \\}
+        \\
+    ;
+    try expect_symbol(.typescript, src, "TOP");
+    try expect_symbol(.typescript, src, "f");
+    try expect_no_symbol(.typescript, src, "localA");
+    try expect_no_symbol(.typescript, src, "localB");
+}
+
+// ── Line numbering: 0-based inside, 1-based on the wire ─────────────────────────
+
+test "symbol line numbers are 0-based internally and 1-based for output" {
+    // `alpha` is on the third line of the source, so tree-sitter reports row 2
+    // and every user-facing number must say 3.
+    const src =
+        \\const std = @import("std");
+        \\
+        \\pub fn alpha() void {}
+        \\
+    ;
+    var parser = try treesitter.Parser.init(testing.allocator);
+    defer parser.deinit();
+    var outline = try parser.parse_source("t.zig", .zig, src);
+    defer outline.deinit(testing.allocator);
+
+    var found = false;
+    for (outline.symbols) |s| {
+        if (!std.mem.eql(u8, s.name, "alpha")) continue;
+        found = true;
+        try testing.expectEqual(@as(usize, 2), s.line_start);
+        try testing.expectEqual(@as(usize, 3), s.start_1());
+        try testing.expectEqual(s.line_end + 1, s.end_1());
+        // contains_1 takes the 1-based line, which is what every analysis scan
+        // and write_lines counts in.
+        try testing.expect(s.contains_1(3));
+        try testing.expect(!s.contains_1(2));
+    }
+    try testing.expect(found);
+}
+
+// ── Snapshot identity ──────────────────────────────────────────────────────────
+
+test "config: the snapshot path follows an explicit workspace" {
+    const config_mod = @import("core/config.zig");
+    const a = testing.allocator;
+
+    // "." keeps the bare name: main() chdirs into the project root first.
+    const implicit = try config_mod.resolve_snapshot_path(a, ".");
+    try testing.expectEqualStrings(".codeindex.json", implicit);
+
+    const explicit = try config_mod.resolve_snapshot_path(a, "/tmp/project");
+    defer a.free(explicit);
+    try testing.expectEqualStrings("/tmp/project/.codeindex.json", explicit);
+
+    const relative = try config_mod.resolve_snapshot_path(a, "../other");
+    defer a.free(relative);
+    try testing.expectEqualStrings("../other/.codeindex.json", relative);
+}
+
+test "snapshot: a snapshot from another workspace is refused" {
+    const storage = @import("storage/snapshot.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io_mod.io(), .{ .sub_path = "a.zig", .data = "pub fn kept() void {}\n" });
+    const dir_path = try tmp.dir.realPathFileAlloc(io_mod.io(), ".", testing.allocator);
+    defer testing.allocator.free(dir_path);
+    const snap_path = try std.fs.path.join(testing.allocator, &.{ dir_path, ".codeindex.json" });
+    defer testing.allocator.free(snap_path);
+    const file_path = try std.fs.path.join(testing.allocator, &.{ dir_path, "a.zig" });
+    defer testing.allocator.free(file_path);
+
+    // Save an index stamped with this workspace.
+    {
+        var exp = try explorer_mod.Explorer.init(testing.allocator);
+        defer exp.deinit();
+        _ = try exp.add_file(.{
+            .path = try testing.allocator.dupe(u8, file_path),
+            .language = .zig,
+            .line_count = 1,
+            .byte_size = 22,
+            .symbols = &[_]models.Symbol{},
+            .imports = &[_][]const u8{},
+        }, "pub fn kept() void {}\n");
+        try storage.Snapshot.save(&exp, snap_path, dir_path);
+    }
+
+    // Loading it for a different workspace must fail rather than answer about
+    // the wrong code. This is the check that a bare version number could not do.
+    {
+        var exp = try explorer_mod.Explorer.init(testing.allocator);
+        defer exp.deinit();
+        var stamps = storage.Stamps.init(testing.allocator);
+        defer stamps.deinit();
+        try testing.expectError(
+            error.WorkspaceMismatch,
+            storage.Snapshot.load_into(&exp, testing.allocator, snap_path, "/some/other/project", &stamps),
+        );
+    }
+
+    // Loading it for its own workspace works, and yields a stamp per file so the
+    // reconcile pass can tell what changed since.
+    {
+        var exp = try explorer_mod.Explorer.init(testing.allocator);
+        defer exp.deinit();
+        var stamps = storage.Stamps.init(testing.allocator);
+        defer stamps.deinit();
+        try storage.Snapshot.load_into(&exp, testing.allocator, snap_path, dir_path, &stamps);
+        try testing.expectEqual(@as(usize, 1), exp.file_count());
+        try testing.expect(stamps.map.get(file_path) != null);
+    }
+}
+
+test "parser: a zig function's range covers its body, not just the signature" {
+    // Anchoring the tags query on FnProto gave every Zig function a one-line
+    // range, so read_symbol returned the signature and dropped the body.
+    const src =
+        \\pub fn beta() u32 {
+        \\    const seven = 7;
+        \\    return seven;
+        \\}
+        \\
+    ;
+    var parser = try treesitter.Parser.init(testing.allocator);
+    defer parser.deinit();
+    var outline = try parser.parse_source("t.zig", .zig, src);
+    defer outline.deinit(testing.allocator);
+
+    var found = false;
+    for (outline.symbols) |s| {
+        if (!std.mem.eql(u8, s.name, "beta")) continue;
+        found = true;
+        try testing.expectEqual(@as(usize, 1), s.start_1());
+        // Through the closing brace on line 4, not stopping at line 1.
+        try testing.expectEqual(@as(usize, 4), s.end_1());
+    }
+    try testing.expect(found);
+}
+
+test "parser: a multi-line local initializer is not mistaken for a container" {
+    // `const p = blk: { … };` encloses two more bindings. Enclosing something is
+    // not enough to look like a declaration — what it encloses has to be of a
+    // different kind (a field or a method), or every long local qualifies.
+    const src =
+        \\pub fn save() void {
+        \\    const p = blk: {
+        \\        var buf: [8]u8 = undefined;
+        \\        const n = buf.len;
+        \\        break :blk n;
+        \\    };
+        \\    _ = p;
+        \\}
+        \\
+    ;
+    try expect_symbol(.zig, src, "save");
+    try expect_no_symbol(.zig, src, "p");
+    try expect_no_symbol(.zig, src, "buf");
+    try expect_no_symbol(.zig, src, "n");
+}
+
+// ── Snapshot path form and stamp meaning ──────────────────────────────────────
+// Two defects that only showed up when the same project was served by two
+// launch modes, and each made the index quietly incomplete rather than wrong:
+// the stored path form followed the launch mode, and a stamp was written for a
+// file the snapshot carried no outline for.
+
+test "snapshot: paths are stored relative to the workspace" {
+    const storage = @import("storage/snapshot.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io_mod.io(), .{ .sub_path = "a.zig", .data = "pub fn kept() void {}\n" });
+    const dir_path = try tmp.dir.realPathFileAlloc(io_mod.io(), ".", testing.allocator);
+    defer testing.allocator.free(dir_path);
+    const snap_path = try std.fs.path.join(testing.allocator, &.{ dir_path, ".codeindex.json" });
+    defer testing.allocator.free(snap_path);
+    const file_path = try std.fs.path.join(testing.allocator, &.{ dir_path, "a.zig" });
+    defer testing.allocator.free(file_path);
+
+    {
+        var exp = try explorer_mod.Explorer.init(testing.allocator);
+        defer exp.deinit();
+        _ = try exp.add_file(.{
+            .path = try testing.allocator.dupe(u8, file_path),
+            .language = .zig,
+            .line_count = 1,
+            .byte_size = 22,
+            .symbols = &[_]models.Symbol{},
+            .imports = &[_][]const u8{},
+        }, "pub fn kept() void {}\n");
+        try storage.Snapshot.save(&exp, snap_path, dir_path);
+    }
+
+    // The file on disk must name the file inside the project. Storing the
+    // absolute path made the snapshot a property of this machine's layout, and
+    // it disagreed with the "./a.zig" form the default root produced.
+    const raw = try io_mod.readFileAlloc(testing.allocator, snap_path, 1 << 20);
+    defer testing.allocator.free(raw);
+    try testing.expect(std.mem.indexOf(u8, raw, "\"p\":\"a.zig\"") != null);
+    try testing.expect(std.mem.indexOf(u8, raw, dir_path) == null or
+        std.mem.indexOf(u8, raw, "\"workspace\":") != null);
+
+    // Load rebuilds the absolute key every other component uses, so the index
+    // survives a moved checkout and does not depend on the launch mode.
+    {
+        var exp = try explorer_mod.Explorer.init(testing.allocator);
+        defer exp.deinit();
+        var stamps = storage.Stamps.init(testing.allocator);
+        defer stamps.deinit();
+        try storage.Snapshot.load_into(&exp, testing.allocator, snap_path, dir_path, &stamps);
+        try testing.expectEqual(@as(usize, 1), exp.file_count());
+        try testing.expect(stamps.map.get(file_path) != null);
+    }
+}
+
+test "snapshot: a file with no outline is not stamped as unchanged" {
+    const storage = @import("storage/snapshot.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io_mod.io(), .{ .sub_path = "kept.zig", .data = "pub fn kept() void {}\n" });
+    try tmp.dir.writeFile(io_mod.io(), .{ .sub_path = "dropped.zig", .data = "pub fn dropped() void {}\n" });
+    const dir_path = try tmp.dir.realPathFileAlloc(io_mod.io(), ".", testing.allocator);
+    defer testing.allocator.free(dir_path);
+    const snap_path = try std.fs.path.join(testing.allocator, &.{ dir_path, ".codeindex.json" });
+    defer testing.allocator.free(snap_path);
+    const kept_path = try std.fs.path.join(testing.allocator, &.{ dir_path, "kept.zig" });
+    defer testing.allocator.free(kept_path);
+    const dropped_path = try std.fs.path.join(testing.allocator, &.{ dir_path, "dropped.zig" });
+    defer testing.allocator.free(dropped_path);
+
+    // Index both, then remove one. Its slot stays in the files array to keep the
+    // ids aligned with the outline keys, but it carries no outline any more.
+    {
+        var exp = try explorer_mod.Explorer.init(testing.allocator);
+        defer exp.deinit();
+        for ([_][]const u8{ kept_path, dropped_path }) |p| {
+            _ = try exp.add_file(.{
+                .path = try testing.allocator.dupe(u8, p),
+                .language = .zig,
+                .line_count = 1,
+                .byte_size = 22,
+                .symbols = &[_]models.Symbol{},
+                .imports = &[_][]const u8{},
+            }, "pub fn x() void {}\n");
+        }
+        try exp.remove_file(dropped_path);
+        try storage.Snapshot.save(&exp, snap_path, dir_path);
+    }
+
+    // A stamp means "in the index and current at save time". Stamping the
+    // outline-less slot told the reconcile pass the file was already indexed, so
+    // it skipped the parse and the file stayed missing for the life of the
+    // snapshot — an index that looks healthy and cannot find the code.
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
+    defer exp.deinit();
+    var stamps = storage.Stamps.init(testing.allocator);
+    defer stamps.deinit();
+    try storage.Snapshot.load_into(&exp, testing.allocator, snap_path, dir_path, &stamps);
+    try testing.expect(stamps.map.get(kept_path) != null);
+    try testing.expect(stamps.map.get(dropped_path) == null);
+
+    // So the reconcile pass indexes it: the walk finds no stamp and counts it new.
+    var parser = try treesitter.Parser.init(testing.allocator);
+    defer parser.deinit();
+    var f = filter_mod.Filter.init(testing.allocator);
+    defer f.deinit();
+    const res = try scanner_mod.reconcile_tree(
+        testing.allocator,
+        &exp,
+        &parser,
+        &f,
+        dir_path,
+        10 * 1024 * 1024,
+        .{},
+        &stamps,
+    );
+    try testing.expectEqual(@as(usize, 1), res.added);
+    try testing.expectEqual(@as(usize, 1), res.unchanged);
+    try testing.expect(exp.file_map.get(dropped_path) != null);
 }

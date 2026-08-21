@@ -30,8 +30,10 @@ jobs:
           git config --global url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
           cd zig && ./fetch-vendor.sh
 
+      # main.zig, build.zig and tests_main.zig live outside src/, so checking
+      # only src/ let them drift out of format unnoticed.
       - name: Format check
-        run: cd zig && zig fmt --check src/
+        run: cd zig && zig fmt --check src/ main.zig build.zig tests_main.zig
 
       - name: Build
         run: cd zig && zig build
@@ -45,3 +47,17 @@ jobs:
           cd zig
           zig build test-bin
           ./zig-out/bin/test
+
+      # The skill names tools and arguments that only the server can confirm, so
+      # drift between the two is invisible to the compiler and to the tests. This
+      # check existed and nothing ran it, which is how the skill came to advertise
+      # 13 analyses against a server that implements 16, and how a server that
+      # answered about a different repository still passed review. It starts the
+      # real binary, checks every documented name and argument against the live
+      # schema, and executes each documented route.
+      - name: Validate the skill against the server
+        run: |
+          python3 plugin/validate_skill.py \
+            plugin/skills/codeindex/SKILL.md \
+            zig/zig-out/bin/codeindex \
+            "$PWD"
