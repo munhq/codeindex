@@ -40,8 +40,31 @@ jobs:
           git config --global url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
           cd zig && ./fetch-vendor.sh
 
+      # The tag is the single source of truth for the version. Release v0.2.0
+      # shipped a binary answering `codeindex 0.1.0` because the version was a
+      # literal in main.zig that nobody edited when the tag was cut.
+      - name: Derive the version from the tag
+        id: version
+        run: echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
       - name: Build
-        run: cd zig && zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }}
+        run: |
+          cd zig
+          zig build -Doptimize=ReleaseFast \
+            -Dtarget=${{ matrix.target }} \
+            -Dversion=${{ steps.version.outputs.value }}
+
+      # Cross-built artifacts cannot run here, so only the native target is
+      # checked — enough to catch a version that does not match its tag, which
+      # is the drift that shipped once already.
+      - name: The binary must name its own tag
+        if: matrix.target == 'x86_64-linux'
+        run: |
+          got="$(zig/zig-out/bin/codeindex -v)"
+          want="codeindex ${{ steps.version.outputs.value }}"
+          echo "reported: $got"
+          echo "expected: $want"
+          test "$got" = "$want"
 
       - name: Strip (Linux)
         if: contains(matrix.target, 'linux')

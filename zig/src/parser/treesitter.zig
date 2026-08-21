@@ -90,6 +90,18 @@ const ini_tags = @embedFile("queries/ini_tags.scm");
 const solidity_tags = @embedFile("queries/solidity_tags.scm");
 const proto_tags = @embedFile("queries/proto_tags.scm");
 
+/// Identifies the symbol-extraction behaviour that produced an outline.
+///
+/// A snapshot stores outlines, not source, so it replays whatever this code
+/// decided at save time. Change a tags query or the symbol pipeline and every
+/// existing snapshot keeps serving the old answers for files that have not been
+/// touched since — the fix ships, and nobody sees it. The snapshot records this
+/// number and refuses to load when it differs.
+///
+/// BUMP THIS when symbol extraction changes: a tags query under
+/// src/parser/queries/, `map_kind`, or `drop_local_bindings`.
+pub const EXTRACTION_VERSION: u32 = 2;
+
 pub const Parser = struct {
     allocator: std.mem.Allocator,
     parser: *ts.TSParser,
@@ -217,7 +229,82 @@ pub const Parser = struct {
             }
         }
 
+        try drop_local_bindings(self.allocator, &symbols);
+
         return self.create_outline(path, language, content, &symbols, &imports);
+    }
+
+    /// Drop `const`/`var` bindings that are function locals.
+    ///
+    /// A tags query matches its pattern at any depth, so a pattern written for
+    /// container-level bindings also captures every local. Two shipped queries
+    /// do exactly that — `zig_tags.scm` (`VarDecl`) and `typescript_tags.scm`
+    /// (`variable_declarator`) — and the result is an outline where the locals
+    /// outnumber the real definitions several times over. That inflates every
+    /// `get_outline`, puts junk in `find_symbol`, lets `read_symbol` resolve to
+    /// a one-line temporary, and overstates `symbol_count` in `status`.
+    ///
+    /// A local is a binding that sits inside a function body. The exception is a
+    /// binding that encloses another definition: `const S = struct { … }` inside
+    /// a function is a type declaration, which is real structure and stays. That
+    /// test is what keeps a nested container while dropping `const w = &x.y;`,
+    /// and it needs no per-grammar node names, so it also guards the other
+    /// in-tree queries against the same mistake.
+    fn drop_local_bindings(allocator: std.mem.Allocator, symbols: *std.ArrayList(models.Symbol)) !void {
+        if (symbols.items.len < 2) return;
+
+        // Bodies to test containment against, collected once: the inner loops
+        // below run per candidate, and most files are mostly functions.
+        var bodies = std.ArrayList(models.Symbol).empty;
+        defer bodies.deinit(allocator);
+        for (symbols.items) |s| {
+            switch (s.kind) {
+                .function, .method, .@"test" => try bodies.append(allocator, s),
+                else => {},
+            }
+        }
+        if (bodies.items.len == 0) return;
+
+        var write: usize = 0;
+        for (symbols.items, 0..) |sym, i| {
+            var keep = true;
+            if (sym.kind == .constant or sym.kind == .variable) {
+                var inside_body = false;
+                for (bodies.items) |b| {
+                    // Strictly after the body's own first line: a binding on the
+                    // signature line is the declaration itself, not a local.
+                    if (b.line_start < sym.line_start and sym.line_end <= b.line_end) {
+                        inside_body = true;
+                        break;
+                    }
+                }
+                if (inside_body) {
+                    // A nested container is recognised by what it holds: fields
+                    // or methods, which carry a different kind. A binding that
+                    // holds only more bindings of its own kind is a multi-line
+                    // initializer, not a declaration — `const p = blk: { … };`
+                    // wrapping two locals must not pass as a struct.
+                    var declares_container = false;
+                    for (symbols.items, 0..) |other, j| {
+                        if (i == j) continue;
+                        if (other.kind == sym.kind) continue;
+                        if (sym.line_start < other.line_start and other.line_end <= sym.line_end) {
+                            declares_container = true;
+                            break;
+                        }
+                    }
+                    keep = declares_container;
+                }
+            }
+            if (keep) {
+                symbols.items[write] = sym;
+                write += 1;
+            } else {
+                var dead = sym;
+                dead.deinit(allocator);
+            }
+        }
+        symbols.shrinkRetainingCapacity(write);
     }
 
     fn map_kind(self: *Parser, kind_str: []const u8) models.SymbolKind {
