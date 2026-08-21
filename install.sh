@@ -47,6 +47,14 @@ skill_dirs() {
             # home holds .claude.json, so require it.
             [ -f "$home/.claude.json" ] && resolve_dir "$home/skills"
         done
+        # These tests filter candidates; they are not failures. The block's exit
+        # status is the last test's, and on a machine with only ~/.claude the
+        # glob "$HOME"/.claude-* stays literal, so that last test fails. With
+        # `set -o pipefail` that failed the whole pipeline, `set -e` then killed
+        # the script at `targets="$(skill_dirs)"`, and the installer exited 1
+        # with no message after installing the binary — no skill, no MCP
+        # registration. That is every first-time install on a normal machine.
+        true
     } | awk 'NF && !seen[$0]++'
 }
 
@@ -108,7 +116,19 @@ DL_TMP="$(mktemp "$DEST.dl.XXXXXX")"
 # existed as a release — no tag at all makes gh resolve the latest. And gh
 # refuses -O onto a path that already exists, which mktemp above had just
 # created, so --clobber is required rather than defensive.
-if command -v gh &>/dev/null &&
+#
+# curl first, gh second. The releases are public, so curl needs no credentials,
+# and the README tells people to pipe this script through curl — so curl is the
+# one tool every caller demonstrably has. Requiring gh sent every stranger down
+# the source-build path, which needs a matching Zig and the vendored grammars.
+# This is the order plugin/bin/codeindex-launch already used.
+if command -v curl &>/dev/null &&
+   curl -fsSL -o "$DL_TMP" \
+     "https://github.com/$REPO/releases/latest/download/$ARTIFACT" 2>/dev/null; then
+    atomic_install "$DL_TMP"
+    rm -f "$DL_TMP"
+    echo "Installed prebuilt binary to $DEST"
+elif command -v gh &>/dev/null &&
    gh release download --repo "$REPO" -p "$ARTIFACT" -O "$DL_TMP" --clobber 2>/dev/null; then
     atomic_install "$DL_TMP"
     rm -f "$DL_TMP"
