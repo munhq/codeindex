@@ -1,0 +1,72 @@
+#!/bin/sh
+# Launch the codeindex MCP server for the Claude Code plugin.
+#
+# The plugin ships skills and this launcher, never a binary: codeindex is a
+# compiled Zig program of about 53 MB per platform, and carrying four builds
+# would make the plugin mostly dead weight for every user. An npm-published
+# server gets this for free through npx, so a compiled one needs the equivalent —
+# resolve a usable binary, and fetch one only when nothing usable exists.
+#
+# Write NOTHING to stdout. Stdout is the JSON-RPC channel. One stray line there
+# makes the server look broken to the client, with no error that explains why.
+# Diagnostics go to stderr, which the client logs.
+set -eu
+
+BIN_NAME="codeindex"
+REPO="munhq/codeindex"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/codeindex/bin"
+
+log() { printf '%s\n' "$*" >&2; }
+
+# 1. An explicit override wins, for a local build or an unusual layout.
+if [ -n "${CODEINDEX_BIN:-}" ] && [ -x "${CODEINDEX_BIN}" ]; then
+    exec "${CODEINDEX_BIN}" "$@"
+fi
+
+# 2. An already-installed binary. PATH first, then the directory install.sh
+#    writes to, which is not always on PATH, then this launcher's own cache.
+if command -v "$BIN_NAME" >/dev/null 2>&1; then
+    exec "$(command -v "$BIN_NAME")" "$@"
+fi
+for candidate in "$HOME/.local/bin/$BIN_NAME" "$CACHE_DIR/$BIN_NAME"; do
+    if [ -x "$candidate" ]; then
+        exec "$candidate" "$@"
+    fi
+done
+
+# 3. Nothing installed. Fetch the release build for this platform once and cache
+#    it, so this path runs on first launch only. The release names assets
+#    <binary>-<arch>-<os>, matching uname, so this must agree with install.sh.
+ARCH="$(uname -m)"
+OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+ARTIFACT="${BIN_NAME}-${ARCH}-${OS}"
+mkdir -p "$CACHE_DIR"
+TMP="$CACHE_DIR/.${BIN_NAME}.download.$$"
+rm -f "$TMP"
+
+# curl first: the releases are public, so this needs no credentials and no gh.
+if command -v curl >/dev/null 2>&1 &&
+   curl -fsSL -o "$TMP" \
+     "https://github.com/$REPO/releases/latest/download/$ARTIFACT"; then
+    chmod 0755 "$TMP"
+    mv -f "$TMP" "$CACHE_DIR/$BIN_NAME"
+    log "codeindex: fetched $ARTIFACT -> $CACHE_DIR/$BIN_NAME"
+    exec "$CACHE_DIR/$BIN_NAME" "$@"
+fi
+rm -f "$TMP"
+
+# gh covers a machine without curl, and a release that is not public.
+if command -v gh >/dev/null 2>&1 &&
+   gh release download --repo "$REPO" -p "$ARTIFACT" -O "$TMP" --clobber >/dev/null; then
+    chmod 0755 "$TMP"
+    mv -f "$TMP" "$CACHE_DIR/$BIN_NAME"
+    log "codeindex: fetched $ARTIFACT -> $CACHE_DIR/$BIN_NAME"
+    exec "$CACHE_DIR/$BIN_NAME" "$@"
+fi
+rm -f "$TMP"
+
+log "codeindex: no usable $BIN_NAME binary, and none could be fetched."
+log "  searched: \$CODEINDEX_BIN, PATH, $HOME/.local/bin, $CACHE_DIR"
+log "  no release asset '$ARTIFACT' for $REPO"
+log "  build it: git clone https://github.com/$REPO && cd codeindex && ./install.sh"
+exit 127

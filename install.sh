@@ -8,13 +8,101 @@ INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 # whose skills directories are separate. A fixed $HOME/.claude/skills installed
 # the skill where the running account could not see it, so nothing ever routed
 # an agent to this server — the exact failure the skill exists to prevent.
-SKILL_DIR="${SKILL_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills}"
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="munhq/codeindex"
 
 mkdir -p "$INSTALL_DIR"
 
 DEST="$INSTALL_DIR/$BINARY"
+
+MARKER=".codeindex-managed"
+
+# Every Claude home, not only the active one.
+#
+# Claude Code reads skills from its config directory, and CLAUDE_CONFIG_DIR
+# moves that. A machine can hold ~/.claude plus siblings such as ~/.claude-work,
+# each with its own skills directory, and installing into one of them looks like
+# a success in every account that cannot see the skill — the exact failure the
+# skill exists to prevent. Some siblings symlink ~/.claude/skills, so resolve
+# each path and drop duplicates rather than copying over the same directory
+# several times. An explicit SKILL_DIR overrides all of this.
+resolve_dir() {
+    if [ -d "$1" ]; then (cd "$1" && pwd -P); else
+        parent="$(dirname "$1")"
+        [ -d "$parent" ] && printf '%s/%s\n' "$(cd "$parent" && pwd -P)" "$(basename "$1")"
+    fi
+}
+
+skill_dirs() {
+    if [ -n "${SKILL_DIR:-}" ]; then
+        resolve_dir "$SKILL_DIR"
+        return
+    fi
+    {
+        [ -n "${CLAUDE_CONFIG_DIR:-}" ] && resolve_dir "$CLAUDE_CONFIG_DIR/skills"
+        for home in "$HOME"/.claude "$HOME"/.claude-*; do
+            # A name glob alone is wrong: ~/.claude-mem, ~/.claude-desktop and
+            # ~/.claude-account-backups match it and are not Claude Code homes.
+            # Installing there writes files nothing will ever read. Every real
+            # home holds .claude.json, so require it.
+            [ -f "$home/.claude.json" ] && resolve_dir "$home/skills"
+        done
+    } | awk 'NF && !seen[$0]++'
+}
+
+# Install one skill directory, and never clobber a skill this script did not
+# write. Drop-in skills have no native versioning, so each installed directory
+# carries a marker naming the version that put it there; a directory without one
+# belongs to the user.
+install_skill() {
+    src="$1" dest_root="$2"
+    name="$(basename "$src")"
+    target="$dest_root/$name"
+    if [ -e "$target" ] && [ ! -f "$target/$MARKER" ]; then
+        # No marker, so this directory predates the marker or belongs to the
+        # user. Identical content means an earlier run of this script wrote it,
+        # and adopting it is a no-op that only adds the marker. Different
+        # content is the user's, and overwriting it would be data loss.
+        declared="$(sed -n 's/^name:[[:space:]]*//p' "$target/SKILL.md" 2>/dev/null | head -1)"
+        if diff -r -q "$src" "$target" >/dev/null 2>&1; then
+            echo "adopting existing identical skill at $target" >&2
+        elif [ "$declared" = "$name" ]; then
+            # Same content is only the unchanged case. An older version of this
+            # skill shipped before markers existed and differs by exactly the
+            # edits since — refusing it would strand every machine on the copy
+            # it happened to install first. A SKILL.md whose frontmatter names
+            # this skill is ours; anything else is left alone.
+            echo "replacing an older $name skill at $target" >&2
+        else
+            echo "warning: $target exists, differs from the bundled skill, and" \
+                 "carries no marker; left alone" >&2
+            return
+        fi
+    fi
+    mkdir -p "$dest_root"
+    rm -rf "${target:?}"
+    cp -R "$src" "$target"
+    printf '%s %s\n' "codeindex" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$target/$MARKER"
+    echo "installed skill -> $target"
+}
+SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+BINARIES=("distil-mcp:mcp" "distil-bench:bench")
+
+mkdir -p "$INSTALL_DIR"
+
+# Install file $1 as $INSTALL_DIR/$2 atomically. distil-mcp is a long-lived
+# server, so a client can hold the target mapped while this runs. Writing it in
+# place can SIGBUS that process when it faults in a page of a half-written file.
+# Stage on the same filesystem and rename() over the target: the running
+# instance keeps the old inode until it exits.
+atomic_install() {
+    local src="$1" dest="$INSTALL_DIR/$2" tmp
+    tmp="$(mktemp "$dest.XXXXXX")"
+    cat "$src" > "$tmp"
+    chmod 0755 "$tmp"
+    mv -f "$tmp" "$dest"
+}
 
 # Install $1 to $DEST atomically. codeindex runs as a long-lived server, so a
 # running instance may have $DEST mapped; overwriting it in place can SIGBUS
@@ -66,13 +154,16 @@ fi
 # however cheap its calls are. Measured on real sessions, the servers that ship
 # skills get called and the ones that only register do not.
 if [ -d "$SRC_DIR/plugin/skills" ]; then
-    mkdir -p "$SKILL_DIR"
-    for skill in "$SRC_DIR"/plugin/skills/*/; do
-        name="$(basename "$skill")"
-        rm -rf "${SKILL_DIR:?}/$name"
-        cp -R "$skill" "$SKILL_DIR/$name"
-        echo "Installed skill -> $SKILL_DIR/$name"
-    done
+    targets="$(skill_dirs)"
+    if [ -z "$targets" ]; then
+        echo "Warning: no Claude skills directory found; skills not installed" >&2
+    else
+        for dest in $targets; do
+            for skill in "$SRC_DIR"/plugin/skills/*/; do
+                install_skill "${skill%/}" "$dest"
+            done
+        done
+    fi
 else
     echo "Warning: no plugin/skills directory found; skills not installed" >&2
 fi
