@@ -2,12 +2,12 @@
 
 A structural code intelligence engine that runs as an **MCP server** for AI coding agents.
 
-It indexes your codebase with tree-sitter (40+ languages), builds a trigram full-text index, an inverted word index, and a dependency graph — then exposes them through **19 MCP tools**.
+It indexes your codebase with tree-sitter (40+ languages), builds a trigram full-text index, an inverted word index, and a dependency graph — then exposes them through **16 MCP tools**.
 
 ```
  ┌─────────────┐      MCP (stdio)       ┌──────────────┐
  │  AI Agent   │ ◄─────────────────────► │   codeindex  │
- │ (Claude,    │   19 tools, JSON-RPC    │  (Zig binary) │
+ │ (Claude,    │   16 tools, JSON-RPC    │  (Zig binary) │
  │  Cursor…)   │                         │              │
  └─────────────┘                         └──────┬───────┘
                                                 │
@@ -36,8 +36,16 @@ cd zig && ./fetch-vendor.sh && zig build -Doptimize=ReleaseFast
 Register with your AI agent:
 
 ```bash
-# Claude Code
-claude mcp add codeindex -- ~/.local/bin/codeindex --mcp
+# Claude Code — the plugin is the one-step path. It ships the skill, the hook
+# and the MCP server together, and its launcher finds or fetches the binary.
+claude plugin marketplace add munhq/codeindex
+claude plugin install codeindex@codeindex
+
+# Without the plugin (or for a different MCP client), register the binary
+# directly. Do not do both: two registrations mean two servers, two copies of
+# every tool schema, and two writers on one snapshot. install.sh detects the
+# plugin and skips this step when it is present.
+claude mcp add -s user codeindex -- ~/.local/bin/codeindex --mcp
 
 # Cursor / other MCP clients: add to your config
 {
@@ -71,7 +79,7 @@ The next time your agent starts, codeindex indexes your project in the backgroun
 | `read_file` | Read file contents with optional line range |
 | `read_symbol` | Read just a symbol's source code (with optional context lines) |
 | `index_workspace` | Index or re-index a workspace directory |
-| `analyze` | Run one of 13 code analyses (see below) |
+| `analyze` | Run one of 16 code analyses (see below) |
 
 ### Analyses (`analyze` tool)
 
@@ -90,6 +98,9 @@ The next time your agent starts, codeindex indexes your project in the backgroun
 | `literal_scan` | Hardcoded URLs, IPs, ports, absolute paths, TODOs |
 | `coupling` | Module coupling metrics |
 | `cycles` | Circular dependency detection |
+| `duplication` | Reinvented free functions — the same job written twice |
+| `clones` | Copy-pasted function bodies, ignoring names and whitespace |
+| `health` | Roll-up of the analyses above into one index-health report |
 
 ## Supported Languages
 
