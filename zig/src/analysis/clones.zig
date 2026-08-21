@@ -112,10 +112,12 @@ pub fn analyze(allocator: std.mem.Allocator, exp: *explorer.Explorer) !Report {
             if (sym.kind != .function and sym.kind != .method) continue;
             if (sym.line_end <= sym.line_start) continue;
             // Skip the signature line → matches even when the copy was renamed.
+            // These are indexes into `lines`, so they stay 0-based; only the
+            // reported `.line` below converts to the 1-based output convention.
             const fp = fingerprint(lines.items, sym.line_start + 1, sym.line_end) orelse continue;
             const gop = try map.getOrPut(fp.hash);
             if (!gop.found_existing) gop.value_ptr.* = .{ .lines = fp.n, .members = std.ArrayList(Member).empty };
-            try gop.value_ptr.members.append(allocator, .{ .name = sym.name, .file = outline.path, .line = sym.line_start });
+            try gop.value_ptr.members.append(allocator, .{ .name = sym.name, .file = outline.path, .line = sym.start_1() });
         }
     }
 

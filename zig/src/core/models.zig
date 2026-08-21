@@ -170,12 +170,38 @@ pub const SymbolKind = enum {
 };
 
 /// A code symbol extracted from a file.
+///
+/// `line_start` and `line_end` are 0-BASED, because tree-sitter reports node
+/// rows that way and the word index keys its postings the same way; keeping one
+/// base internally is what lets `find_callers` compare a symbol range against a
+/// word hit directly. Every user-facing number is 1-based instead — editors,
+/// `read_file` and the MCP tool output all count from 1. Convert at that
+/// boundary with `start_1`/`end_1` rather than adding 1 at each call site, so a
+/// reader can tell which base a given expression is in.
 pub const Symbol = struct {
     name: []const u8,
     kind: SymbolKind,
+    /// 0-based. See the type-level note; use `start_1()` for output.
     line_start: usize,
+    /// 0-based, inclusive. See the type-level note; use `end_1()` for output.
     line_end: usize,
     detail: ?[]const u8 = null,
+
+    /// First line, 1-based — for output and for comparing against any line
+    /// number that was counted from 1 (analysis scans, `write_lines`).
+    pub fn start_1(self: Symbol) usize {
+        return self.line_start + 1;
+    }
+
+    /// Last line, 1-based and inclusive. Counterpart to `start_1`.
+    pub fn end_1(self: Symbol) usize {
+        return self.line_end + 1;
+    }
+
+    /// True when the 1-based `line` falls inside this symbol.
+    pub fn contains_1(self: Symbol, line: usize) bool {
+        return line >= self.start_1() and line <= self.end_1();
+    }
 
     pub fn deinit(self: *Symbol, allocator: std.mem.Allocator) void {
         allocator.free(self.name);

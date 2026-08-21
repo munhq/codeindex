@@ -4,6 +4,10 @@ const io = @import("io.zig");
 pub const Config = struct {
     workspace_root: []const u8 = ".",
     project_id: []const u8 = "default",
+    /// Where the index snapshot lives. Always inside `workspace_root` — see
+    /// `resolve_snapshot_path`. Never a bare relative name: that made the file a
+    /// property of the launch directory rather than of the indexed project, so
+    /// `--workspace B` run from A read A's snapshot and wrote B's index into it.
     snapshot_path: []const u8 = ".codeindex.json",
     max_file_size: u64 = 10 * 1024 * 1024,
     max_cache_bytes: usize = 50 * 1024 * 1024,
@@ -68,6 +72,19 @@ pub const Config = struct {
             }
         }
 
+        config.snapshot_path = try resolve_snapshot_path(allocator, config.workspace_root);
+
         return config;
     }
 };
+
+pub const SNAPSHOT_NAME = ".codeindex.json";
+
+/// Join the snapshot name onto the workspace so the file belongs to the project
+/// it describes. `workspace_root` of "." keeps the bare name: main() chdirs into
+/// the project root in that case, so the plain relative path already lands
+/// there, and keeping it short keeps the common case readable in logs.
+pub fn resolve_snapshot_path(allocator: std.mem.Allocator, workspace_root: []const u8) ![]const u8 {
+    if (std.mem.eql(u8, workspace_root, ".")) return SNAPSHOT_NAME;
+    return std.fs.path.join(allocator, &.{ workspace_root, SNAPSHOT_NAME });
+}
