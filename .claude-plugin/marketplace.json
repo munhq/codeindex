@@ -1,0 +1,20 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "codeindex",
+  "description": "Structural code intelligence for agents: symbol lookup, callers, imports and blast radius over 40+ languages, so an agent answers code questions without reading whole files.",
+  "owner": {
+    "name": "munhq"
+  },
+  "plugins": [
+    {
+      "name": "codeindex",
+      "description": "Skills that teach any agent to answer code questions structurally instead of reading whole files — symbol lookup, callers, imports and blast radius. Bundles the codeindex MCP server so install wires everything in one step.",
+      "author": {
+        "name": "munhq"
+      },
+      "category": "development",
+      "source": "./plugin",
+      "homepage": "https://github.com/munhq/codeindex"
+    }
+  ]
+}
