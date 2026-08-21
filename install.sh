@@ -3,7 +3,12 @@ set -euo pipefail
 
 BINARY="codeindex"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
-SKILL_DIR="${SKILL_DIR:-$HOME/.claude/skills}"
+# Claude Code reads skills from its config directory, and that is not always
+# ~/.claude: CLAUDE_CONFIG_DIR moves it, and this machine runs several accounts
+# whose skills directories are separate. A fixed $HOME/.claude/skills installed
+# the skill where the running account could not see it, so nothing ever routed
+# an agent to this server — the exact failure the skill exists to prevent.
+SKILL_DIR="${SKILL_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills}"
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="munhq/codeindex"
 
