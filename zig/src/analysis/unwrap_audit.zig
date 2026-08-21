@@ -104,7 +104,9 @@ pub fn audit(allocator: std.mem.Allocator, exp: *explorer.Explorer) ![]Finding {
                     // Find enclosing scope
                     const scope = blk: {
                         for (outline.symbols) |sym| {
-                            if (line_num >= sym.line_start and line_num <= sym.line_end) {
+                            // line_num counts from 1, symbol ranges are 0-based
+                            // — compare in the 1-based space.
+                            if (sym.contains_1(line_num)) {
                                 break :blk sym.name;
                             }
                         }

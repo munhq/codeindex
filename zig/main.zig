@@ -10,7 +10,12 @@ const config = @import("src/core/config.zig");
 const scanner = @import("src/index/scanner.zig");
 const io = @import("src/core/io.zig");
 
-const VERSION = "0.1.0";
+// 0.2.0 changes two things a user can observe: the snapshot carries an identity
+// and is rejected when it does not match (format 3), and every line number the
+// server reports is 1-based, where it used to be one line low.
+// Injected by build.zig, which takes it from the release tag. See the comment
+// there: a literal here drifted from the tag it shipped under.
+const VERSION = @import("build_options").version;
 
 // NOTE: `.codeindex.json` (the snapshot, see config.zig) is deliberately NOT a
 // marker. It used to be, which self-poisoned: running codeindex in a directory
@@ -230,7 +235,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     io.init(allocator);
     defer io.deinit();
 
-    const cfg = config.Config.from_args(allocator, init.args) catch config.Config{};
+    var cfg = config.Config.from_args(allocator, init.args) catch config.Config{};
 
     // Handle --help / --version before doing any work. These previously fell
     // through to the default path and silently started a full index + watcher.
@@ -284,6 +289,21 @@ pub fn main(init: std.process.Init.Minimal) !void {
             refused_reason = "the launch directory is not a git repo but contains several independent git repositories — it looks like a parent/workspace folder, not a single project";
         }
     } else |_| {}
+
+    // The identity written into the snapshot and checked when one is loaded.
+    // Resolved after the chdir above, so the default (".") case names the
+    // project root rather than whatever directory the client happened to launch
+    // from. Lives for the whole process; the snapshot code only borrows it.
+    const workspace_abs: []const u8 = io.realpathAlloc(allocator, cfg.workspace_root) catch
+        try allocator.dupe(u8, cfg.workspace_root);
+    defer allocator.free(workspace_abs);
+
+    // Every path key in the index is `join(root, rel)`, so the root form decides
+    // the key form: a "." root produced "./main.zig" and `--workspace /abs`
+    // produced "/abs/main.zig" for the same file. Both launch modes share one
+    // snapshot, so the file was stored twice and the reconcile pass matched
+    // neither set. Scan, watch and filter from the canonical absolute root only.
+    cfg.workspace_root = workspace_abs;
 
     var parser = try treesitter.Parser.init(allocator);
     defer parser.deinit();
@@ -342,6 +362,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         max_file_size: u64,
         snapshot_path: []const u8,
         snapshot_exists: bool,
+        workspace_abs: []const u8,
         watch_ctx: *WatchCtx,
         start_watcher: bool,
 
@@ -350,10 +371,27 @@ pub fn main(init: std.process.Init.Minimal) !void {
             var loaded_ok = false;
             if (ctx.snapshot_exists) {
                 std.debug.print("Loading from snapshot...\n", .{});
-                if (storage.Snapshot.load_into(ctx.exp, ctx.allocator, ctx.snapshot_path)) |_| {
+                var stamps = storage.Stamps.init(ctx.allocator);
+                defer stamps.deinit();
+                if (storage.Snapshot.load_into(ctx.exp, ctx.allocator, ctx.snapshot_path, ctx.workspace_abs, &stamps)) |_| {
                     loaded_ok = true;
+                    // A snapshot describes the workspace as it was when saved.
+                    // The watcher covers changes from now on; this covers every
+                    // change made while no server was running.
+                    if (scanner.reconcile_tree(ctx.allocator, ctx.exp, ctx.parser, ctx.f, ctx.workspace_root, ctx.max_file_size, .{}, &stamps)) |res| {
+                        if (res.added + res.changed + res.removed > 0) {
+                            std.debug.print("Snapshot reconciled: +{d} new, {d} changed, -{d} gone, {d} unchanged\n", .{ res.added, res.changed, res.removed, res.unchanged });
+                            storage.Snapshot.save(ctx.exp, ctx.snapshot_path, ctx.workspace_abs) catch {};
+                        }
+                    } else |err| {
+                        std.debug.print("Reconcile failed ({s}); index reflects the snapshot, not the working tree\n", .{@errorName(err)});
+                    }
                 } else |err| {
-                    std.debug.print("Snapshot load failed ({s}), indexing fresh\n", .{@errorName(err)});
+                    // WorkspaceMismatch is the common one: a snapshot left by
+                    // another project, or by this directory in a previous life.
+                    // Say so plainly — silently serving it is the failure this
+                    // check exists to prevent — then index for real below.
+                    std.debug.print("Snapshot rejected ({s}), indexing fresh\n", .{@errorName(err)});
                 }
             }
             // Only scan if the snapshot didn't load AND nothing was partially
@@ -362,7 +400,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 std.debug.print("Indexing {s}...\n", .{ctx.workspace_root});
                 if (scanner.index_tree(ctx.allocator, ctx.exp, ctx.parser, ctx.f, ctx.workspace_root, ctx.max_file_size, .{})) |res| {
                     if (res.capped) ctx.exp.set_status("Workspace too large — indexing stopped at the safety cap; results are partial. Narrow the scope with --workspace or CODEINDEX_WORKSPACE.");
-                    storage.Snapshot.save(ctx.exp, ctx.snapshot_path) catch {};
+                    storage.Snapshot.save(ctx.exp, ctx.snapshot_path, ctx.workspace_abs) catch {};
                     std.debug.print("Indexed {d} files, {d} symbols\n", .{ ctx.exp.file_count(), ctx.exp.symbol_count() });
                 } else |err| {
                     std.debug.print("Indexing failed: {}\n", .{err});
@@ -389,6 +427,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         .max_file_size = cfg.max_file_size,
         .snapshot_path = snapshot_path,
         .snapshot_exists = snapshot_exists,
+        .workspace_abs = workspace_abs,
         .watch_ctx = &watch_ctx,
         .start_watcher = refused_reason == null,
     };

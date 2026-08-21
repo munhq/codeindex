@@ -97,8 +97,8 @@ pub fn plan_symbol(allocator: std.mem.Allocator, exp: *explorer.Explorer, target
             if (sym.kind == .import or sym.kind == .module) continue;
             try defs.append(allocator, .{
                 .path = outline.path,
-                .line_start = sym.line_start + 1,
-                .line_end = sym.line_end + 1,
+                .line_start = sym.start_1(),
+                .line_end = sym.end_1(),
                 .kind = sym.kind,
             });
             if (primary_file_id == null) primary_file_id = fid;

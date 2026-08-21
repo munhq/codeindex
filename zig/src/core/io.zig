@@ -120,6 +120,33 @@ pub fn realpathAlloc(gpa: std.mem.Allocator, path: []const u8) ![:0]u8 {
     return cwd().realPathFileAlloc(h(), path, gpa);
 }
 
+/// Modification time and size of a file — the pair that decides whether an
+/// indexed file changed while the server was not running to watch it.
+pub const Stamp = struct {
+    /// Nanoseconds since the epoch. i64 holds that until the year 2262 and is
+    /// what JSON round-trips losslessly, unlike the i96 std reports.
+    mtime_ns: i64,
+    size: u64,
+
+    pub fn eql(self: Stamp, other: Stamp) bool {
+        return self.mtime_ns == other.mtime_ns and self.size == other.size;
+    }
+};
+
+/// Stamp for `path` relative to cwd, or null when it cannot be read. A null is
+/// treated as "changed" by callers, which errs toward re-indexing.
+pub fn stampFile(path: []const u8) ?Stamp {
+    const st = cwd().statFile(h(), path, .{}) catch return null;
+    return .{ .mtime_ns = @intCast(st.mtime.toNanoseconds()), .size = st.size };
+}
+
+/// Stamp for `sub_path` relative to `dir`. Same contract as `stampFile`; used by
+/// the directory walk, which already holds an open handle on the parent.
+pub fn stampFileFrom(dir: Dir, sub_path: []const u8) ?Stamp {
+    const st = dir.statFile(h(), sub_path, .{}) catch return null;
+    return .{ .mtime_ns = @intCast(st.mtime.toNanoseconds()), .size = st.size };
+}
+
 /// Read an entire file (relative to cwd) into an allocated buffer, capped at `max`.
 pub fn readFileAlloc(gpa: std.mem.Allocator, path: []const u8, max: usize) ![]u8 {
     return readFileFrom(cwd(), gpa, path, max);

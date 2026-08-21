@@ -212,8 +212,8 @@ pub const Server = struct {
                     for (results) |r| {
                         try w.print("{s}:{d}-{d} {s} {s}\n", .{
                             r.path,
-                            r.symbol.line_start,
-                            r.symbol.line_end,
+                            r.symbol.start_1(),
+                            r.symbol.end_1(),
                             r.symbol.kind.as_str(),
                             r.symbol.name,
                         });
@@ -259,8 +259,10 @@ pub const Server = struct {
                     try w.writeAll("No callers found.");
                 } else {
                     for (results) |r| {
+                        // line_num is 0-based (it indexes word postings); every
+                        // line number leaving this server is 1-based.
                         try w.print("{s}:{d} [{s}] {s}\n", .{
-                            r.path, r.line_num, r.context, r.line_text,
+                            r.path, r.line_num + 1, r.context, r.line_text,
                         });
                     }
                 }
@@ -277,7 +279,8 @@ pub const Server = struct {
                     try w.writeAll("No occurrences found.");
                 } else {
                     for (results) |r| {
-                        try w.print("{s}:{d}\n", .{ r.path, r.line_num });
+                        // 0-based in the word index, 1-based on the wire.
+                        try w.print("{s}:{d}\n", .{ r.path, r.line_num + 1 });
                     }
                 }
             }
@@ -296,7 +299,7 @@ pub const Server = struct {
                     try w.writeAll("{\"name\":");
                     try write_json_string(w, sym.name);
                     try w.print(",\"kind\":\"{s}\",\"line_start\":{d},\"line_end\":{d}}}", .{
-                        sym.kind.as_str(), sym.line_start, sym.line_end,
+                        sym.kind.as_str(), sym.start_1(), sym.end_1(),
                     });
                 }
                 try w.writeAll("]}");
@@ -876,8 +879,13 @@ pub const Server = struct {
                         if (file_id) |fid| {
                             const content = self.exp.content_cache.get(fid);
                             if (content) |c| {
-                                const start = if (r.symbol.line_start > context_lines) r.symbol.line_start - context_lines else 1;
-                                const end = r.symbol.line_end + context_lines;
+                                // write_lines counts from 1, so convert the
+                                // symbol's 0-based range before widening it;
+                                // feeding it the raw range returned a window
+                                // one line early, which cut the closing brace.
+                                const first = r.symbol.start_1();
+                                const start = if (first > context_lines) first - context_lines else 1;
+                                const end = r.symbol.end_1() + context_lines;
                                 try w.print("# {s} ({s}) in {s}\n", .{ r.symbol.name, r.symbol.kind.as_str(), r.path });
                                 try self.write_lines(w, c, start, end);
                             } else {
@@ -1067,7 +1075,7 @@ fn render_file_plan(w: anytype, plan: *plan_change.FilePlan) !void {
     const max_sym: usize = 40;
     const n = @min(plan.symbols_in_file.len, max_sym);
     for (plan.symbols_in_file[0..n]) |s| {
-        try w.print("- {d}: [{s}] {s}\n", .{ s.line_start + 1, s.kind.as_str(), s.name });
+        try w.print("- {d}: [{s}] {s}\n", .{ s.start_1(), s.kind.as_str(), s.name });
     }
     if (plan.symbols_in_file.len > max_sym) try w.print("... ({d} more)\n", .{plan.symbols_in_file.len - max_sym});
     try w.writeAll("\n");

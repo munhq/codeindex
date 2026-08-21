@@ -86,13 +86,14 @@ pub fn analyze(allocator: std.mem.Allocator, exp: *explorer.Explorer) !Report {
                 if (std.mem.indexOf(u8, trimmed, hint) != null) {
                     // Find the struct/class name from nearby symbols
                     for (outline.symbols) |sym| {
-                        if (sym.line_start <= line_num + 3 and sym.line_end >= line_num) {
+                        // line_num counts from 1, symbol ranges are 0-based.
+                        if (sym.start_1() <= line_num + 3 and sym.end_1() >= line_num) {
                             if (sym.kind == .@"struct" or sym.kind == .class) {
                                 try code_tables.append(allocator, .{
                                     .name = sym.name,
                                     .source = .code,
                                     .file = outline.path,
-                                    .line = sym.line_start,
+                                    .line = sym.start_1(),
                                     .columns = &.{},
                                 });
                             }

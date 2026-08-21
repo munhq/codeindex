@@ -66,7 +66,7 @@ pub fn find_dead_code(allocator: std.mem.Allocator, exp: *explorer.Explorer) ![]
                     .name = sym.name,
                     .kind = sym.kind,
                     .file = outline.path,
-                    .line = sym.line_start,
+                    .line = sym.start_1(),
                     .reason = "no references outside defining file",
                 });
             }

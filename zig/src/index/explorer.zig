@@ -1320,12 +1320,14 @@ pub const Explorer = struct {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-/// Find the innermost symbol scope containing a given line.
+/// Find the innermost symbol scope containing a given line. `line` is 1-based —
+/// it comes from the content scan in `search_content`, which counts from 1,
+/// whereas symbol ranges are 0-based (see models.Symbol).
 fn find_scope(symbols: []const models.Symbol, line: u32) ?models.Symbol {
     var best: ?models.Symbol = null;
     var best_size: usize = std.math.maxInt(usize);
     for (symbols) |sym| {
-        if (line >= sym.line_start and line <= sym.line_end) {
+        if (sym.contains_1(line)) {
             const size = sym.line_end - sym.line_start;
             if (size < best_size) {
                 best = sym;

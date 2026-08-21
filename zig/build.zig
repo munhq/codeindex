@@ -6,6 +6,15 @@ pub fn build(b: *std.Build) void {
 
     const flags = &.{ "-std=c11", "-D_POSIX_C_SOURCE=200809L", "-D_GNU_SOURCE" };
 
+    // The version the binary reports. It used to be a string literal in
+    // main.zig, so cutting a tag without editing that line shipped a binary
+    // naming a different version than the tag: release v0.2.0 carries a binary
+    // that answers `codeindex 0.1.0`. The release workflow now passes the tag
+    // here and then asserts the built binary agrees, so the two cannot drift.
+    const version = b.option([]const u8, "version", "Version the binary reports (release CI passes the tag)") orelse DEFAULT_VERSION;
+    const build_options = b.addOptions();
+    build_options.addOption([]const u8, "version", version);
+
     // ── Tree-sitter library ──────────────────────────────────────────
     // Zig 0.16: C sources, include paths and lib linkage live on the Module,
     // and libc/libc++ linkage are Module create-options.
@@ -122,6 +131,7 @@ pub fn build(b: *std.Build) void {
     mod.addIncludePath(b.path("vendor/tree-sitter/lib/include"));
     mod.linkLibrary(ts_lib);
     mod.linkLibrary(grammar_lib);
+    mod.addOptions("build_options", build_options);
 
     const exe = b.addExecutable(.{
         .name = "codeindex",
@@ -136,7 +146,7 @@ pub fn build(b: *std.Build) void {
     // over the target instead — atomic, and running processes keep the old inode
     // until they exit (or hot-reload). Replaces b.installArtifact(exe).
     const install_bin = b.addSystemCommand(&.{
-        "sh", "-c",
+        "sh",                "-c",
         \\set -eu
         \\src="$1"; dst="$2"
         \\mkdir -p "$(dirname "$dst")"
@@ -186,3 +196,7 @@ pub fn build(b: *std.Build) void {
     const e2e_step = b.step("e2e", "Run end-to-end MCP stdio tests");
     e2e_step.dependOn(&e2e.step);
 }
+
+/// What a local build reports when no tag is passed. Keep it at the version
+/// being worked towards, so a developer build is never mistaken for a release.
+const DEFAULT_VERSION = "0.3.0";
