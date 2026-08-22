@@ -1,0 +1,123 @@
+# codeindex
+
+> Structural code intelligence for AI coding agents, as an MCP server. It
+> answers "where is X defined", "show me this function", "what calls it" and
+> "what breaks if I change this file" in tens of tokens, instead of the ~1,563
+> a file read costs. tree-sitter across 40+ languages, 16 MCP tools, one
+> statically linked binary, MIT.
+
+codeindex indexes a repository with tree-sitter, builds a trigram full-text
+index, an inverted word index and a file-level dependency graph, and exposes
+them over MCP (JSON-RPC on stdio, protocol 2024-11-05).
+
+The problem it solves is token cost, not search quality. `Read` is the single
+largest consumer of context in agent sessions, and most reads answer a question
+that never needed the whole file. Measured on real transcripts:
+
+    Read                1,563 tokens per call
+    get_outline           113
+    find_symbol           102
+    search                 79
+    find_word              41
+    read_symbol            35
+
+A token never put into context is never billed, and never re-sent on every
+later turn.
+
+## Install
+
+    curl -fsSL https://raw.githubusercontent.com/munhq/codeindex/main/install.sh | bash
+
+That fetches the prebuilt binary for the platform, installs the agent skill into
+every Claude Code home it finds, and registers the MCP server.
+
+As a Claude Code plugin, which ships the skill and a first-read hook with the
+server:
+
+    claude plugin marketplace add munhq/codeindex
+    claude plugin install codeindex@codeindex
+
+Any other MCP client:
+
+    {"mcpServers": {"codeindex": {"command": "codeindex", "args": ["--mcp"]}}}
+
+## Platforms
+
+Linux x86_64 and aarch64, macOS x86_64 and aarch64, Windows x86_64 and aarch64.
+The Linux build is statically linked, so it has no glibc floor. Every platform's
+build and test suite runs in CI on its own runner.
+
+The live file watcher uses inotify on Linux and a polling walk elsewhere; the
+`status` tool reports which as `watcher_backend`.
+
+On Windows, `install.sh` and the plugin launcher are shell scripts and need Git
+Bash, MSYS2 or Cygwin. Without one, register the binary directly:
+
+    claude mcp add -s user codeindex -- C:\path\to\codeindex.exe --mcp
+
+Nothing is signed or notarized. A macOS binary fetched with curl runs without a
+Gatekeeper prompt; one downloaded through a browser is quarantined, and
+`xattr -d com.apple.quarantine codeindex` clears it.
+
+## The 16 tools
+
+Definitions and bodies:
+
+- `find_symbol` (name) — where a symbol is defined, as file and line.
+- `read_symbol` (name, optional path, optional context) — one function's source,
+  without guessing a line window. The largest saving of the set.
+- `get_outline` (path) — every symbol in a file with line numbers.
+
+Usage and callers:
+
+- `find_word` (word) — exact identifier occurrences.
+- `search` (query) — trigram-accelerated free-text search.
+- `find_callers` (name) — heuristic call sites, with no full name resolution;
+  treat the result as a candidate list, not proof.
+
+Dependencies and impact:
+
+- `get_imports` (path) — what a file needs.
+- `get_imported_by` (path) — what needs it.
+- `get_change_impact` (path, optional max_depth) — transitive blast radius.
+- `plan_change` (path or name) — definition, call sites, the file's
+  architectural role, hardcoded literals and blast radius in one call.
+
+Orientation and audits:
+
+- `get_tree`, `get_hot_files`, `status`, `read_file`, `index_workspace`.
+- `analyze` (kind) — 16 analyses: security, dead_code, cycles, architecture,
+  unwrap_audit, clones, duplication, health and others.
+
+Every file-scoped tool takes `path`, relative to the workspace root. It is never
+`file`.
+
+## When not to use it
+
+- You need exact bytes — before an `Edit`, or where whitespace matters. Read the
+  file.
+- `read_file` is not a cheaper file read: ~1,109 tokens against ~1,563 for the
+  same job. The saving comes from asking a narrower question, not from swapping
+  the reader.
+- `get_outline` on a very large file can cost more than a truncated read, because
+  an outline enumerates every symbol while a read stops.
+
+## Configuration
+
+- `--workspace <dir>` / `CODEINDEX_WORKSPACE` — which project to index. The
+  server refuses to index a home directory, a filesystem root, or a directory
+  holding several unrelated repositories.
+- `CODEINDEX_IDLE_EVICT_SECS` — idle seconds before in-RAM postings are released
+  back to the OS; the next query rebuilds them. Default 300, 0 disables.
+- The index persists to `.codeindex.json` inside the workspace it describes, and
+  a snapshot naming a different workspace is refused rather than served.
+
+## Facts
+
+- Licence: MIT.
+- Language: Zig, with vendored tree-sitter and 41 grammars compiled in.
+- Source: https://github.com/munhq/codeindex
+- Releases, with SHA256SUMS computed by CI over the uploaded bytes:
+  https://github.com/munhq/codeindex/releases
+- Pairs with chat-recall (https://github.com/munhq/chat-recall), which does the
+  same for past sessions rather than present code. Neither requires the other.
