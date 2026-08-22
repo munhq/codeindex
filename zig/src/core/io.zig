@@ -203,11 +203,16 @@ pub fn joinKey(gpa: std.mem.Allocator, parts: []const []const u8) ![]u8 {
 
 /// Rewrite a path in place to use `key_sep`. Used on the workspace root, so the
 /// absolute prefix of every key agrees with the joined remainder.
-pub fn normalizeKey(path: []u8) []u8 {
+///
+/// Returns nothing on purpose. It returned the slice, and callers assigned that
+/// to a `[]const u8` — which silently dropped the sentinel on the `[:0]u8` that
+/// realpath hands back, so the later free released one byte less than was
+/// allocated. Mutating in place keeps the caller's own slice, with its own
+/// length and sentinel, as the thing that gets freed.
+pub fn normalizeKey(path: []u8) void {
     for (path) |*c| {
         if (c.* == '\\') c.* = key_sep;
     }
-    return path;
 }
 
 pub fn readSome(file: File, buffer: []u8) !usize {

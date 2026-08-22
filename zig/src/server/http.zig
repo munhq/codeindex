@@ -1,4 +1,5 @@
 const std = @import("std");
+const build_options = @import("build_options");
 const explorer = @import("../index/explorer.zig");
 const models = @import("../core/models.zig");
 const security_scan = @import("../analysis/security_scan.zig");
@@ -105,7 +106,11 @@ pub const Server = struct {
                     const bw = &buf.writer;
                     try bw.writeAll("{\"jsonrpc\":\"2.0\",\"id\":");
                     try write_id(bw, id);
-                    try bw.writeAll(",\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"codeindex-zig\",\"version\":\"0.1.0\"}}}\n");
+                    // The version comes from the build, like `--version` does.
+                    // It was a literal here and said 0.1.0 while the binary
+                    // answered 0.3.0, so every MCP client and every registry
+                    // that reads serverInfo saw a version two releases stale.
+                    try bw.writeAll(",\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"codeindex\",\"version\":\"" ++ build_options.version ++ "\"}}}\n");
                     try io.writeAll(stdout_file, buf.written());
                 } else if (std.mem.eql(u8, method, "notifications/initialized")) {
                     // No response needed

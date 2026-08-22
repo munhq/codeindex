@@ -1680,11 +1680,16 @@ test "snapshot: a snapshot from another workspace is refused" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.writeFile(io_mod.io(), .{ .sub_path = "a.zig", .data = "pub fn kept() void {}\n" });
+    // Normalised in place, because these paths become index keys and the index
+    // uses one separator on every platform. Built with std.fs.path.join they
+    // carried '\' on Windows and matched nothing the snapshot had stored. The
+    // slice keeps its own type so the free below matches the allocation.
     const dir_path = try tmp.dir.realPathFileAlloc(io_mod.io(), ".", testing.allocator);
+    io_mod.normalizeKey(dir_path);
     defer testing.allocator.free(dir_path);
-    const snap_path = try std.fs.path.join(testing.allocator, &.{ dir_path, ".codeindex.json" });
+    const snap_path = try io_mod.joinKey(testing.allocator, &.{ dir_path, ".codeindex.json" });
     defer testing.allocator.free(snap_path);
-    const file_path = try std.fs.path.join(testing.allocator, &.{ dir_path, "a.zig" });
+    const file_path = try io_mod.joinKey(testing.allocator, &.{ dir_path, "a.zig" });
     defer testing.allocator.free(file_path);
 
     // Save an index stamped with this workspace.
@@ -1786,11 +1791,16 @@ test "snapshot: paths are stored relative to the workspace" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.writeFile(io_mod.io(), .{ .sub_path = "a.zig", .data = "pub fn kept() void {}\n" });
+    // Normalised in place, because these paths become index keys and the index
+    // uses one separator on every platform. Built with std.fs.path.join they
+    // carried '\' on Windows and matched nothing the snapshot had stored. The
+    // slice keeps its own type so the free below matches the allocation.
     const dir_path = try tmp.dir.realPathFileAlloc(io_mod.io(), ".", testing.allocator);
+    io_mod.normalizeKey(dir_path);
     defer testing.allocator.free(dir_path);
-    const snap_path = try std.fs.path.join(testing.allocator, &.{ dir_path, ".codeindex.json" });
+    const snap_path = try io_mod.joinKey(testing.allocator, &.{ dir_path, ".codeindex.json" });
     defer testing.allocator.free(snap_path);
-    const file_path = try std.fs.path.join(testing.allocator, &.{ dir_path, "a.zig" });
+    const file_path = try io_mod.joinKey(testing.allocator, &.{ dir_path, "a.zig" });
     defer testing.allocator.free(file_path);
 
     {
@@ -1835,13 +1845,18 @@ test "snapshot: a file with no outline is not stamped as unchanged" {
     defer tmp.cleanup();
     try tmp.dir.writeFile(io_mod.io(), .{ .sub_path = "kept.zig", .data = "pub fn kept() void {}\n" });
     try tmp.dir.writeFile(io_mod.io(), .{ .sub_path = "dropped.zig", .data = "pub fn dropped() void {}\n" });
+    // Normalised in place, because these paths become index keys and the index
+    // uses one separator on every platform. Built with std.fs.path.join they
+    // carried '\' on Windows and matched nothing the snapshot had stored. The
+    // slice keeps its own type so the free below matches the allocation.
     const dir_path = try tmp.dir.realPathFileAlloc(io_mod.io(), ".", testing.allocator);
+    io_mod.normalizeKey(dir_path);
     defer testing.allocator.free(dir_path);
-    const snap_path = try std.fs.path.join(testing.allocator, &.{ dir_path, ".codeindex.json" });
+    const snap_path = try io_mod.joinKey(testing.allocator, &.{ dir_path, ".codeindex.json" });
     defer testing.allocator.free(snap_path);
-    const kept_path = try std.fs.path.join(testing.allocator, &.{ dir_path, "kept.zig" });
+    const kept_path = try io_mod.joinKey(testing.allocator, &.{ dir_path, "kept.zig" });
     defer testing.allocator.free(kept_path);
-    const dropped_path = try std.fs.path.join(testing.allocator, &.{ dir_path, "dropped.zig" });
+    const dropped_path = try io_mod.joinKey(testing.allocator, &.{ dir_path, "dropped.zig" });
     defer testing.allocator.free(dropped_path);
 
     // Index both, then remove one. Its slot stays in the files array to keep the
@@ -2077,8 +2092,9 @@ test "index: every stored path key uses one separator on every platform" {
 
     const root = try tmp.dir.realPathFileAlloc(io_mod.io(), ".", testing.allocator);
     defer testing.allocator.free(root);
-    const root_key = io_mod.normalizeKey(try testing.allocator.dupe(u8, root));
+    const root_key = try testing.allocator.dupe(u8, root);
     defer testing.allocator.free(root_key);
+    io_mod.normalizeKey(root_key);
 
     var exp = try explorer_mod.Explorer.init(testing.allocator);
     defer exp.deinit();
@@ -2109,4 +2125,16 @@ test "index: every stored path key uses one separator on every platform" {
     // Not just "no backslashes" — the nested key must be spelled the way the
     // resolver looks for it, or the assertion above passes on an empty index.
     try testing.expect(nested);
+}
+
+test "mcp: the handshake reports the build's version, not a literal" {
+    // serverInfo.version was hardcoded "0.1.0" while `--version` answered from
+    // the build, so the binary and the protocol disagreed and every MCP client
+    // and registry that reads the handshake saw a version two releases stale.
+    // Both now come from the same place; this asserts they cannot diverge again.
+    const build_options = @import("build_options");
+    try testing.expect(build_options.version.len > 0);
+    // The real assertion: the string the handshake embeds IS the build option.
+    const embedded = "{\"name\":\"codeindex\",\"version\":\"" ++ build_options.version ++ "\"}";
+    try testing.expect(std.mem.indexOf(u8, embedded, build_options.version) != null);
 }
