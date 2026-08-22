@@ -76,7 +76,12 @@ pub const Server = struct {
 
             // Process complete lines
             while (std.mem.indexOf(u8, carry.items, "\n")) |nl_pos| {
-                const line = carry.items[0..nl_pos];
+                // Trim a trailing CR. A client on Windows writing through a text
+                // stream sends CRLF, and splitting on LF alone leaves the CR on
+                // the end of the JSON, which the parser rejects — so every call
+                // from such a client failed with no indication why. A
+                // line-oriented protocol should accept either terminator.
+                const line = std.mem.trimEnd(u8, carry.items[0..nl_pos], "\r");
                 defer {
                     // Remove processed line + newline from carry
                     const remaining = carry.items[nl_pos + 1 ..];

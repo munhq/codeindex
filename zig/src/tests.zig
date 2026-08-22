@@ -2027,3 +2027,24 @@ test "watcher: the polling backend reports create, modify and delete" {
     try tick(&w, &log);
     try testing.expect(log.deleted >= 1);
 }
+
+test "mcp: a request line ending in CRLF is accepted" {
+    // A client on Windows writing JSON-RPC through a text stream sends CRLF.
+    // The loop splits on LF, so the CR stayed on the end of the JSON and the
+    // parser rejected the whole request with nothing logged. This asserts the
+    // trim the loop now performs, on the exact shape a text-mode writer emits.
+    const raw = "{\"jsonrpc\":\"2.0\"}\r\n{\"jsonrpc\":\"2.0\"}\n";
+    var count: usize = 0;
+    var rest: []const u8 = raw;
+    while (std.mem.indexOf(u8, rest, "\n")) |nl| {
+        const line = std.mem.trimEnd(u8, rest[0..nl], "\r");
+        rest = rest[nl + 1 ..];
+        if (line.len == 0) continue;
+        const parsed = std.json.parseFromSlice(std.json.Value, testing.allocator, line, .{}) catch {
+            return error.CrlfLineRejected;
+        };
+        defer parsed.deinit();
+        count += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), count);
+}

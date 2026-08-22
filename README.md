@@ -130,9 +130,36 @@ It refuses to index your entire home directory or the filesystem root — pass `
 - **Index**: trigram index for fuzzy text search + inverted word index for exact identifier lookup
 - **Dependency graph**: file-level import resolution with forward and reverse edges
 - **Version store**: tracks file changes with sequence numbers for incremental updates
-- **Live watcher**: re-indexes on file create/modify/delete (background thread in MCP mode)
+- **Live watcher**: re-indexes on file create/modify/delete (background thread in MCP mode). inotify on Linux; a polling walk on macOS and Windows, which compares mtime and size every couple of seconds. `status` reports which backend is live as `watcher_backend`.
 - **Snapshot**: persists the full index to `.codeindex.json`, so a restart loads the snapshot instead of re-indexing
 - **MCP server**: JSON-RPC over stdio, implements the MCP 2024-11-05 protocol
+
+## Platform support
+
+Every row is built by CI and its tests are run on that platform, except where
+noted. `status` reports the live watcher backend so it is never a guess.
+
+| | binary | tests run in CI | watcher | install.sh | plugin |
+|---|---|---|---|---|---|
+| Linux x86_64 | Yes | Yes | inotify | Yes | Yes |
+| Linux aarch64 | Yes | cross-compiled | inotify | Yes | Yes |
+| macOS aarch64 | Yes | Yes | polling | Yes | Yes |
+| macOS x86_64 | Yes | cross-compiled | polling | Yes | Yes |
+| Windows x86_64 | Yes | Yes | polling | needs a shell | see below |
+| Windows aarch64 | Yes | cross-compiled | polling | needs a shell | see below |
+
+On Windows, `install.sh` and the plugin's launcher are shell scripts, so they
+need Git Bash, MSYS2 or Cygwin — they detect it and resolve the right `.exe`
+asset. The plugin registers its server through that launcher, so a native
+Windows Claude Code without a shell should register the binary directly:
+
+```
+claude mcp add -s user codeindex -- C:\path\to\codeindex.exe --mcp
+```
+
+Nothing here is signed or notarized. On macOS a binary fetched with `curl` runs
+without a Gatekeeper prompt; one downloaded through a browser is quarantined,
+and `xattr -d com.apple.quarantine codeindex` clears it.
 
 ## Building from source
 
@@ -148,8 +175,13 @@ zig build -Doptimize=ReleaseFast
 Run tests:
 
 ```bash
-cd zig && zig build test
+cd zig && zig build test-bin && ./zig-out/bin/test
 ```
+
+`zig build test` routes results through the build runner's IPC protocol on
+stdout, which the linked tree-sitter C sources corrupt via their debug printf
+paths. Building the test binary and running it directly is the same tests
+without that protocol in the way.
 
 ## How it compares
 
@@ -158,7 +190,7 @@ cd zig && zig build test
 | **MCP-native** | Yes | No | No | No | No |
 | **Token-efficient** | Yes (outlines, not full files) | No | Partial | Yes | Yes |
 | **Single binary** | Yes | Yes | Yes | No | No (server) |
-| **Live watcher** | Yes | No | No | No | No |
+| **Live watcher** | Yes (inotify / polling) | No | No | No | No |
 | **Dependency graph** | Yes | No | No | Yes | Yes |
 | **Blast radius** | Yes (transitive) | No | No | No | Partial |
 | **Refactor planner** | Yes (`plan_change`) | No | No | No | No |
