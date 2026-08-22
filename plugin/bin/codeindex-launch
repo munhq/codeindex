@@ -18,6 +18,38 @@ CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/codeindex/bin"
 
 log() { printf '%s\n' "$*" >&2; }
 
+# Map uname onto the names the release actually publishes. The release matrix in
+# .github/workflows/release.yml builds Zig target triples — x86_64-linux,
+# aarch64-linux, x86_64-macos, aarch64-macos — and uname does not agree with any
+# of them on a Mac: `uname -s` says Darwin, not macos, and Apple Silicon reports
+# arm64, not aarch64. So this asked for codeindex-arm64-darwin, which 404s, and
+# every Mac fell through to a source build. It said "No prebuilt binary", which
+# reads as a statement about the release rather than the bug it was.
+# plugin/test_platform.sh checks this against the matrix, so adding a target
+# without a mapping fails there instead of in a stranger's terminal.
+resolve_artifact() {
+    _arch="$(uname -m)"
+    _os="$(uname -s)"
+    case "$_arch" in
+        x86_64|amd64) _arch=x86_64 ;;
+        arm64|aarch64) _arch=aarch64 ;;
+        *) return 1 ;;
+    esac
+    case "$_os" in
+        Linux) _os=linux ;;
+        Darwin) _os=macos ;;
+        *) return 1 ;;
+    esac
+    printf '%s-%s-%s\n' "$1" "$_arch" "$_os"
+}
+
+# Introspection used by plugin/test_platform.sh. Placed before every exec so the
+# test never launches a server.
+if [ "${1:-}" = "--artifact" ]; then
+    resolve_artifact "$BIN_NAME" || { echo "unsupported"; exit 1; }
+    exit 0
+fi
+
 # 1. An explicit override wins, for a local build or an unusual layout.
 if [ -n "${CODEINDEX_BIN:-}" ] && [ -x "${CODEINDEX_BIN}" ]; then
     exec "${CODEINDEX_BIN}" "$@"
@@ -37,9 +69,12 @@ done
 # 3. Nothing installed. Fetch the release build for this platform once and cache
 #    it, so this path runs on first launch only. The release names assets
 #    <binary>-<arch>-<os>, matching uname, so this must agree with install.sh.
-ARCH="$(uname -m)"
-OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
-ARTIFACT="${BIN_NAME}-${ARCH}-${OS}"
+
+if ! ARTIFACT="$(resolve_artifact "$BIN_NAME")"; then
+    log "codeindex: no release build for $(uname -m)-$(uname -s)."
+    log "  build it: git clone https://github.com/$REPO && cd codeindex && ./install.sh"
+    exit 127
+fi
 mkdir -p "$CACHE_DIR"
 TMP="$CACHE_DIR/.${BIN_NAME}.download.$$"
 rm -f "$TMP"

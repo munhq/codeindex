@@ -89,8 +89,26 @@ jobs:
         with:
           path: artifacts
 
+      # Publish checksums computed by CI, over the exact bytes being uploaded.
+      # Downstream installers that pin a hash need a canonical source for it;
+      # without one they either skip verification or pin a hash somebody read off
+      # a local build, which is how a pin ends up not matching the release. A
+      # checksum served beside the binary is not by itself proof — whoever can
+      # replace one can replace the other — so this is the input to a pin
+      # recorded in the consumer's source, not a substitute for it.
+      - name: Checksums
+        run: |
+          cd artifacts
+          find . -type f ! -name SHA256SUMS -printf '%f %p\n' | sort |
+            while read -r name path; do
+              printf '%s  %s\n' "$(sha256sum "$path" | cut -d' ' -f1)" "$name"
+            done | tee SHA256SUMS
+          cd ..
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/*/*
+          files: |
+            artifacts/*/*
+            artifacts/SHA256SUMS
           generate_release_notes: true
