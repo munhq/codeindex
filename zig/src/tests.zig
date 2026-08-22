@@ -1658,13 +1658,21 @@ test "config: the snapshot path follows an explicit workspace" {
     const implicit = try config_mod.resolve_snapshot_path(a, ".");
     try testing.expectEqualStrings(".codeindex.json", implicit);
 
+    // std.fs.path.join uses the platform separator, so a hardcoded "/" asserted
+    // POSIX rather than the behaviour: on Windows the join correctly produced
+    // `\` and only the test was wrong. What matters is that the name is joined
+    // onto the workspace at all, so the separator comes from the platform here.
+    const sep = std.fs.path.sep_str;
+
     const explicit = try config_mod.resolve_snapshot_path(a, "/tmp/project");
     defer a.free(explicit);
-    try testing.expectEqualStrings("/tmp/project/.codeindex.json", explicit);
+    try testing.expectEqualStrings("/tmp/project" ++ sep ++ ".codeindex.json", explicit);
 
     const relative = try config_mod.resolve_snapshot_path(a, "../other");
     defer a.free(relative);
-    try testing.expectEqualStrings("../other/.codeindex.json", relative);
+    // Only the separator that join inserts is native; the ones already inside a
+    // component are left exactly as given, so "../other" stays as written.
+    try testing.expectEqualStrings("../other" ++ sep ++ ".codeindex.json", relative);
 }
 
 test "snapshot: a snapshot from another workspace is refused" {
