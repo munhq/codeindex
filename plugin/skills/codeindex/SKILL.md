@@ -4,9 +4,12 @@ description: >-
   Answer code questions structurally instead of reading whole files. Use when you
   need to find where something is defined, read one function, see what calls a
   symbol, trace imports, judge what a change breaks, or orient yourself in an
-  unfamiliar file or repository — that is, before reaching for Read, Grep or
-  Glob on a code question. Backed by the codeindex MCP server (tree-sitter,
-  40+ languages).
+  unfamiliar file or repository. Reach for this before Read, Grep or Glob on a
+  code question — and equally before `grep`, `rg`, `cat`, `head`, `sed -n` or
+  `find` in a shell, which is where the same question goes when a harness or
+  permission mode routes file work through Bash. A grep finds a string; it
+  cannot tell you what calls what. Backed by the codeindex MCP server
+  (tree-sitter, 40+ languages).
 ---
 
 # Answering code questions with codeindex

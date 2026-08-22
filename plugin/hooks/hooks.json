@@ -1,9 +1,9 @@
 {
-  "description": "Points the agent at a structural query the first time a session reads or greps for a code answer.",
+  "description": "Points the agent at a structural query when it is about to answer a code question by scanning bytes. Matches Bash too: with auto mode active the harness routes file work through grep, cat and sed, so a Read|Grep|Glob matcher never fired in the mode that needs it most.",
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Read|Grep|Glob",
+        "matcher": "Read|Grep|Glob|Bash",
         "hooks": [
           {
             "type": "command",
