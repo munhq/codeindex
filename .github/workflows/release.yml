@@ -21,6 +21,14 @@ jobs:
           - os: macos-latest
             target: x86_64-macos
             artifact: codeindex-x86_64-macos
+          # Windows was absent entirely: no asset, and the source did not compile
+          # for it. Both are fixed, so it ships like the others.
+          - os: ubuntu-latest
+            target: x86_64-windows
+            artifact: codeindex-x86_64-windows.exe
+          - os: ubuntu-latest
+            target: aarch64-windows
+            artifact: codeindex-aarch64-windows.exe
 
     runs-on: ${{ matrix.os }}
 
@@ -71,7 +79,10 @@ jobs:
         run: strip zig/zig-out/bin/codeindex || true
 
       - name: Package
-        run: cp zig/zig-out/bin/codeindex ${{ matrix.artifact }}
+        run: |
+          src=zig/zig-out/bin/codeindex
+          [ -f "$src.exe" ] && src="$src.exe"
+          cp "$src" ${{ matrix.artifact }}
 
       - uses: actions/upload-artifact@v4
         with:

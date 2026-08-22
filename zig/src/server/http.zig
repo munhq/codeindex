@@ -23,6 +23,7 @@ const filter_mod = @import("../core/filter.zig");
 const scanner = @import("../index/scanner.zig");
 const io = @import("../core/io.zig");
 const reload = @import("../core/reload.zig");
+const watcher_mod = @import("../watcher.zig");
 
 pub const Server = struct {
     allocator: std.mem.Allocator,
@@ -64,7 +65,7 @@ pub const Server = struct {
             // during the blocking read re-execs immediately.
             reload.check_pending();
             reload.enter_wait();
-            const n = std.posix.read(std.posix.STDIN_FILENO, &read_buf) catch {
+            const n = io.readSome(io.stdin(), &read_buf) catch {
                 reload.leave_wait();
                 break;
             };
@@ -151,7 +152,7 @@ pub const Server = struct {
             else
                 0;
 
-            try w.print("{{\"files\":{d},\"symbols\":{d},\"indexing\":{s},\"latest_seq\":{d},\"total_lines\":{d},\"total_bytes\":{d},\"naive_tokens\":{d},\"outline_tokens\":{d},\"savings_pct\":{d},\"watcher\":true", .{
+            try w.print("{{\"files\":{d},\"symbols\":{d},\"indexing\":{s},\"latest_seq\":{d},\"total_lines\":{d},\"total_bytes\":{d},\"naive_tokens\":{d},\"outline_tokens\":{d},\"savings_pct\":{d},\"watcher\":true,\"watcher_backend\":\"" ++ watcher_mod.backend ++ "\"", .{
                 self.exp.file_count(),
                 self.exp.symbol_count(),
                 if (self.exp.is_indexing()) "true" else "false",

@@ -123,12 +123,17 @@ resolve_artifact() {
         arm64|aarch64) _arch=aarch64 ;;
         *) return 1 ;;
     esac
+    # Git Bash, MSYS2 and Cygwin all report a decorated kernel name rather than
+    # anything containing "windows", e.g. MINGW64_NT-10.0-22631. A shell on
+    # Windows is the only way these scripts run there at all.
+    _ext=""
     case "$_os" in
         Linux) _os=linux ;;
         Darwin) _os=macos ;;
+        MINGW*|MSYS*|CYGWIN*|Windows_NT) _os=windows; _ext=".exe" ;;
         *) return 1 ;;
     esac
-    printf '%s-%s-%s\n' "$1" "$_arch" "$_os"
+    printf '%s-%s-%s%s\n' "$1" "$_arch" "$_os" "$_ext"
 }
 
 if ! ARTIFACT="$(resolve_artifact "$BINARY")"; then

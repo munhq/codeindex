@@ -162,6 +162,21 @@ pub fn readFileFrom(dir: Dir, gpa: std.mem.Allocator, sub_path: []const u8, max:
 }
 
 /// Write all of `bytes` to an open file via a temporary writer, then flush.
+/// One read from `file`, at most `buffer.len` bytes. Mirrors the POSIX read
+/// contract the MCP loop was written against: the byte count, and 0 at EOF.
+///
+/// The loop used `std.posix.read(std.posix.STDIN_FILENO, ...)`, which does not
+/// compile for Windows — there `fd_t` is a HANDLE, not an int. std reports EOF
+/// as `error.EndOfStream`, so that is translated back to 0 here rather than at
+/// every call site.
+pub fn readSome(file: File, buffer: []u8) !usize {
+    var bufs: [1][]u8 = .{buffer};
+    return file.readStreaming(h(), &bufs) catch |err| switch (err) {
+        error.EndOfStream => 0,
+        else => err,
+    };
+}
+
 pub fn writeAll(file: File, bytes: []const u8) !void {
     var buf: [64 * 1024]u8 = undefined;
     var fw = file.writer(h(), &buf);
