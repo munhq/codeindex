@@ -169,6 +169,47 @@ pub fn readFileFrom(dir: Dir, gpa: std.mem.Allocator, sub_path: []const u8, max:
 /// compile for Windows — there `fd_t` is a HANDLE, not an int. std reports EOF
 /// as `error.EndOfStream`, so that is translated back to 0 here rather than at
 /// every call site.
+/// The separator every stored path key uses, on every platform.
+///
+/// Index keys are compared against import specifiers, which are written with
+/// forward slashes in every language this indexes. The resolver therefore tests
+/// for '/' throughout. On Windows `std.fs.path.join` produces '\\', so no key
+/// ever matched and the dependency graph came back empty — while the resolver
+/// tests kept passing, because their fixtures are literal "/ws/src/a.ts"
+/// strings rather than paths the scanner built. Win32 accepts '/' in a path, so
+/// normalising costs nothing and makes a snapshot portable between platforms.
+pub const key_sep = '/';
+
+/// Join into a path key. Same as std.fs.path.join except the separator is always
+/// `key_sep`, and any separator already inside a component is normalised too.
+pub fn joinKey(gpa: std.mem.Allocator, parts: []const []const u8) ![]u8 {
+    var total: usize = 0;
+    for (parts) |part| total += part.len + 1;
+    var out = try std.ArrayList(u8).initCapacity(gpa, total);
+    errdefer out.deinit(gpa);
+    for (parts) |part| {
+        if (part.len == 0) continue;
+        if (out.items.len > 0 and out.items[out.items.len - 1] != key_sep) {
+            try out.append(gpa, key_sep);
+        }
+        const trimmed = if (out.items.len > 0)
+            std.mem.trimStart(u8, part, "/\\")
+        else
+            part;
+        for (trimmed) |c| try out.append(gpa, if (c == '\\') key_sep else c);
+    }
+    return out.toOwnedSlice(gpa);
+}
+
+/// Rewrite a path in place to use `key_sep`. Used on the workspace root, so the
+/// absolute prefix of every key agrees with the joined remainder.
+pub fn normalizeKey(path: []u8) []u8 {
+    for (path) |*c| {
+        if (c.* == '\\') c.* = key_sep;
+    }
+    return path;
+}
+
 pub fn readSome(file: File, buffer: []u8) !usize {
     var bufs: [1][]u8 = .{buffer};
     return file.readStreaming(h(), &bufs) catch |err| switch (err) {

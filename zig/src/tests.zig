@@ -2056,3 +2056,57 @@ test "mcp: a request line ending in CRLF is accepted" {
     }
     try testing.expectEqual(@as(usize, 2), count);
 }
+
+test "index: every stored path key uses one separator on every platform" {
+    // The resolver compares index keys against import specifiers, which are
+    // written with forward slashes in every language indexed here, so it tests
+    // for '/' throughout. std.fs.path.join produces '\\' on Windows, so no key
+    // matched and the dependency graph came back empty — get_imports,
+    // get_imported_by, get_change_impact and plan_change all silently returning
+    // nothing. The resolver tests did not catch it because their fixtures are
+    // literal "/ws/src/a.ts" strings rather than paths the scanner built.
+    //
+    // This indexes a real nested tree and asserts the keys it produced, so on
+    // Windows it fails if the separator ever regresses. On POSIX it is trivially
+    // true, which is exactly why the invariant needs stating.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io_mod.io(), "pkg/inner");
+    try tmp.dir.writeFile(io_mod.io(), .{ .sub_path = "pkg/inner/deep.zig", .data = "pub fn deep() void {}\n" });
+    try tmp.dir.writeFile(io_mod.io(), .{ .sub_path = "pkg/top.zig", .data = "pub fn top() void {}\n" });
+
+    const root = try tmp.dir.realPathFileAlloc(io_mod.io(), ".", testing.allocator);
+    defer testing.allocator.free(root);
+    const root_key = io_mod.normalizeKey(try testing.allocator.dupe(u8, root));
+    defer testing.allocator.free(root_key);
+
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
+    defer exp.deinit();
+    var parser = try treesitter.Parser.init(testing.allocator);
+    defer parser.deinit();
+    var f = filter_mod.Filter.init(testing.allocator);
+    defer f.deinit();
+
+    const res = try scanner_mod.index_tree(
+        testing.allocator,
+        &exp,
+        &parser,
+        &f,
+        root_key,
+        10 * 1024 * 1024,
+        .{},
+    );
+    try testing.expect(res.files >= 2);
+
+    var nested = false;
+    for (exp.files.items) |key| {
+        if (std.mem.indexOfScalar(u8, key, '\\') != null) {
+            std.debug.print("path key carries a backslash: {s}\n", .{key});
+            return error.PathKeySeparatorNotNormalised;
+        }
+        if (std.mem.indexOf(u8, key, "pkg/inner/deep.zig") != null) nested = true;
+    }
+    // Not just "no backslashes" — the nested key must be spelled the way the
+    // resolver looks for it, or the assertion above passes on an empty index.
+    try testing.expect(nested);
+}
