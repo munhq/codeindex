@@ -6,8 +6,21 @@ on:
   pull_request:
 
 jobs:
+  # The engine is built and its tests run on every platform it ships for. This
+  # was ubuntu only, so a watcher that could not work anywhere but Linux passed
+  # CI for as long as it existed, and macOS binaries were published having never
+  # executed a single test.
   build:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    # Windows runners default to PowerShell; every step here is shell, and bash
+    # ships on the Windows image.
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
 
@@ -46,23 +59,46 @@ jobs:
         run: |
           cd zig
           zig build test-bin
-          ./zig-out/bin/test
+          # test.exe on Windows, test elsewhere.
+          if [ -x zig-out/bin/test.exe ]; then ./zig-out/bin/test.exe; else ./zig-out/bin/test; fi
 
-      # The skill names tools and arguments that only the server can confirm, so
-      # drift between the two is invisible to the compiler and to the tests. This
-      # check existed and nothing ran it, which is how the skill came to advertise
-      # 13 analyses against a server that implements 16, and how a server that
-      # answered about a different repository still passed review. It starts the
-      # real binary, checks every documented name and argument against the live
-      # schema, and executes each documented route.
-      # The hook decides when to spend a session's one hint; the analyser decides
-      # what to count when measuring whether the hint helped. They are separate
-      # implementations — the hook must not need python at runtime — so only this
-      # test keeps them from drifting into measuring different things.
+      # The MCP protocol itself, driven over real stdio against the built
+      # binary. Runs per platform: the stdin read path is the one place where
+      # Windows differs from POSIX at the syscall level.
+      - name: End-to-end MCP stdio
+        run: cd zig && zig build e2e
+
+  # The installers, the skill and the hint are shell and python, so they run
+  # once rather than per platform. They need a built binary to validate against.
+  tooling:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Cache vendored grammars
+        uses: actions/cache@v4
+        with:
+          path: zig/vendor
+          key: vendor-${{ hashFiles('zig/fetch-vendor.sh') }}
+
+      - name: Fetch vendored grammars
+        env:
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          git config --global url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
+          cd zig && ./fetch-vendor.sh
+
+      - name: Build
+        run: cd zig && zig build
+
       - name: The hint and the measurement must agree on what a code question is
         run: bash plugin/test_hint.sh
 
-      # Both installers derive the release asset name from uname, which does not
+      # Both installers derive the release asset name from uname, which did not
       # match the matrix on a Mac. That shipped, so it is checked now.
       - name: Both installers must ask for assets the release publishes
         run: bash plugin/test_platform.sh
@@ -73,3 +109,37 @@ jobs:
             plugin/skills/codeindex/SKILL.md \
             zig/zig-out/bin/codeindex \
             "$PWD"
+
+  # Every target the release publishes must compile before a tag is cut, on one
+  # machine, so a broken target is caught here and not by a failed release run.
+  cross:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Cache vendored grammars
+        uses: actions/cache@v4
+        with:
+          path: zig/vendor
+          key: vendor-${{ hashFiles('zig/fetch-vendor.sh') }}
+
+      - name: Fetch vendored grammars
+        env:
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          git config --global url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
+          cd zig && ./fetch-vendor.sh
+
+      - name: Cross-compile every published target
+        run: |
+          cd zig
+          for t in x86_64-linux aarch64-linux x86_64-macos aarch64-macos \
+                   x86_64-windows aarch64-windows; do
+            echo "::group::$t"
+            zig build -Dtarget=$t -Doptimize=ReleaseFast
+            echo "::endgroup::"
+          done

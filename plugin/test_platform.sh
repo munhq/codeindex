@@ -37,6 +37,11 @@ arm64|Linux|codeindex-aarch64-linux
 x86_64|Darwin|codeindex-x86_64-macos
 arm64|Darwin|codeindex-aarch64-macos
 aarch64|Darwin|codeindex-aarch64-macos
+x86_64|MINGW64_NT-10.0-22631|codeindex-x86_64-windows.exe
+x86_64|MSYS_NT-10.0-19045|codeindex-x86_64-windows.exe
+x86_64|CYGWIN_NT-10.0|codeindex-x86_64-windows.exe
+aarch64|MINGW64_NT-10.0|codeindex-aarch64-windows.exe
+arm64|MINGW64_NT-10.0|codeindex-aarch64-windows.exe
 "
 
 fake_uname_dir() {

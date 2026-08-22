@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin_mod = @import("builtin");
 const testing = std.testing;
 const io_mod = @import("core/io.zig");
 const models = @import("core/models.zig");
@@ -1884,4 +1885,145 @@ test "snapshot: a file with no outline is not stamped as unchanged" {
     try testing.expectEqual(@as(usize, 1), res.added);
     try testing.expectEqual(@as(usize, 1), res.unchanged);
     try testing.expect(exp.file_map.get(dropped_path) != null);
+}
+
+// ── The live watcher, on whatever backend this platform uses ──────────────────
+// watcher.zig was inotify with no guard on the OS. It still compiled for macOS,
+// because std.os.linux is only a namespace of syscall wrappers, and the shipped
+// Mach-O binary carried inotify strings it could never use. main.zig does
+// `Watcher.init(...) catch return`, so the watcher was silently absent on every
+// Mac while the README advertised a live one. This test does not care which
+// backend is compiled in — it asserts the behaviour every platform must have,
+// so CI running it on linux, macos and windows is what proves the claim.
+test "watcher: reports a created, modified and deleted file" {
+    const watcher = @import("watcher.zig");
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io_mod.io(), ".", testing.allocator);
+    defer testing.allocator.free(root);
+
+    // The polling backend walks on an interval; shrink it so the test drives
+    // several walks quickly instead of waiting seconds between them.
+    const restore = watcher.poll_interval_ms;
+    watcher.poll_interval_ms = 1;
+    defer watcher.poll_interval_ms = restore;
+
+    var w = try watcher.Watcher.init(testing.allocator);
+    defer w.deinit();
+    try w.add_recursive(root);
+
+    const Seen = struct {
+        created: bool = false,
+        modified: bool = false,
+        deleted: bool = false,
+        name: []const u8,
+        fn on(self: *@This(), e: watcher.Event) !void {
+            if (std.mem.indexOf(u8, e.path, self.name) == null) return;
+            switch (e.op) {
+                .create => self.created = true,
+                .modify => self.modified = true,
+                .delete => self.deleted = true,
+            }
+        }
+    };
+    var seen = Seen{ .name = "watched.zig" };
+
+    // Wait for `want` to become true, driving the watcher meanwhile. Generous:
+    // inotify answers at once, a polling walk answers on its next tick, and a
+    // loaded CI runner is slower than either.
+    const pump = struct {
+        fn run(wp: *watcher.Watcher, s: *Seen, want: *const bool) !void {
+            var i: usize = 0;
+            while (i < 400) : (i += 1) {
+                wp.poll_events(s, Seen.on) catch {};
+                if (want.*) return;
+                io_mod.sleep(25 * std.time.ns_per_ms);
+            }
+            return error.WatcherReportedNothing;
+        }
+    }.run;
+
+    // A first walk on the polling backend records the tree without reporting
+    // it, so that the caller is not told every existing file was just created.
+    w.poll_events(&seen, Seen.on) catch {};
+
+    try tmp.dir.writeFile(io_mod.io(), .{ .sub_path = "watched.zig", .data = "pub fn a() void {}\n" });
+    try pump(&w, &seen, &seen.created);
+
+    try tmp.dir.writeFile(io_mod.io(), .{ .sub_path = "watched.zig", .data = "pub fn a() void {}\npub fn b() void {}\n" });
+    try pump(&w, &seen, &seen.modified);
+
+    try tmp.dir.deleteFile(io_mod.io(), "watched.zig");
+    try pump(&w, &seen, &seen.deleted);
+}
+
+test "watcher: names the backend it actually uses" {
+    const watcher = @import("watcher.zig");
+    // `status` reports this, so a Mac must not claim inotify. The point is that
+    // the string tracks the compiled backend rather than a hardcoded answer.
+    if (builtin_mod.os.tag == .linux) {
+        try testing.expectEqualStrings("inotify", watcher.backend);
+    } else {
+        try testing.expectEqualStrings("polling", watcher.backend);
+    }
+}
+
+test "watcher: the polling backend reports create, modify and delete" {
+    // Runs the same scenario against the polling backend explicitly, on every
+    // platform. On Linux this is the only coverage polling gets, and Linux is
+    // where this project is developed — leaving it to macOS CI alone is what let
+    // an inotify-only watcher ship as if it worked everywhere.
+    const watcher = @import("watcher.zig");
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io_mod.io(), ".", testing.allocator);
+    defer testing.allocator.free(root);
+
+    const restore = watcher.poll_interval_ms;
+    watcher.poll_interval_ms = 1;
+    defer watcher.poll_interval_ms = restore;
+
+    var w = try watcher.Polling.init(testing.allocator);
+    defer w.deinit();
+    try w.add_recursive(root);
+
+    const Log = struct {
+        created: usize = 0,
+        modified: usize = 0,
+        deleted: usize = 0,
+        fn on(self: *@This(), e: watcher.Event) !void {
+            if (std.mem.indexOf(u8, e.path, "poll_target.zig") == null) return;
+            switch (e.op) {
+                .create => self.created += 1,
+                .modify => self.modified += 1,
+                .delete => self.deleted += 1,
+            }
+        }
+    };
+    var log = Log{};
+
+    // The priming walk must report nothing: the caller has just indexed the
+    // tree, and announcing every existing file as created would re-index it all
+    // on every start.
+    try tmp.dir.writeFile(io_mod.io(), .{ .sub_path = "poll_target.zig", .data = "pub fn a() void {}\n" });
+    try w.poll_events(&log, Log.on);
+    try testing.expectEqual(@as(usize, 0), log.created);
+
+    const tick = struct {
+        fn run(wp: *watcher.Polling, l: *Log) !void {
+            io_mod.sleep(5 * std.time.ns_per_ms);
+            try wp.poll_events(l, Log.on);
+        }
+    }.run;
+
+    try tmp.dir.writeFile(io_mod.io(), .{ .sub_path = "poll_target2.zig", .data = "pub fn b() void {}\n" });
+    try tmp.dir.writeFile(io_mod.io(), .{ .sub_path = "poll_target.zig", .data = "pub fn a() void {}\npub fn c() void {}\n" });
+    try tick(&w, &log);
+    try testing.expect(log.modified >= 1);
+
+    try tmp.dir.deleteFile(io_mod.io(), "poll_target.zig");
+    try tick(&w, &log);
+    try testing.expect(log.deleted >= 1);
 }

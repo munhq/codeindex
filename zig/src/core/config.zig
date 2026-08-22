@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const io = @import("io.zig");
 
 pub const Config = struct {
@@ -44,7 +45,15 @@ pub const Config = struct {
         // CLI args override env vars. On POSIX these slices point into the
         // process argv and live for the whole program, so storing them in
         // `config` without duping is safe.
-        var args = std.process.Args.Iterator.init(args_vec);
+        //
+        // Windows has no argv array to point into: the OS hands over one UTF-16
+        // command line, so std refuses `init` there and requires an allocator to
+        // split it. The slices are then owned by the iterator, and every value
+        // kept in `config` must outlive it — see the dupes below.
+        var args = if (comptime builtin.os.tag == .windows)
+            try std.process.Args.Iterator.initAllocator(args_vec, allocator)
+        else
+            std.process.Args.Iterator.init(args_vec);
         defer args.deinit();
         _ = args.next(); // skip program name
 

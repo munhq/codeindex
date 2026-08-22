@@ -144,7 +144,7 @@ const WatchCtx = struct {
     running: *bool,
 };
 
-fn watch_callback(c: *WatchCtx, e: watcher.Watcher.Event) !void {
+fn watch_callback(c: *WatchCtx, e: watcher.Event) !void {
     if (c.f.should_ignore(e.path)) return;
 
     const language = models.Language.from_path(e.path);
