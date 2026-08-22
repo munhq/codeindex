@@ -106,9 +106,41 @@ atomic_install() {
     mv -f "$tmp" "$DEST"
 }
 
-ARCH="$(uname -m)"
-OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
-ARTIFACT="${BINARY}-${ARCH}-${OS}"
+# Map uname onto the names the release actually publishes. The release matrix in
+# .github/workflows/release.yml builds Zig target triples — x86_64-linux,
+# aarch64-linux, x86_64-macos, aarch64-macos — and uname does not agree with any
+# of them on a Mac: `uname -s` says Darwin, not macos, and Apple Silicon reports
+# arm64, not aarch64. So this asked for codeindex-arm64-darwin, which 404s, and
+# every Mac fell through to a source build. It said "No prebuilt binary", which
+# reads as a statement about the release rather than the bug it was.
+# plugin/test_platform.sh checks this against the matrix, so adding a target
+# without a mapping fails there instead of in a stranger's terminal.
+resolve_artifact() {
+    _arch="$(uname -m)"
+    _os="$(uname -s)"
+    case "$_arch" in
+        x86_64|amd64) _arch=x86_64 ;;
+        arm64|aarch64) _arch=aarch64 ;;
+        *) return 1 ;;
+    esac
+    case "$_os" in
+        Linux) _os=linux ;;
+        Darwin) _os=macos ;;
+        *) return 1 ;;
+    esac
+    printf '%s-%s-%s\n' "$1" "$_arch" "$_os"
+}
+
+if ! ARTIFACT="$(resolve_artifact "$BINARY")"; then
+    echo "No release build for $(uname -m)-$(uname -s); building from source." >&2
+    ARTIFACT=""
+fi
+
+# Introspection used by plugin/test_platform.sh.
+if [ "${1:-}" = "--print-artifact" ]; then
+    printf '%s\n' "$ARTIFACT"
+    exit 0
+fi
 
 DL_TMP="$(mktemp "$DEST.dl.XXXXXX")"
 # Two faults made this download fail every time, so every install fell through
@@ -122,13 +154,13 @@ DL_TMP="$(mktemp "$DEST.dl.XXXXXX")"
 # one tool every caller demonstrably has. Requiring gh sent every stranger down
 # the source-build path, which needs a matching Zig and the vendored grammars.
 # This is the order plugin/bin/codeindex-launch already used.
-if command -v curl &>/dev/null &&
+if [ -n "$ARTIFACT" ] && command -v curl &>/dev/null &&
    curl -fsSL -o "$DL_TMP" \
      "https://github.com/$REPO/releases/latest/download/$ARTIFACT" 2>/dev/null; then
     atomic_install "$DL_TMP"
     rm -f "$DL_TMP"
     echo "Installed prebuilt binary to $DEST"
-elif command -v gh &>/dev/null &&
+elif [ -n "$ARTIFACT" ] && command -v gh &>/dev/null &&
    gh release download --repo "$REPO" -p "$ARTIFACT" -O "$DL_TMP" --clobber 2>/dev/null; then
     atomic_install "$DL_TMP"
     rm -f "$DL_TMP"

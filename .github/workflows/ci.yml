@@ -62,6 +62,11 @@ jobs:
       - name: The hint and the measurement must agree on what a code question is
         run: bash plugin/test_hint.sh
 
+      # Both installers derive the release asset name from uname, which does not
+      # match the matrix on a Mac. That shipped, so it is checked now.
+      - name: Both installers must ask for assets the release publishes
+        run: bash plugin/test_platform.sh
+
       - name: Validate the skill against the server
         run: |
           python3 plugin/validate_skill.py \
