@@ -8,7 +8,16 @@ INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 # whose skills directories are separate. A fixed $HOME/.claude/skills installed
 # the skill where the running account could not see it, so nothing ever routed
 # an agent to this server — the exact failure the skill exists to prevent.
-SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Empty when piped: `curl … | bash` has no script file, so BASH_SOURCE[0] is
+# unset and `set -u` made merely referencing it fatal. The README leads with the
+# piped form, so that path printed an unbound-variable error, skipped the skill
+# entirely, and still exited 0 — the binary installed and the thing that teaches
+# an agent to use it did not.
+if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+    SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+else
+    SRC_DIR=""
+fi
 REPO="munhq/codeindex"
 
 mkdir -p "$INSTALL_DIR"
@@ -236,7 +245,36 @@ elif [ -d "$SRC_DIR/plugin/skills" ]; then
         done
     fi
 else
-    echo "Warning: no plugin/skills directory found; skills not installed" >&2
+    # Piped install: no local checkout to copy from, so fetch the skill from the
+    # same ref this script came from. One file per skill, so this is a download,
+    # not a clone.
+    targets="$(skill_dirs)"
+    if [ -z "$targets" ]; then
+        echo "Warning: no Claude skills directory found; skills not installed" >&2
+    elif ! command -v curl >/dev/null 2>&1; then
+        echo "Warning: no local checkout and no curl; skills not installed" >&2
+    else
+        STAGE="$(mktemp -d)"
+        trap 'rm -rf "$STAGE"' EXIT
+        fetched=0
+        for name in codeindex; do
+            mkdir -p "$STAGE/$name"
+            if curl -fsSL -o "$STAGE/$name/SKILL.md" \
+                "https://raw.githubusercontent.com/$REPO/main/plugin/skills/$name/SKILL.md"; then
+                fetched=$((fetched + 1))
+            else
+                echo "Warning: could not fetch the $name skill" >&2
+                rm -rf "$STAGE/$name"
+            fi
+        done
+        if [ "$fetched" -gt 0 ]; then
+            for dest in $targets; do
+                for skill in "$STAGE"/*/; do
+                    install_skill "${skill%/}" "$dest"
+                done
+            done
+        fi
+    fi
 fi
 
 if [ "$PLUGIN_OWNS" = "1" ]; then
