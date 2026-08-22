@@ -172,6 +172,11 @@ pub fn build(b: *std.Build) void {
     test_mod.addIncludePath(b.path("vendor/tree-sitter/lib/include"));
     test_mod.linkLibrary(ts_lib);
     test_mod.linkLibrary(grammar_lib);
+    // The tests assert on the version the build injects, so they need the same
+    // options module the executable gets. Without it a test that checks the
+    // reported version cannot be written at all, which is why three separate
+    // hardcoded versions survived.
+    test_mod.addOptions("build_options", build_options);
 
     const tests = b.addTest(.{
         .root_module = test_mod,

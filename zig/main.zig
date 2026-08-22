@@ -298,9 +298,20 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // agrees with the joined remainder. Left mixed, a Windows root produced
     // `D:\\repo/src/a.zig` and the resolver's '/' comparisons matched only part
     // of the key.
-    const workspace_abs: []const u8 = io.normalizeKey(io.realpathAlloc(allocator, cfg.workspace_root) catch
-        try allocator.dupe(u8, cfg.workspace_root));
+    // realpath returns a sentinel-terminated slice, allocated one byte longer
+    // than its length. Coercing that to []const u8 and freeing it releases one
+    // byte less than was allocated, so the sentinel slice is freed with its own
+    // type and a plain copy is what lives on.
+    const workspace_abs: []u8 = blk: {
+        if (io.realpathAlloc(allocator, cfg.workspace_root)) |abs| {
+            defer allocator.free(abs);
+            break :blk try allocator.dupe(u8, abs);
+        } else |_| {
+            break :blk try allocator.dupe(u8, cfg.workspace_root);
+        }
+    };
     defer allocator.free(workspace_abs);
+    io.normalizeKey(workspace_abs);
 
     // Every path key in the index is `join(root, rel)`, so the root form decides
     // the key form: a "." root produced "./main.zig" and `--workspace /abs`

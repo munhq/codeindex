@@ -254,10 +254,11 @@ pub const Snapshot = struct {
             const entry = f.object;
             const p = entry.get("p") orelse return error.InvalidSnapshot;
             if (p != .string) return error.InvalidSnapshot;
-            const path_str = if (std.fs.path.isAbsolute(p.string))
-                io.normalizeKey(try allocator.dupe(u8, p.string))
-            else
-                try io.joinKey(allocator, &.{ workspace_abs, p.string });
+            const path_str = if (std.fs.path.isAbsolute(p.string)) blk: {
+                const dup = try allocator.dupe(u8, p.string);
+                io.normalizeKey(dup);
+                break :blk dup;
+            } else try io.joinKey(allocator, &.{ workspace_abs, p.string });
             try exp.files.append(allocator, path_str);
             try exp.file_map.put(path_str, @intCast(exp.files.items.len - 1));
 
