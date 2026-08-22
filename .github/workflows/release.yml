@@ -74,9 +74,15 @@ jobs:
           echo "expected: $want"
           test "$got" = "$want"
 
-      - name: Strip (Linux)
-        if: contains(matrix.target, 'linux')
-        run: strip zig/zig-out/bin/codeindex || true
+      # The binary is stripped at link time by build.zig, so there is no
+      # post-processing step: a host `strip` cannot handle a cross-built target,
+      # and `zig objcopy --strip-all` is unimplemented in 0.16.
+      - name: Report the artifact size
+        run: |
+          cd zig
+          src=zig-out/bin/codeindex
+          [ -f "$src.exe" ] && src="$src.exe"
+          echo "${{ matrix.target }}: $(wc -c < "$src") bytes"
 
       - name: Package
         run: |

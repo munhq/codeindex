@@ -11,6 +11,15 @@ pub fn build(b: *std.Build) void {
     // naming a different version than the tag: release v0.2.0 carries a binary
     // that answers `codeindex 0.1.0`. The release workflow now passes the tag
     // here and then asserts the built binary agrees, so the two cannot drift.
+    // Strip at link time rather than with a host `strip` afterwards. The release
+    // ran the runner's binutils, which cannot strip an aarch64 ELF from an x86
+    // machine, and the `|| true` swallowed the failure: aarch64-linux shipped
+    // with debug info at 63MB against 53MB for x86_64. `zig objcopy
+    // --strip-all` is unimplemented in 0.16, so the linker does it — which works
+    // for every target from one runner, and needs no extra package.
+    const strip = b.option(bool, "strip", "Strip the binary (default: on unless Debug)") orelse
+        (optimize != .Debug);
+
     const version = b.option([]const u8, "version", "Version the binary reports (release CI passes the tag)") orelse DEFAULT_VERSION;
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "version", version);
@@ -127,6 +136,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
         .link_libcpp = true,
+        .strip = strip,
     });
     mod.addIncludePath(b.path("vendor/tree-sitter/lib/include"));
     mod.linkLibrary(ts_lib);
