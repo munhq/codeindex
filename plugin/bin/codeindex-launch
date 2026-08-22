@@ -13,6 +13,12 @@
 set -eu
 
 BIN_NAME="codeindex"
+# Windows will not execute a file without the .exe extension, so the cached
+# binary and the names searched below carry it. Empty everywhere else.
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) EXE=".exe" ;;
+    *) EXE="" ;;
+esac
 REPO="munhq/codeindex"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/codeindex/bin"
 
@@ -65,7 +71,7 @@ fi
 if command -v "$BIN_NAME" >/dev/null 2>&1; then
     exec "$(command -v "$BIN_NAME")" "$@"
 fi
-for candidate in "$HOME/.local/bin/$BIN_NAME" "$CACHE_DIR/$BIN_NAME"; do
+for candidate in "$HOME/.local/bin/$BIN_NAME$EXE" "$CACHE_DIR/$BIN_NAME$EXE"; do
     if [ -x "$candidate" ]; then
         exec "$candidate" "$@"
     fi
@@ -89,9 +95,9 @@ if command -v curl >/dev/null 2>&1 &&
    curl -fsSL -o "$TMP" \
      "https://github.com/$REPO/releases/latest/download/$ARTIFACT"; then
     chmod 0755 "$TMP"
-    mv -f "$TMP" "$CACHE_DIR/$BIN_NAME"
-    log "codeindex: fetched $ARTIFACT -> $CACHE_DIR/$BIN_NAME"
-    exec "$CACHE_DIR/$BIN_NAME" "$@"
+    mv -f "$TMP" "$CACHE_DIR/$BIN_NAME$EXE"
+    log "codeindex: fetched $ARTIFACT -> $CACHE_DIR/$BIN_NAME$EXE"
+    exec "$CACHE_DIR/$BIN_NAME$EXE" "$@"
 fi
 rm -f "$TMP"
 
@@ -99,14 +105,14 @@ rm -f "$TMP"
 if command -v gh >/dev/null 2>&1 &&
    gh release download --repo "$REPO" -p "$ARTIFACT" -O "$TMP" --clobber >/dev/null; then
     chmod 0755 "$TMP"
-    mv -f "$TMP" "$CACHE_DIR/$BIN_NAME"
-    log "codeindex: fetched $ARTIFACT -> $CACHE_DIR/$BIN_NAME"
-    exec "$CACHE_DIR/$BIN_NAME" "$@"
+    mv -f "$TMP" "$CACHE_DIR/$BIN_NAME$EXE"
+    log "codeindex: fetched $ARTIFACT -> $CACHE_DIR/$BIN_NAME$EXE"
+    exec "$CACHE_DIR/$BIN_NAME$EXE" "$@"
 fi
 rm -f "$TMP"
 
 log "codeindex: no usable $BIN_NAME binary, and none could be fetched."
-log "  searched: \$CODEINDEX_BIN, PATH, $HOME/.local/bin, $CACHE_DIR"
+log "  searched: \$CODEINDEX_BIN, PATH, $HOME/.local/bin, $CACHE_DIR (as $BIN_NAME$EXE)"
 log "  no release asset '$ARTIFACT' for $REPO"
 log "  build it: git clone https://github.com/$REPO && cd codeindex && ./install.sh"
 exit 127

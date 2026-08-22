@@ -13,7 +13,15 @@ REPO="munhq/codeindex"
 
 mkdir -p "$INSTALL_DIR"
 
-DEST="$INSTALL_DIR/$BINARY"
+# Windows will not execute a file without the .exe extension, so the installed
+# name carries it there. A shell on Windows is the only way this script runs at
+# all — Git Bash, MSYS2 or Cygwin — and each reports a decorated kernel name.
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) EXE=".exe" ;;
+    *) EXE="" ;;
+esac
+
+DEST="$INSTALL_DIR/$BINARY$EXE"
 
 MARKER=".codeindex-managed"
 
