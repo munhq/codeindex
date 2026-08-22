@@ -1,0 +1,19 @@
+# Git on Windows checks out CRLF by default, which breaks two things here.
+#
+# `zig fmt --check` wants LF and reported every source file as misformatted, so
+# the Windows CI job failed thirty seconds in on formatting alone. And a shell
+# script with CRLF line endings does not run: the interpreter sees the trailing
+# carriage return as part of the shebang path. install.sh, the plugin launcher
+# and the hook are all shell, and all of them ship to users.
+#
+# Normalise to LF in the repository and on checkout, on every platform.
+* text=auto eol=lf
+
+# Anything that must never be line-ending translated.
+*.png binary
+*.jpg binary
+*.ico binary
+*.so binary
+*.dylib binary
+*.dll binary
+*.exe binary

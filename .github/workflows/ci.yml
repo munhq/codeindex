@@ -45,7 +45,9 @@ jobs:
 
       # main.zig, build.zig and tests_main.zig live outside src/, so checking
       # only src/ let them drift out of format unnoticed.
+      # Formatting is identical on every platform, so it is checked once.
       - name: Format check
+        if: matrix.os == 'ubuntu-latest'
         run: cd zig && zig fmt --check src/ main.zig build.zig tests_main.zig
 
       - name: Build
@@ -113,6 +115,18 @@ jobs:
   # Every target the release publishes must compile before a tag is cut, on one
   # machine, so a broken target is caught here and not by a failed release run.
   cross:
+    # One runner per target. Six ReleaseFast builds in series made this the
+    # longest job in the run by several times over.
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-linux
+          - aarch64-linux
+          - x86_64-macos
+          - aarch64-macos
+          - x86_64-windows
+          - aarch64-windows
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -134,12 +148,5 @@ jobs:
           git config --global url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
           cd zig && ./fetch-vendor.sh
 
-      - name: Cross-compile every published target
-        run: |
-          cd zig
-          for t in x86_64-linux aarch64-linux x86_64-macos aarch64-macos \
-                   x86_64-windows aarch64-windows; do
-            echo "::group::$t"
-            zig build -Dtarget=$t -Doptimize=ReleaseFast
-            echo "::endgroup::"
-          done
+      - name: Cross-compile ${{ matrix.target }}
+        run: cd zig && zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseFast
