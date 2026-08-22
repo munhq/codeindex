@@ -142,7 +142,7 @@ fn walk_dir(walk: *Walk, dir: *io.Dir, rel_prefix: []const u8) !void {
         const rel = if (rel_prefix.len == 0)
             try allocator.dupe(u8, entry.name)
         else
-            try std.fs.path.join(allocator, &.{ rel_prefix, entry.name });
+            try io.joinKey(allocator, &.{ rel_prefix, entry.name });
         defer allocator.free(rel);
 
         switch (entry.kind) {
@@ -162,7 +162,7 @@ fn walk_dir(walk: *Walk, dir: *io.Dir, rel_prefix: []const u8) !void {
                     return;
                 }
 
-                const full_path = std.fs.path.join(allocator, &.{ walk.root, rel }) catch continue;
+                const full_path = io.joinKey(allocator, &.{ walk.root, rel }) catch continue;
                 defer allocator.free(full_path);
 
                 // Reconcile mode: an unchanged file is already in the index with

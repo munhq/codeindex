@@ -294,8 +294,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // Resolved after the chdir above, so the default (".") case names the
     // project root rather than whatever directory the client happened to launch
     // from. Lives for the whole process; the snapshot code only borrows it.
-    const workspace_abs: []const u8 = io.realpathAlloc(allocator, cfg.workspace_root) catch
-        try allocator.dupe(u8, cfg.workspace_root);
+    // Normalised to the key separator, so the absolute prefix of every path key
+    // agrees with the joined remainder. Left mixed, a Windows root produced
+    // `D:\\repo/src/a.zig` and the resolver's '/' comparisons matched only part
+    // of the key.
+    const workspace_abs: []const u8 = io.normalizeKey(io.realpathAlloc(allocator, cfg.workspace_root) catch
+        try allocator.dupe(u8, cfg.workspace_root));
     defer allocator.free(workspace_abs);
 
     // Every path key in the index is `join(root, rel)`, so the root form decides

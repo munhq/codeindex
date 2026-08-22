@@ -23,7 +23,7 @@ fn to_workspace_relative(path: []const u8, workspace_abs: []const u8) []const u8
     if (workspace_abs.len == 0) return path;
     if (path.len > workspace_abs.len and
         std.mem.startsWith(u8, path, workspace_abs) and
-        path[workspace_abs.len] == std.fs.path.sep)
+        (path[workspace_abs.len] == io.key_sep or path[workspace_abs.len] == '\\'))
     {
         return path[workspace_abs.len + 1 ..];
     }
@@ -255,9 +255,9 @@ pub const Snapshot = struct {
             const p = entry.get("p") orelse return error.InvalidSnapshot;
             if (p != .string) return error.InvalidSnapshot;
             const path_str = if (std.fs.path.isAbsolute(p.string))
-                try allocator.dupe(u8, p.string)
+                io.normalizeKey(try allocator.dupe(u8, p.string))
             else
-                try std.fs.path.join(allocator, &.{ workspace_abs, p.string });
+                try io.joinKey(allocator, &.{ workspace_abs, p.string });
             try exp.files.append(allocator, path_str);
             try exp.file_map.put(path_str, @intCast(exp.files.items.len - 1));
 
