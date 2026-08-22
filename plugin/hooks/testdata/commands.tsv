@@ -1,0 +1,67 @@
+# Shared classification fixtures: command <TAB> expected-kind <TAB> expected-subject
+#
+# Two consumers read this file, and they must agree on every row:
+#   - plugin/hooks/first-read-hint.sh --classify   (POSIX sh, runs in the hook)
+#   - plugin/measure_routing.py                    (Python, counts past sessions)
+#
+# They are separate implementations because the hook must not require python at
+# runtime and the analyser must not shell out per line. Separate implementations
+# drift, so the drift is what this file tests. A measurement that counted a
+# different set of commands than the hint fires on would answer a question
+# nobody asked.
+#
+# expected-kind is one of: ident, file, none
+# expected-subject is the identifier or path, and is empty for none.
+#
+# ── Identifier searches: a structural tool answers these ──────────────────────
+grep -rn requireRemote packages/	ident	requireRemote
+grep -n isEntitled packages/server/src/util/billing.ts	ident	isEntitled
+grep -r ensureTrial .	ident	ensureTrial
+rg find_callers	ident	find_callers
+rg -n reconcile_tree zig/src	ident	reconcile_tree
+ag load_into	ident	load_into
+git grep requireRemote	ident	requireRemote
+grep -e resolve_snapshot_path -r .	ident	resolve_snapshot_path
+egrep -rn Explorer zig/	ident	Explorer
+grep --include=*.ts -rn requireRemote .	ident	requireRemote
+grep -A3 -B3 -rn isEntitled packages/	ident	isEntitled
+CODEINDEX_WORKSPACE=/tmp grep -rn find_symbol .	ident	find_symbol
+#
+# ── Text searches: grep is the right instrument, stay silent ─────────────────
+grep -rn "is not logged in" packages/	none
+grep -rn "chat-recall is not logged in. Run" .	none
+grep -rn "TODO.*#[0-9]+" src/	none
+grep -c requireRemote packages/cli/src/mcp.ts	none
+grep -rn requireRemote . | wc -l	none
+grep -rn ERROR /var/log/syslog	none
+grep -n version package.json	none
+grep -rn image docker-compose.yaml	none
+grep -rn apiVersion k8s/deploy.yml	none
+grep -rn foo README.md	none
+grep -rn DATABASE_URL .env	none
+grep -rn x node_modules/pkg/index.js	none
+#
+# ── Source files printed whole: an outline is cheaper ────────────────────────
+cat packages/cli/src/mcp.ts	file	packages/cli/src/mcp.ts
+sed -n '1,200p' zig/src/storage/snapshot.zig	file	zig/src/storage/snapshot.zig
+head -50 packages/server/src/util/billing.ts	file	packages/server/src/util/billing.ts
+tail -20 main.zig	file	main.zig
+cat -n plugin/hooks/first-read-hint.sh	file	plugin/hooks/first-read-hint.sh
+bat src/lib.rs	file	src/lib.rs
+#
+# ── Not source, or not a structural question ─────────────────────────────────
+cat package.json	none
+cat .codeindex.json	none
+sed -n '1,20p' README.md	none
+head -5 /var/log/syslog	none
+cat zig-out/bin/manifest.json	none
+cat node_modules/typescript/package.json	none
+ls -la	none
+git status --porcelain	none
+git log --oneline -5	none
+zig build test-bin	none
+python3 plugin/validate_skill.py	none
+kubectl get pods -n database	none
+ps aux	none
+find . -name "*.ts"	none
+echo hello	none

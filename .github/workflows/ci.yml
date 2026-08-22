@@ -55,6 +55,13 @@ jobs:
       # answered about a different repository still passed review. It starts the
       # real binary, checks every documented name and argument against the live
       # schema, and executes each documented route.
+      # The hook decides when to spend a session's one hint; the analyser decides
+      # what to count when measuring whether the hint helped. They are separate
+      # implementations — the hook must not need python at runtime — so only this
+      # test keeps them from drifting into measuring different things.
+      - name: The hint and the measurement must agree on what a code question is
+        run: bash plugin/test_hint.sh
+
       - name: Validate the skill against the server
         run: |
           python3 plugin/validate_skill.py \
