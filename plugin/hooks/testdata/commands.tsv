@@ -65,3 +65,35 @@ kubectl get pods -n database	none
 ps aux	none
 find . -name "*.ts"	none
 echo hello	none
+#
+# ── Compound lines: the shape the agent actually runs ────────────────────────
+# The verb is rarely the first word. With auto mode active the harness asks for
+# absolute paths and routes file work through Bash, so a line arrives as
+# `cd /repo; …` or `echo "=== x ==="; …`. Reading only the first command found
+# `cd` where it wanted a verb and gave up: on one real session that was 25 Bash
+# calls, 0 hints, 6 owed, and the first miss was the session's first tool call.
+cd /repo; sed -n '1,75p' packages/server/src/middleware/rate-limit-config.ts	file	packages/server/src/middleware/rate-limit-config.ts
+cd /repo; echo "=== upload path ==="; sed -n '690,740p' packages/cli/src/sync-client.ts	file	packages/cli/src/sync-client.ts
+cd /repo && grep -rn requireRemote packages/	ident	requireRemote
+cd /repo; grep -n isEntitled packages/server/src/util/billing.ts | head -20	ident	isEntitled
+cd /repo; sed -n '70,96p' packages/engine/src/core/live-session-scan.ts; echo "--- dirs ---"	file	packages/engine/src/core/live-session-scan.ts
+#
+# ── Compound lines that are still not code questions ────────────────────────
+export KUBECONFIG=~/.kube/x.yaml; kubectl get deploy chat-recall	none
+cd /repo; python3 - <<'PY'	none
+S=/tmp/scratch; cat > $S/probe.mjs <<'EOF'	none
+cd /repo; npm test 2>&1 | grep -E "Tests |Test Files|FAIL"	none
+cd /repo; grep -n "concurrency\|inFlight\|acquire" packages/server/src/middleware/rate-limit.ts	none
+cat packages/cli/src/mcp.ts | wc -l	none
+S=/tmp/scratch; cat $S/notes.md	none
+#
+# ── Pipes and inverted matches: not questions about the code ─────────────────
+# A grep after a pipe filters what the previous command printed, so it has no
+# target because its input is not the tree. `… | grep -v test` was read as a
+# search for `test` and hinted on it. Noise teaches the agent to skip the hint.
+grep -v test packages/	none
+grep --invert-match requireRemote packages/	none
+git log --oneline | grep fixup	none
+ls packages | grep server	none
+grep -rn requireRemote packages/ | grep -v test	ident	requireRemote
+cd /repo; echo "=== caps ==="; grep -rn capabilities --include=*.ts packages/server/src 2>/dev/null | grep -v test | head -10	ident	capabilities
