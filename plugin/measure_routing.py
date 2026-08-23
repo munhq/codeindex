@@ -68,31 +68,55 @@ def is_source_path(text):
 
 
 def classify_command(cmd):
-    """Return (kind, subject): ("ident"|"file", str) or ("none", "").
+    """Classify a whole command LINE. Returns (kind, subject).
+
+    The agent almost never runs a bare command: with auto mode active it writes
+    `cd /repo; sed -n '1,75p' src/x.ts`, because the harness asks for absolute
+    paths and routes file work through Bash. This used to read only the first
+    command of such a line, find `cd` where it wanted a verb, and count the line
+    as "not a code question" — the same blind spot the hook had, so the two
+    agreed with each other and both were wrong.
+    """
+    if not cmd:
+        return ("none", "")
+
+    # A counting question is not a structural one, wherever the pipe sits.
+    if re.search(r"\|\s*wc\b", cmd):
+        return ("none", "")
+
+    # Everything after a heredoc marker is data, not commands.
+    head = cmd.split("<<", 1)[0]
+
+    # Split the line and classify each command in turn; first hit wins. Splitting
+    # the raw string, not a token list, because the operator is usually glued to
+    # its neighbour: `/repo;`, `2>&1`. Pipe boundaries are kept: what follows a
+    # pipe reads stdin rather than the tree, and must be told so.
+    for chunk in re.split(r"[;&<>\n]", head):
+        piped = False
+        for seg in chunk.split("|"):
+            if seg.strip():
+                kind, subject = classify_segment(seg, piped)
+                if kind != "none":
+                    return (kind, subject)
+            piped = True
+    return ("none", "")
+
+
+def classify_segment(seg, piped=False):
+    """Classify ONE command, already split off the line. Returns (kind, subject).
+
+    piped is True when a pipe feeds this command, so its input is a previous
+    command's output and not the source tree.
 
     Both the pattern and the target matter. Checking only the pattern counted
     `grep -rn ERROR /var/log/syslog` and `grep -n version package.json` as code
     questions, because ERROR and version are identifier-shaped. There is no
     symbol to look up in a log or a manifest.
     """
-    if not cmd:
-        return ("none", "")
-
-    if re.search(r"\|\s*wc\b", cmd):
-        return ("none", "")
-
     try:
-        tokens = shlex.split(cmd)
+        tokens = shlex.split(seg)
     except ValueError:
         return ("none", "")
-    if not tokens:
-        return ("none", "")
-
-    # Stop at the first shell operator: what follows is a different command.
-    for i, t in enumerate(tokens):
-        if t in {"|", "||", "&&", ";", ">", "<", ">>"}:
-            tokens = tokens[:i]
-            break
     if not tokens:
         return ("none", "")
 
@@ -120,6 +144,7 @@ def classify_command(cmd):
         return ("none", "")
 
     positionals = []
+    invert = False
     skip_next = False
     for tok in rest:
         if skip_next:
@@ -130,17 +155,24 @@ def classify_command(cmd):
             continue
         if tok == "-e":
             continue
+        if tok == "--invert-match":
+            invert = True
+            continue
         if tok.startswith("--"):
             continue
         if tok.startswith("-"):
             # A short-flag cluster containing c means "count matches", which is
-            # a counting question, not a structural one.
-            if verb == "search" and "c" in tok[1:]:
+            # a counting question, not a structural one. One containing v
+            # inverts the match: `grep -v test` excludes the identifier, so it
+            # is not a question about that identifier at all.
+            if verb == "search" and ("c" in tok[1:] or "v" in tok[1:]):
                 return ("none", "")
             continue
         positionals.append(tok)
 
     if verb == "search":
+        if invert:
+            return ("none", "")
         if not positionals:
             return ("none", "")
         pattern, targets = positionals[0], positionals[1:]
@@ -149,6 +181,10 @@ def classify_command(cmd):
         # A target list that is entirely noise means there is no symbol to look
         # up. No target at all searches the tree, which is a code question.
         if targets and all(NOISE.search(t) for t in targets):
+            return ("none", "")
+        # No target at all searches the tree — but only when the input IS the
+        # tree. After a pipe, grep filters what the previous command printed.
+        if not targets and piped:
             return ("none", "")
         return ("ident", pattern)
 

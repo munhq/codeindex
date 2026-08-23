@@ -68,8 +68,9 @@ unquote() {
     printf '%s' "$1" | sed -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'\$/\1/"
 }
 
-# Classify a shell command. Prints "<kind>\t<subject>" and returns 0 when a
-# structural tool answers it better; prints nothing and returns 1 otherwise.
+# Classify ONE command, already split off the line and free of shell
+# operators. Prints "<kind>\t<subject>" and returns 0 when a structural tool
+# answers it better; prints nothing and returns 1 otherwise.
 #
 # kind is one of:
 #   ident   subject is an identifier being searched for
@@ -79,20 +80,19 @@ unquote() {
 # `grep -rn ERROR /var/log/syslog` and `grep -n version package.json`, because
 # ERROR and version are identifier-shaped. There is no symbol to look up in a
 # log or a manifest, so a hint there is pure noise.
-classify_command() {
-    cmd="$1"
+classify_segment() {
+    seg="$1"
+    # 1 when a pipe feeds this command, so its input is a previous command's
+    # output and not the source tree.
+    piped="${2:-0}"
     verb=""
     positionals=""
     has_count_flag=0
+    has_invert_flag=0
     skip_next=0
 
     # shellcheck disable=SC2086
-    for tok in $cmd; do
-        # Anything after a shell operator is a different command.
-        case "$tok" in
-            \||\|\||\&\&|\;|\>|\>\>|\<) break ;;
-        esac
-
+    for tok in $seg; do
         if [ "$skip_next" = 1 ]; then
             skip_next=0
             continue
@@ -129,11 +129,15 @@ classify_command() {
                 continue
                 ;;
             -e) continue ;;
+            --invert-match) has_invert_flag=1; continue ;;
             --*) continue ;;
             -*)
                 # A short-flag cluster containing c means "count matches", which
-                # is a counting question, not a structural one.
+                # is a counting question, not a structural one. One containing v
+                # inverts the match: `grep -v test` excludes the identifier, so
+                # it is not a question about that identifier at all.
                 case "$tok" in *c*) has_count_flag=1 ;; esac
+                case "$tok" in *v*) has_invert_flag=1 ;; esac
                 continue
                 ;;
         esac
@@ -145,9 +149,7 @@ classify_command() {
 
     if [ "$verb" = search ]; then
         [ "$has_count_flag" = 1 ] && return 1
-        case "$cmd" in
-            *"| wc"*|*"|wc"*) return 1 ;;
-        esac
+        [ "$has_invert_flag" = 1 ] && return 1
 
         # The first positional is the pattern; the rest are where to look.
         pattern=""
@@ -172,6 +174,13 @@ classify_command() {
             done
             return 1
         fi
+
+        # No target at all searches the tree — but only when the input IS the
+        # tree. After a pipe, grep filters what the previous command printed:
+        # `grep -rn cap --include=*.ts src/ | grep -v test` matched here as a
+        # search for `test`, which is noise, and noise teaches the agent to
+        # skip whatever this hook says.
+        [ "$piped" = 1 ] && return 1
         printf 'ident\t%s\n' "$pattern"
         return 0
     fi
@@ -182,6 +191,56 @@ classify_command() {
             return 0
         fi
     done
+    return 1
+}
+
+# Classify a whole command LINE, which is what the payload carries. The agent
+# almost never runs a bare command: with auto mode active it writes
+# `cd /repo; sed -n '1,75p' src/x.ts` or `echo "=== x ==="; grep -rn foo src/`,
+# because the harness asks for absolute paths and routes file work through Bash.
+#
+# This used to read only the first command of such a line, find `cd` or `echo`
+# where it wanted a verb, and give up. Measured on the session that prompted the
+# fix: 73 Bash calls, 0 hints, where 17 were owed — and the first miss was the
+# session's very first tool call, so the hint was absent for the whole session.
+#
+# So split the line and classify each command in turn; the first hit wins.
+# The split is quote-blind, exactly like the whitespace tokenizer above. A `|`
+# inside a grep pattern therefore ends a segment early, which leaves a pattern
+# that is no longer an identifier, so the verdict stays "none" — the same answer
+# a quote-aware split gives, without a second parser to keep in step.
+classify_command() {
+    cmd="$1"
+
+    # A counting question is not a structural one, wherever the pipe sits.
+    case "$cmd" in
+        *"| wc"*|*"|wc"*) return 1 ;;
+    esac
+
+    # Everything after a heredoc marker is data, not commands. Without this the
+    # body of `cat > f.mjs <<'EOF' ... EOF` is scanned as a command line, and
+    # any line of it that ends in `;` starts a command that was never run.
+    head_of_line="${cmd%%<<*}"
+
+    # `;` `&` `<` `>` and newlines all end a command. tr, not a token scan: the
+    # operator is usually glued to its neighbour — `/repo;`, `2>&1`. `|` ends a
+    # command too, but it is kept and split below, because what follows a pipe
+    # reads stdin rather than the tree and must be told so.
+    while IFS= read -r line; do
+        piped=0
+        while [ -n "$line" ]; do
+            case "$line" in
+                *"|"*) seg="${line%%|*}"; line="${line#*|}" ;;
+                *)     seg="$line";       line="" ;;
+            esac
+            if [ -n "$seg" ]; then
+                classify_segment "$seg" "$piped" && return 0
+            fi
+            piped=1
+        done
+    done <<SEGMENTS
+$(printf '%s' "$head_of_line" | tr ';&<>' '\n\n\n\n')
+SEGMENTS
     return 1
 }
 
@@ -200,10 +259,19 @@ fi
 payload="$(cat)"
 flat="$(printf '%s' "$payload" | tr '\n\t' '  ')"
 
+# A JSON string value ends at the first quote that is NOT escaped, so
+# `[^"]*` is wrong. On
+#   "command":"cd /repo; echo \"=== x ===\"; sed -n '1,5p' a.ts"
+# it stopped at the first \" and returned `cd /repo; echo \`, so every
+# command that contained a double quote was classified on a stub — a second
+# reason no hint fired on real sessions, and one the --classify fixtures cannot
+# see because they hand the command over already parsed. Match the escapes
+# explicitly, then undo the JSON escaping the classifier must not see.
 json_field() {
     printf '%s' "$flat" |
-        sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" |
-        head -1
+        sed -nE 's/.*"'"$1"'"[[:space:]]*:[[:space:]]*"((\\.|[^"\\])*)".*/\1/p' |
+        head -1 |
+        sed -e 's/\\n/ /g' -e 's/\\t/ /g' -e 's/\\"/"/g' -e 's/\\\\/\\/g'
 }
 
 session="$(json_field session_id)"
@@ -282,7 +350,8 @@ instead of a scan:
   what calls it        -> find_callers $subject
   where it is defined  -> find_symbol $subject
   every mention of it  -> find_word $subject
-Match the tool by its bare name; your tool list shows the live prefix. Keep
+Match the tool by its bare name; your tool list shows the live prefix. If that
+list defers MCP schemas, load these first (ToolSearch) and then call. Keep
 grep for plain text — a phrase, an error string, a config value — where it is
 the right instrument.
 HINT
@@ -294,7 +363,8 @@ cheapest answer:
   what is in it        -> get_outline $subject
   one function from it -> read_symbol <name>
   what breaks if it changes -> get_change_impact $subject
-Match the tool by its bare name; your tool list shows the live prefix. Keep
+Match the tool by its bare name; your tool list shows the live prefix. If that
+list defers MCP schemas, load these first (ToolSearch) and then call. Keep
 reading the bytes when you need them exactly — before an Edit, or when
 whitespace matters.
 HINT
@@ -309,8 +379,9 @@ answer than reading the file. Match the codeindex tool by its bare name:
   - where is X used     -> find_word (exact) / search (text)
   - what calls X        -> find_callers
   - what breaks if I change this -> get_change_impact, plan_change
-Keep reading the bytes when you need them exactly — before an Edit, or when
-whitespace matters. Every file-scoped tool takes `path`, never `file`.
+If your tool list defers MCP schemas, load these first (ToolSearch) and then
+call. Keep reading the bytes when you need them exactly — before an Edit, or
+when whitespace matters. Every file-scoped tool takes `path`, never `file`.
 HINT
         ;;
 esac

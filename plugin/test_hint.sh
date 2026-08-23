@@ -52,8 +52,68 @@ while IFS= read -r line; do
     fi
 done < "$fixtures"
 
+# ── Payload extraction ───────────────────────────────────────────────────────
+# The fixtures above hand the command to --classify already parsed, so they
+# cannot see a payload the hook fails to READ. That gap hid a second bug: the
+# JSON value was matched with [^"]*, so every command carrying a double quote
+# was classified on the stub before the first \". These cases drive the hook the
+# way the harness drives it — one JSON object on stdin — and assert the hint
+# text, the once-per-session rule, and that silence spends no chance.
+payloads=0
+state="$(mktemp -d)"
+trap 'rm -rf "$state"' EXIT
+
+payload_expect() {   # payload_expect <want-substring|""> , payload on stdin
+    want="$1"
+    got="$(XDG_RUNTIME_DIR="$state" sh "$hook" 2>/dev/null)"
+    payloads=$((payloads + 1))
+    if [ -z "$want" ]; then
+        [ -z "$got" ] && return 0
+        printf 'FAIL payload  want silence, got: %s\n' \
+            "$(printf '%s' "$got" | tr '\n' ' ')"
+        fail=$((fail + 1))
+        return 0
+    fi
+    case "$got" in
+        *"$want"*) return 0 ;;
+    esac
+    printf 'FAIL payload  want %s, got: %s\n' \
+        "$want" "$(printf '%s' "$got" | tr '\n' ' ')"
+    fail=$((fail + 1))
+}
+
+# A double quote anywhere in the line used to truncate it to a stub.
+payload_expect 'get_outline packages/cli/src/sync-client.ts' <<'JSON'
+{"session_id":"pt-quoted","tool_name":"Bash","tool_input":{"command":"cd /repo; echo \"=== upload path ===\"; sed -n '690,740p' packages/cli/src/sync-client.ts"}}
+JSON
+
+# One hint per session: the second call in the same session says nothing.
+payload_expect '' <<'JSON'
+{"session_id":"pt-quoted","tool_name":"Bash","tool_input":{"command":"cd /repo && grep -rn requireRemote packages/"}}
+JSON
+
+payload_expect 'find_callers requireRemote' <<'JSON'
+{"session_id":"pt-ident","tool_name":"Bash","tool_input":{"command":"cd /repo && grep -rn requireRemote packages/"}}
+JSON
+
+# A manifest is not a code question. Stay silent, and do NOT spend the
+# session's one chance — the next call proves the chance survived.
+payload_expect '' <<'JSON'
+{"session_id":"pt-noise","tool_name":"Bash","tool_input":{"command":"cd /repo; cat package.json"}}
+JSON
+payload_expect 'get_outline packages/cli/src/mcp.ts' <<'JSON'
+{"session_id":"pt-noise","tool_name":"Bash","tool_input":{"command":"cd /repo; sed -n '1,40p' packages/cli/src/mcp.ts"}}
+JSON
+
+# The dedicated tools still route, in the modes that use them.
+payload_expect 'get_outline zig/src/main.zig' <<'JSON'
+{"session_id":"pt-read","tool_name":"Read","tool_input":{"file_path":"zig/src/main.zig"}}
+JSON
+
 if [ "$fail" -gt 0 ]; then
-    printf '\n%d disagreement(s) across %d fixtures\n' "$fail" "$checked" >&2
+    printf '\n%d failure(s) across %d fixtures and %d payloads\n' \
+        "$fail" "$checked" "$payloads" >&2
     exit 1
 fi
-printf 'hint classifier: %d fixtures, shell and python agree\n' "$checked"
+printf 'hint classifier: %d fixtures (shell and python agree), %d payloads\n' \
+    "$checked" "$payloads"

@@ -37,6 +37,12 @@ directly, `mcp__plugin_codeindex_codeindex__` when the plugin registers it. Take
 the exact name from your own tool list — a name written for the other install
 fails the call and sends you back to `Read`.
 
+Some harnesses defer MCP schemas: the names are in your tool list, but calling
+one before its schema loads fails validation. Load the schemas first, in one
+call — `ToolSearch` with `select:find_symbol,read_symbol,get_outline,find_word`
+— then call the tools. That is one extra call per session, against 1,563 tokens
+for every file you would otherwise read.
+
 A token you never put into context is never billed. A token you put in and later
 compress has already been re-sent on every intervening turn, and editing it
 invalidates the prompt cache. So the cheapest possible intervention is to not
