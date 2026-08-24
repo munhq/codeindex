@@ -1,6 +1,6 @@
 .{
     .name = .codeindex,
-    .version = "0.3.0",
+    .version = "0.3.2",
     .minimum_zig_version = "0.16.0",
     .fingerprint = 0xebbd7ddb780f7365,
     .dependencies = .{
