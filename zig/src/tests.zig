@@ -18,6 +18,15 @@ const import_scan = @import("parser/import_scan.zig");
 const duplication = @import("analysis/duplication.zig");
 const clones = @import("analysis/clones.zig");
 const scanner_mod = @import("index/scanner.zig");
+// Imported for its OWN tests, which live beside the rule they cover. It was
+// absent from this aggregator, so the credential_in_manifest matcher shipped
+// untested — and reported 34 critical findings across five repositories, every
+// one of them a dependency whose NAME contained a credential word.
+const manifest_compliance = @import("analysis/manifest_compliance.zig");
+
+comptime {
+    _ = manifest_compliance;
+}
 
 // ── Test helpers ──────────────────────────────────────────────────────────────
 
