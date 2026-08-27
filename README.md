@@ -1,5 +1,13 @@
 # codeindex
 
+[![npm](https://img.shields.io/npm/v/%40munhq%2Fcodeindex?label=npm&color=cb3837)](https://www.npmjs.com/package/@munhq/codeindex)
+[![MCP Registry](https://img.shields.io/badge/MCP%20Registry-io.github.munhq%2Fcodeindex-000)](https://registry.modelcontextprotocol.io/v0/servers?search=codeindex)
+[![Smithery](https://img.shields.io/badge/Smithery-munhq%2Fcodeindex-7c3aed)](https://smithery.ai/server/munhq/codeindex)
+[![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
+[![Install in Cursor](https://img.shields.io/badge/Install-Cursor-000?logo=cursor)](cursor://anysphere.cursor-deeplink/mcp/install?name=codeindex&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsIkBtdW5ocS9jb2RlaW5kZXgiXX0=)
+[![Install in VS Code](https://img.shields.io/badge/Install-VS%20Code-007ACC?logo=visualstudiocode)](vscode:mcp/install?%7B%22name%22%3A%22codeindex%22%2C%22command%22%3A%22npx%22%2C%22args%22%3A%5B%22-y%22%2C%22%40munhq%2Fcodeindex%22%5D%7D)
+
 A structural code intelligence engine that runs as an **MCP server** for AI coding agents.
 
 It indexes your codebase with tree-sitter (40+ languages), builds a trigram full-text index, an inverted word index, and a dependency graph — then exposes them through **16 MCP tools**.
@@ -25,12 +33,29 @@ One `plan_change` call returns: where a symbol is defined, every call site, the 
 
 ## Quickstart
 
+The shortest path, if you have Node 18+. Nothing else to install, no key, no
+config — the package is a 4 KB wrapper that fetches the binary for your platform
+and verifies it against the published checksums:
+
 ```bash
-# Install (prebuilt binary or build from source)
+claude mcp add codeindex -- npx -y @munhq/codeindex
+```
+
+No Node, or you want the skill and the hook as well:
+
+```bash
+# Prebuilt binary + skill + MCP registration, in one command
 curl -fsSL https://raw.githubusercontent.com/munhq/codeindex/main/install.sh | bash
 
-# Or build manually:
+# Or build from source:
 cd zig && ./fetch-vendor.sh && zig build -Doptimize=ReleaseFast
+```
+
+Docker, for hosts that install MCP servers as images. The workspace is
+bind-mounted read-only; codeindex never writes to it:
+
+```bash
+docker run -i --rm -v "$PWD:/workspace:ro" munhq/codeindex
 ```
 
 Register with your AI agent:
@@ -47,16 +72,19 @@ claude plugin install codeindex@codeindex
 # plugin and skips this step when it is present.
 claude mcp add -s user codeindex -- ~/.local/bin/codeindex --mcp
 
-# Cursor / other MCP clients: add to your config
+# Cursor / Claude Desktop / other MCP clients: add to your config
 {
   "mcpServers": {
     "codeindex": {
-      "command": "~/.local/bin/codeindex",
-      "args": ["--mcp"]
+      "command": "npx",
+      "args": ["-y", "@munhq/codeindex"]
     }
   }
 }
 ```
+
+Every listing points at the same server: npm `@munhq/codeindex`, the official MCP
+registry as `io.github.munhq/codeindex`, and Smithery as `munhq/codeindex`.
 
 The next time your agent starts, codeindex indexes your project in the background and serves structural queries.
 
