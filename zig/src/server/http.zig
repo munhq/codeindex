@@ -121,6 +121,28 @@ pub const Server = struct {
                     const tool_name = (params.object.get("name") orelse continue).string;
                     const arguments = params.object.get("arguments");
                     try self.handle_tool_call(stdout_file, id, tool_name, arguments);
+                } else if (id != null) {
+                    // Any other REQUEST gets -32601. JSON-RPC 2.0 §5: every
+                    // request must be answered; only notifications (no id) may
+                    // be silently ignored.
+                    //
+                    // This chain used to just fall off the end. A client that
+                    // probes `resources/list` or `prompts/list` on connect --
+                    // both standard MCP, both absent here -- then waited
+                    // forever for a reply that was never coming. Antigravity
+                    // does exactly that, and reported "codeindex still
+                    // connecting" until it gave up, taking the whole session
+                    // with it. Every unknown method is covered, not just those
+                    // two, because the next client will probe something else.
+                    var buf = std.Io.Writer.Allocating.init(self.allocator);
+                    defer buf.deinit();
+                    const bw = &buf.writer;
+                    try bw.writeAll("{\"jsonrpc\":\"2.0\",\"id\":");
+                    try write_id(bw, id);
+                    try bw.writeAll(",\"error\":{\"code\":-32601,\"message\":\"Method not found: ");
+                    try std.json.Stringify.encodeJsonStringChars(method, .{}, bw);
+                    try bw.writeAll("\"}}\n");
+                    try io.writeAll(stdout_file, buf.written());
                 }
             }
         }
