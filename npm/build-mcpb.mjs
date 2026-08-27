@@ -32,7 +32,10 @@ const argOf = (name) => {
   const i = argv.indexOf(name);
   return i === -1 ? null : argv[i + 1];
 };
-const out = argOf('--out') || path.join(here, '..', `codeindex-${pkg.version}.mcpb`);
+// Resolved, because zip runs with cwd set to the staging directory: a relative
+// --out would be created inside a temp dir that is deleted moments later, and
+// zip simply answers "Could not create output file".
+const out = path.resolve(argOf('--out') || path.join(here, '..', `codeindex-${pkg.version}.mcpb`));
 const cardPath = argOf('--card');
 
 let tools = [];
