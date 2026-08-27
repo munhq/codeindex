@@ -1,0 +1,47 @@
+# Smithery — https://smithery.ai
+#
+# This file describes how to START the server and what it needs, not what it
+# does. The tool descriptions in the server itself carry the "what", and the
+# published listing reads them from a live `tools/list`.
+#
+# READ THIS BEFORE ASSUMING THIS FILE PUBLISHES ANYTHING. It does not. A
+# smithery.yaml sitting in a GitHub repository is not a submission — the listing
+# is created through the Smithery Platform API (`PUT /servers/{namespace}%2F{name}/releases`)
+# or at smithery.ai/new. This file is what a Smithery-style stdio launcher
+# consumes, and the launch command below is correct wherever it is read.
+#
+# codeindex needs no configuration at all: no account, no key, no login, nothing
+# to fill in. That is why configSchema below has no required properties — the one
+# option exists for the rare client that starts the server outside the repository
+# it should index.
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    properties:
+      workspace:
+        type: string
+        title: Workspace directory
+        description: >-
+          Directory to index. Leave empty and codeindex uses the enclosing
+          project root of wherever the client starts it, which is correct for
+          every editor and agent that launches the server inside a repository.
+        default: ""
+    required: []
+  # A function rather than a static command, so an empty Workspace means "use the
+  # default" instead of exporting an empty variable that overrides it.
+  commandFunction: |-
+    (config) => ({
+      command: 'npx',
+      // The binary is not JavaScript: this npm package is a 4 KB wrapper that
+      // fetches the release asset for the platform and executes it. `-y` so an
+      // install never waits for a prompt no one is watching.
+      args: ['-y', '@munhq/codeindex'],
+      env: config.workspace ? { CODEINDEX_WORKSPACE: config.workspace } : {},
+    })
+
+# No Docker image. codeindex indexes the user's own repository from the machine
+# it runs on, so a container would need that repository bind-mounted to be useful
+# at all — which is strictly worse than a 53 MB static binary with no runtime.
+build:
+  dockerfile: null

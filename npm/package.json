@@ -1,0 +1,39 @@
+{
+  "name": "@munhq/codeindex",
+  "version": "0.3.2",
+  "description": "Structural code intelligence for AI coding agents over MCP: find a definition, read one function, see what calls a symbol, trace imports and judge a change's blast radius across 40+ languages — in tens of tokens instead of the ~1,563 a file read costs.",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "mcp-server",
+    "code-intelligence",
+    "tree-sitter",
+    "ai-agents",
+    "claude",
+    "context-window"
+  ],
+  "homepage": "https://github.com/munhq/codeindex",
+  "bugs": "https://github.com/munhq/codeindex/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/munhq/codeindex.git"
+  },
+  "license": "MIT",
+  "bin": {
+    "codeindex-mcp": "bin/codeindex-mcp.js"
+  },
+  "scripts": {
+    "postinstall": "node bin/postinstall.js",
+    "test": "node bin/selftest.js"
+  },
+  "files": [
+    "bin/",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

@@ -102,8 +102,52 @@ done <<EOF
 $published
 EOF
 
+# The npm wrapper is the THIRD place this mapping is written, and it speaks a
+# different vocabulary for the same six assets: Node says darwin/win32/x64 where
+# uname says Darwin/MINGW64_NT/x86_64. Two scripts agreeing proved nothing when
+# both were wrong about a Mac, so the wrapper is held to the same matrix.
+node_checked=0
+if command -v node >/dev/null 2>&1; then
+    if ! node "$root/npm/bin/selftest.js" >/dev/null 2>&1; then
+        printf 'FAIL npm wrapper  bin/selftest.js failed its own assertions\n'
+        fail=$((fail + 1))
+    fi
+    node_table="$(node "$root/npm/bin/selftest.js" 2>/dev/null)"
+    if [ -z "$node_table" ]; then
+        printf 'FAIL npm wrapper  bin/selftest.js produced no mapping\n'
+        fail=$((fail + 1))
+    fi
+    while IFS="$(printf '\t')" read -r platform arch asset; do
+        [ -n "${asset:-}" ] || continue
+        node_checked=$((node_checked + 1))
+        checked=$((checked + 1))
+        if ! printf '%s\n' "$published" | grep -qx "$asset"; then
+            printf 'FAIL npm wrapper  %s/%s -> %s is not published by the release matrix\n' \
+                "$platform" "$arch" "$asset"
+            fail=$((fail + 1))
+        fi
+    done <<EOF
+$node_table
+EOF
+    # Every published asset must be reachable from Node too, or an npx install
+    # silently has fewer platforms than the release does.
+    while IFS= read -r asset; do
+        [ -n "$asset" ] || continue
+        if ! printf '%s\n' "$node_table" | grep -q "	$asset\$"; then
+            printf 'FAIL npm wrapper  %s is published but the wrapper resolves no platform to it\n' "$asset"
+            fail=$((fail + 1))
+        fi
+    done <<EOF
+$published
+EOF
+else
+    printf '>>> SKIPPED the npm wrapper check: node is not installed here. <<<\n' >&2
+    printf '>>> install.sh and the launcher were checked; the wrapper was NOT. <<<\n' >&2
+fi
+
 if [ "$fail" -gt 0 ]; then
     printf '\n%d platform failure(s) across %d case(s)\n' "$fail" "$checked" >&2
     exit 1
 fi
-printf 'platform mapping: %d case(s), both scripts match the release matrix\n' "$checked"
+printf 'platform mapping: %d case(s) — install.sh, launcher and npm wrapper (%d) match the release matrix\n' \
+    "$checked" "$node_checked"

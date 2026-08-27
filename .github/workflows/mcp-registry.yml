@@ -1,0 +1,80 @@
+# Publish server.json to the official MCP registry with GitHub Actions OIDC.
+#
+# Why OIDC and not a person: the registry proves ownership of the
+# io.github.munhq/* namespace through GitHub. A user's OAuth token cannot carry
+# that proof — munhq restricts third-party OAuth apps, so the registry's app
+# never sees the org membership and every interactive `mcp-publisher login
+# github` ends in a 403 that names only the user's own namespace. A workflow in
+# this repository IS the org speaking for itself: the OIDC token GitHub mints for
+# this run proves repo and owner, with no app policy involved. This is the same
+# path chat-recall publishes through.
+#
+# Runs on version tags, and on manual dispatch for the first publish and for
+# fixes to server.json alone.
+name: mcp-registry
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # load-bearing: this is the OIDC proof
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install mcp-publisher
+        run: |
+          curl -fsSL https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz \
+            | tar -xz mcp-publisher
+
+      # server.json declares a version and a package version, and the registry
+      # rejects the publish if they disagree with the tag. Three files carry the
+      # number, so it is checked rather than trusted.
+      - name: Versions must agree with the tag
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          SRV=$(node -p "require('./server.json').version")
+          PKG=$(node -p "require('./server.json').packages[0].version")
+          NPM=$(node -p "require('./npm/package.json').version")
+          for pair in "server.json:$SRV" "server.json/packages:$PKG" "npm/package.json:$NPM"; do
+            if [ "${pair#*:}" != "$TAG" ]; then
+              echo "${pair%%:*} says ${pair#*:}, tag says $TAG" >&2
+              exit 1
+            fi
+          done
+          echo "all three agree on $TAG"
+
+      # The registry VALIDATES that the declared npm version already exists.
+      # chat-recall's v0.5.5 publish lost exactly this race and got back
+      # 400 "version '0.5.5' was not found (status: 404)" while npm was still
+      # publishing. release-npm.yml fires on the same tag with no ordering
+      # between the two workflows, so wait for npm to serve it.
+      - name: Wait for the npm version to be visible
+        run: |
+          VERSION=$(node -p "require('./server.json').version")
+          echo "waiting for @munhq/codeindex@$VERSION on npm"
+          for i in $(seq 1 60); do
+            if npm view "@munhq/codeindex@$VERSION" version >/dev/null 2>&1; then
+              echo "npm has $VERSION"
+              exit 0
+            fi
+            sleep 20
+          done
+          echo "npm never served $VERSION after 20 minutes" >&2
+          exit 1
+
+      - name: Login (GitHub Actions OIDC)
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish
+        run: ./mcp-publisher publish
