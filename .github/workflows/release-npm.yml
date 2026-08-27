@@ -17,10 +17,18 @@
 # settings page at npmjs.com, and a package that has never been published has no
 # settings page. So:
 #
-#   Phase 1, once: an NPM_TOKEN secret in this repo publishes the first version.
-#     npmjs.com -> Access Tokens -> Generate -> Granular, packages: codeindex-mcp,
-#     permission: Read and write. Paste it at
-#     github.com/munhq/codeindex/settings/secrets/actions as NPM_TOKEN.
+#   Phase 1, once. Two ways, and the second exists because the first depends on a
+#   token setting npm is in the middle of restricting:
+#     a) An NPM_TOKEN secret whose token has BYPASS 2FA enabled — npmjs.com ->
+#        Access Tokens -> Granular, All packages (the name cannot be selected
+#        before it exists), Read and write, Bypass 2FA on. Paste at
+#        github.com/munhq/codeindex/settings/secrets/actions as NPM_TOKEN.
+#     b) The `otp` input on this workflow. A token WITHOUT bypass returns
+#        `EOTP: This operation requires a one-time password`, which no CI run can
+#        answer — so the code is supplied at dispatch instead. A TOTP code lives
+#        30 seconds, so this path SKIPS the two slow steps below to reach the
+#        publish in about 20 seconds. It says which checks it skipped rather than
+#        passing quietly, and they are the ones a tag push always runs.
 #   Phase 2, once, then forever tokenless:
 #     npmjs.com -> Packages -> codeindex-mcp -> Settings -> Trusted Publisher
 #     Publisher: GitHub Actions | Owner: munhq | Repo: codeindex
@@ -48,6 +56,10 @@ on:
         description: 'Pack and validate, but do not publish'
         type: boolean
         default: true
+      otp:
+        description: '6-digit npm 2FA code (only for the FIRST publish, see header)'
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -66,7 +78,10 @@ jobs:
                                                        # .npmrc both auth paths
                                                        # read
 
+      # Only OIDC needs a newer npm than the runner ships, and this step costs
+      # ~30s — too much when a 30-second code is already ticking.
       - name: npm must be new enough for OIDC
+        if: inputs.otp == ''
         run: |
           npm install -g npm@latest
           npm --version
@@ -126,7 +141,16 @@ jobs:
       # this runner from the real release and complete a real handshake. A
       # wrapper that resolves the wrong asset name fails here rather than in a
       # stranger's editor, which is how the Mac 404 escaped once already.
+      # Downloads 53 MB, so it is the one check the OTP path cannot afford. Say
+      # so out loud: a skipped check that prints nothing reads as a passed one.
+      - name: Skipping the handshake check (OTP path)
+        if: inputs.otp != ''
+        run: |
+          echo "::warning::OTP path: skipped the download+handshake check to beat the 30s code expiry."
+          echo "::warning::Version agreement and the resolver/matrix check DID run. A tag push runs all of them."
+
       - name: The wrapper must fetch and start the server
+        if: inputs.otp == ''
         working-directory: npm
         run: |
           node bin/postinstall.js
@@ -167,15 +191,20 @@ jobs:
         working-directory: npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          OTP: ${{ inputs.otp }}
         run: |
-          if [ -n "${NODE_AUTH_TOKEN:-}" ]; then
+          OTP_ARG=""
+          if [ -n "${OTP:-}" ]; then
+            echo "publishing with a one-time code supplied at dispatch"
+            OTP_ARG="--otp=$OTP"
+          elif [ -n "${NODE_AUTH_TOKEN:-}" ]; then
             echo "publishing with the NPM_TOKEN secret (phase 1)"
           else
             echo "no NPM_TOKEN secret — publishing with trusted publishing (OIDC)"
           fi
           if [ "${{ github.event.repository.private }}" = "false" ]; then
-            npm publish --access public --provenance
+            npm publish --access public --provenance $OTP_ARG
           else
             echo "::warning::repo is private, publishing WITHOUT provenance"
-            npm publish --access public
+            npm publish --access public $OTP_ARG
           fi
