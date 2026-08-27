@@ -38,21 +38,33 @@ jobs:
             | tar -xz mcp-publisher
 
       # server.json declares a version and a package version, and the registry
-      # rejects the publish if they disagree with the tag. Three files carry the
-      # number, so it is checked rather than trusted.
-      - name: Versions must agree with the tag
+      # rejects the publish if the declared package version does not exist on
+      # npm. Three files carry the number, so it is checked rather than trusted.
+      #
+      # server.json is the source, NOT the git ref. On a workflow_dispatch
+      # GITHUB_REF_NAME is the branch — "main" — so comparing against it failed
+      # every dispatch with "server.json says 0.3.2, tag says main". The first
+      # publish has to be a dispatch, because v0.3.2 was released before this
+      # workflow existed, so that shape made the step unusable exactly when it
+      # was needed. A tag push additionally has to agree with server.json.
+      - name: Resolve the version, and make the manifests agree
+        id: v
         run: |
-          TAG="${GITHUB_REF_NAME#v}"
           SRV=$(node -p "require('./server.json').version")
           PKG=$(node -p "require('./server.json').packages[0].version")
           NPM=$(node -p "require('./npm/package.json').version")
-          for pair in "server.json:$SRV" "server.json/packages:$PKG" "npm/package.json:$NPM"; do
-            if [ "${pair#*:}" != "$TAG" ]; then
-              echo "${pair%%:*} says ${pair#*:}, tag says $TAG" >&2
+          for pair in "server.json/packages:$PKG" "npm/package.json:$NPM"; do
+            if [ "${pair#*:}" != "$SRV" ]; then
+              echo "::error::${pair%%:*} says ${pair#*:}, server.json says $SRV"
               exit 1
             fi
           done
-          echo "all three agree on $TAG"
+          if [ "${{ github.ref_type }}" = "tag" ] && [ "${GITHUB_REF_NAME#v}" != "$SRV" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match server.json $SRV"
+            exit 1
+          fi
+          echo "version=$SRV" >> "$GITHUB_OUTPUT"
+          echo "all three agree on $SRV"
 
       # The registry VALIDATES that the declared npm version already exists.
       # chat-recall's v0.5.5 publish lost exactly this race and got back
@@ -60,8 +72,9 @@ jobs:
       # publishing. release-npm.yml fires on the same tag with no ordering
       # between the two workflows, so wait for npm to serve it.
       - name: Wait for the npm version to be visible
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
         run: |
-          VERSION=$(node -p "require('./server.json').version")
           echo "waiting for codeindex-mcp@$VERSION on npm"
           for i in $(seq 1 60); do
             if npm view "codeindex-mcp@$VERSION" version >/dev/null 2>&1; then
