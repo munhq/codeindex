@@ -1,0 +1,101 @@
+# Update the Smithery listing after a release.
+#
+# Smithery does not read this repository. A smithery.yaml sitting in it publishes
+# nothing — the listing exists because something PUTs a release to the Platform
+# API, and the first one was PUT by hand. A listing published by hand describes an
+# old version forever, so it is a workflow.
+#
+# It runs after the release rather than beside it, because the listing's tool card
+# is captured from the binary the release actually shipped, and the bundle it
+# uploads is the asset attached to that release. Nothing here rebuilds anything.
+#
+# BEFORE THE FIRST RUN: add SMITHERY_API_KEY (the bearer token from smithery.ai)
+# at github.com/munhq/codeindex/settings/secrets/actions. Without it this job
+# warns and stops rather than failing the release, because a stale listing is
+# worse than a red tag but not worth blocking a release over.
+name: smithery
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'   # FormData and Blob in the publish script
+
+      - name: Is the key present
+        id: key
+        env:
+          SMITHERY_API_KEY: ${{ secrets.SMITHERY_API_KEY }}
+        run: |
+          if [ -z "${SMITHERY_API_KEY:-}" ]; then
+            echo "::warning::SMITHERY_API_KEY is not set, so the Smithery listing was NOT updated."
+            echo "::warning::Add it at /settings/secrets/actions; until then the listing describes whatever version was published last."
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The release job builds and attaches the bundle, so it is downloaded here
+      # rather than rebuilt: the listing then describes the exact artefact users
+      # can install, not a second build of it.
+      - name: Fetch the release bundle and binary
+        if: steps.key.outputs.present == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(node -p "require('./npm/package.json').version")
+          TAG="v$VERSION"
+          for i in $(seq 1 60); do
+            if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
+                 --json assets --jq '.assets[].name' 2>/dev/null | grep -qx SHA256SUMS; then
+              break
+            fi
+            echo "waiting for $TAG assets ($i/60)"
+            sleep 20
+          done
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            -p "codeindex-$VERSION.mcpb" -p codeindex-x86_64-linux -p SHA256SUMS --clobber
+          # The bundle is what gets uploaded to a public directory, so its hash is
+          # checked against the checksums the release published rather than
+          # trusted because the download succeeded.
+          grep " codeindex-$VERSION.mcpb\$" SHA256SUMS | sha256sum -c -
+          grep " codeindex-x86_64-linux\$" SHA256SUMS | sha256sum -c -
+          chmod +x codeindex-x86_64-linux
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Capture the tool card from the released binary
+        if: steps.key.outputs.present == 'true'
+        run: |
+          printf '%s\n%s\n%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smithery","version":"0"}}}' \
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+            | ./codeindex-x86_64-linux --mcp --workspace . > card.jsonl 2>/dev/null
+          node -e '
+            const fs = require("fs");
+            const tools = fs.readFileSync("card.jsonl", "utf8").split("\n").filter(Boolean)
+              .map(JSON.parse).find((m) => m.id === 2)?.result?.tools;
+            if (!tools || !tools.length) {
+              console.error("::error::the released binary advertised no tools");
+              process.exit(1);
+            }
+            fs.writeFileSync("card.json", JSON.stringify({ tools }));
+            console.log(`captured ${tools.length} tools from the released binary`);
+          '
+
+      - name: Publish the listing
+        if: steps.key.outputs.present == 'true'
+        env:
+          SMITHERY_API_KEY: ${{ secrets.SMITHERY_API_KEY }}
+        run: node npm/publish-smithery.mjs --card card.json --bundle "codeindex-$VERSION.mcpb"
