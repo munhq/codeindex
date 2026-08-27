@@ -77,22 +77,7 @@ jobs:
       - name: Capture the tool card from the released binary
         if: steps.key.outputs.present == 'true'
         run: |
-          printf '%s\n%s\n%s\n' \
-            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smithery","version":"0"}}}' \
-            '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
-            '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
-            | ./codeindex-x86_64-linux --mcp --workspace . > card.jsonl 2>/dev/null
-          node -e '
-            const fs = require("fs");
-            const tools = fs.readFileSync("card.jsonl", "utf8").split("\n").filter(Boolean)
-              .map(JSON.parse).find((m) => m.id === 2)?.result?.tools;
-            if (!tools || !tools.length) {
-              console.error("::error::the released binary advertised no tools");
-              process.exit(1);
-            }
-            fs.writeFileSync("card.json", JSON.stringify({ tools }));
-            console.log(`captured ${tools.length} tools from the released binary`);
-          '
+          node npm/capture-card.mjs --out card.json -- ./codeindex-x86_64-linux --mcp --workspace .
 
       - name: Publish the listing
         if: steps.key.outputs.present == 'true'
