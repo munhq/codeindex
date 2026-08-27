@@ -101,6 +101,13 @@ jobs:
           PKG=$(node -p "require('./npm/package.json').version")
           SRV=$(node -p "require('./server.json').version")
           SRVPKG=$(node -p "require('./server.json').packages[0].version")
+          MCPNAME=$(node -p "require('./npm/package.json').mcpName || ''")
+          SRVNAME=$(node -p "require('./server.json').name")
+          if [ "$MCPNAME" != "$SRVNAME" ]; then
+            echo "::error::npm/package.json mcpName is '$MCPNAME', server.json name is '$SRVNAME'."
+            echo "::error::The official registry rejects the manifest unless the npm package names the server back."
+            exit 1
+          fi
           for pair in "server.json:$SRV" "server.json/packages:$SRVPKG"; do
             if [ "${pair#*:}" != "$PKG" ]; then
               echo "::error::${pair%%:*} says ${pair#*:}, npm/package.json says $PKG"

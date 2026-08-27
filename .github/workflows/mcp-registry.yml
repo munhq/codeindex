@@ -53,6 +53,16 @@ jobs:
           SRV=$(node -p "require('./server.json').version")
           PKG=$(node -p "require('./server.json').packages[0].version")
           NPM=$(node -p "require('./npm/package.json').version")
+          # The registry verifies ownership by reading mcpName out of the
+          # PUBLISHED tarball, so a mismatch here means a 400 after npm has
+          # already served an immutable version. v0.3.2 was published without
+          # it and could not be fixed — the field only ships in a new version.
+          MCPNAME=$(node -p "require('./npm/package.json').mcpName || ''")
+          NAME=$(node -p "require('./server.json').name")
+          if [ "$MCPNAME" != "$NAME" ]; then
+            echo "::error::npm/package.json mcpName is '$MCPNAME', server.json name is '$NAME'"
+            exit 1
+          fi
           for pair in "server.json/packages:$PKG" "npm/package.json:$NPM"; do
             if [ "${pair#*:}" != "$SRV" ]; then
               echo "::error::${pair%%:*} says ${pair#*:}, server.json says $SRV"
