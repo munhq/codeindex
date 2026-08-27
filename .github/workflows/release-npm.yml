@@ -1,24 +1,57 @@
 # Publish the npm wrapper on a version tag.
 #
-# The package contains no binary — 4 KB of JavaScript that resolves the release
-# asset for the platform, verifies its checksum and executes it. It exists
-# because every MCP directory installs servers the way npm installs them: the
-# official registry validates an npm version, Smithery runs `npx`, mcp.so lists
-# the same command. A compiled server with no npm name is invisible to all three.
+# The package carries no binary — 4 KB of JavaScript that resolves the release
+# asset for the platform, verifies it against the published SHA256SUMS and
+# executes it. It exists because every MCP directory installs servers the way npm
+# installs them: the official registry validates an npm version, Smithery runs
+# `npx`, mcp.so lists the same command. A compiled server with no npm name is
+# invisible to all three.
 #
-# Ordering matters and is enforced, not assumed. The wrapper downloads from the
-# tag it is versioned as, so publishing it before release.yml has uploaded the
-# assets ships a package that 404s for every user who installs in that window.
-# This waits for the assets instead of racing them.
+# ── Authentication, and why it is in two phases ───────────────────────────────
+#
+# The destination is Trusted Publishing (OIDC): npm accepts a publish proven by a
+# short-lived token GitHub mints for THIS repo and THIS workflow file, so no npm
+# token exists to leak or rotate. `id-token: write` below is what mints it.
+#
+# It cannot be phase one. A trusted publisher is configured on the package's
+# settings page at npmjs.com, and a package that has never been published has no
+# settings page. So:
+#
+#   Phase 1, once: an NPM_TOKEN secret in this repo publishes the first version.
+#     npmjs.com -> Access Tokens -> Generate -> Granular, packages: codeindex-mcp,
+#     permission: Read and write. Paste it at
+#     github.com/munhq/codeindex/settings/secrets/actions as NPM_TOKEN.
+#   Phase 2, once, then forever tokenless:
+#     npmjs.com -> Packages -> codeindex-mcp -> Settings -> Trusted Publisher
+#     Publisher: GitHub Actions | Owner: munhq | Repo: codeindex
+#     Workflow: release-npm.yml | Allowed actions: npm publish
+#     Then DELETE the NPM_TOKEN secret. This workflow switches by itself: the
+#     publish step uses the token only while the secret exists.
+#
+# Node 22 and npm 11.5.1 are MINIMUMS for OIDC. The rest of CI runs on whatever
+# the runner ships; pinning here means phase 2 fails with a version error rather
+# than a confusing auth error.
+#
+# ── Why this waits ───────────────────────────────────────────────────────────
+#
+# The wrapper downloads from the tag it is versioned as, so publishing it before
+# release.yml has uploaded the assets ships a package that 404s for everyone who
+# installs in that window. This waits for the assets instead of racing them.
 name: release-npm
 
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Pack and validate, but do not publish'
+        type: boolean
+        default: true
 
 permissions:
   contents: read
+  id-token: write   # load-bearing in phase 2: this is the OIDC proof
 
 jobs:
   publish:
@@ -28,21 +61,33 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          registry-url: 'https://registry.npmjs.org'
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'   # required: it writes the
+                                                       # .npmrc both auth paths
+                                                       # read
+
+      - name: npm must be new enough for OIDC
+        run: |
+          npm install -g npm@latest
+          npm --version
 
       # The package version must equal the tag, or the wrapper downloads from a
-      # tag that does not exist. Checked here rather than trusted, because the
-      # two are edited in different files by different hands.
-      - name: The package version must match the tag
+      # tag that does not exist. Checked rather than trusted: three files carry
+      # the number and they are edited by different hands.
+      - name: Versions must agree with the tag
+        if: github.ref_type == 'tag'
         run: |
           TAG="${GITHUB_REF_NAME#v}"
           PKG=$(node -p "require('./npm/package.json').version")
-          if [ "$TAG" != "$PKG" ]; then
-            echo "tag v$TAG does not match npm/package.json $PKG" >&2
-            exit 1
-          fi
-          echo "publishing @munhq/codeindex@$PKG"
+          SRV=$(node -p "require('./server.json').version")
+          SRVPKG=$(node -p "require('./server.json').packages[0].version")
+          for pair in "npm/package.json:$PKG" "server.json:$SRV" "server.json/packages:$SRVPKG"; do
+            if [ "${pair#*:}" != "$TAG" ]; then
+              echo "::error::${pair%%:*} says ${pair#*:}, tag says $TAG"
+              exit 1
+            fi
+          done
+          echo "all three agree on $TAG"
 
       - name: The resolver must still match the release matrix
         run: bash plugin/test_platform.sh
@@ -51,6 +96,7 @@ jobs:
       # for the checksum file: it is written last, after every asset is uploaded,
       # so its presence means the whole set is there.
       - name: Wait for the release assets
+        if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -63,33 +109,64 @@ jobs:
             echo "waiting for $GITHUB_REF_NAME assets ($i/60)"
             sleep 20
           done
-          echo "release assets never appeared after 20 minutes" >&2
+          echo "::error::release assets never appeared after 20 minutes"
           exit 1
 
-      # Prove the published package actually works before publishing it: fetch
-      # the real asset for this runner from the real release and run the real
-      # handshake. A wrapper that resolves the wrong name fails here rather than
-      # in a stranger's editor.
+      # Prove the thing being published actually works: fetch the real asset for
+      # this runner from the real release and complete a real handshake. A
+      # wrapper that resolves the wrong asset name fails here rather than in a
+      # stranger's editor, which is how the Mac 404 escaped once already.
       - name: The wrapper must fetch and start the server
+        if: github.ref_type == 'tag'
+        working-directory: npm
         run: |
-          cd npm
           node bin/postinstall.js
           printf '%s\n' \
             '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"0"}}}' \
-            | timeout 60 node bin/codeindex-mcp.js > handshake.json
+            | timeout 120 node bin/codeindex-mcp.js > handshake.json
           node -e '
-            const r = JSON.parse(require("fs").readFileSync("handshake.json","utf8").split("\n")[0]);
-            const got = r.result.serverInfo;
+            const fs = require("fs");
+            const line = fs.readFileSync("handshake.json", "utf8").split("\n").find(Boolean);
+            const got = JSON.parse(line).result.serverInfo;
             const want = require("./package.json").version;
             if (got.name !== "codeindex" || got.version !== want) {
-              console.error("handshake says", got, "expected codeindex", want);
+              console.error(`::error::handshake says ${got.name} ${got.version}, expected codeindex ${want}`);
               process.exit(1);
             }
-            console.log("handshake ok:", got.name, got.version);
+            console.log(`handshake ok: ${got.name} ${got.version}`);
           '
+          rm -f handshake.json
 
-      - name: Publish
+      - name: Pack (dry run)
+        if: inputs.dry_run
         working-directory: npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --access public
+        run: npm publish --dry-run --access public
+
+      # --provenance attests that the tarball came from this commit and this
+      # workflow, which is most of the reason to publish from CI at all. It needs
+      # a PUBLIC repo: npm cannot verify an attestation whose source nobody can
+      # read. Decided from the repository's own visibility rather than a
+      # hand-maintained flag.
+      #
+      # The token path and the OIDC path differ by one thing: whether
+      # NODE_AUTH_TOKEN is set. Phase 2 begins the moment the secret is deleted,
+      # with no edit here.
+      - name: Publish
+        if: '!inputs.dry_run'
+        working-directory: npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -n "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "publishing with the NPM_TOKEN secret (phase 1)"
+          else
+            echo "no NPM_TOKEN secret — publishing with trusted publishing (OIDC)"
+          fi
+          if [ "${{ github.event.repository.private }}" = "false" ]; then
+            npm publish --access public --provenance
+          else
+            echo "::warning::repo is private, publishing WITHOUT provenance"
+            npm publish --access public
+          fi

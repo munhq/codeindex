@@ -5,7 +5,7 @@
 // directory installs servers the way npm installs them. The official registry
 // validates an npm version, Smithery runs `npx`, and mcp.so lists the same
 // command. A compiled server with no npm name is invisible to all three, so this
-// package is the thin shim that makes `npx -y @munhq/codeindex` work — about
+// package is the thin shim that makes `npx -y codeindex-mcp` work — about
 // 4 KB of JavaScript that fetches the 53 MB binary the release already publishes.
 //
 // Write NOTHING to stdout. Stdout is the MCP JSON-RPC channel; one stray line

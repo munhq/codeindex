@@ -1,4 +1,4 @@
-# @munhq/codeindex
+# codeindex-mcp
 
 Structural code intelligence for AI coding agents, as an MCP server. It answers
 "where is X defined", "show me this function", "what calls it" and "what breaks
@@ -6,7 +6,7 @@ if I change this file" in tens of tokens, instead of the ~1,563 a file read
 costs. tree-sitter across 40+ languages, 16 MCP tools, MIT.
 
 ```
-npx -y @munhq/codeindex
+npx -y codeindex-mcp
 ```
 
 No account, no API key, no configuration.
@@ -16,7 +16,7 @@ No account, no API key, no configuration.
 Claude Code:
 
 ```
-claude mcp add codeindex -- npx -y @munhq/codeindex
+claude mcp add codeindex -- npx -y codeindex-mcp
 ```
 
 Anything that reads a JSON config (Claude Desktop, Cursor, Windsurf, Zed, Cline):
@@ -26,7 +26,7 @@ Anything that reads a JSON config (Claude Desktop, Cursor, Windsurf, Zed, Cline)
   "mcpServers": {
     "codeindex": {
       "command": "npx",
-      "args": ["-y", "@munhq/codeindex"]
+      "args": ["-y", "codeindex-mcp"]
     }
   }
 }

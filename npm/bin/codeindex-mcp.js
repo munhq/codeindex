@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // The MCP server entry point: resolve the binary, then become it.
 //
-// `npx -y @munhq/codeindex` lands here. Every argument is passed straight
+// `npx -y codeindex-mcp` lands here. Every argument is passed straight
 // through, so `--workspace`, `--mcp` and anything the server grows later work
 // without this file knowing about them.
 'use strict';
