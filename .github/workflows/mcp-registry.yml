@@ -62,9 +62,9 @@ jobs:
       - name: Wait for the npm version to be visible
         run: |
           VERSION=$(node -p "require('./server.json').version")
-          echo "waiting for @munhq/codeindex@$VERSION on npm"
+          echo "waiting for codeindex-mcp@$VERSION on npm"
           for i in $(seq 1 60); do
-            if npm view "@munhq/codeindex@$VERSION" version >/dev/null 2>&1; then
+            if npm view "codeindex-mcp@$VERSION" version >/dev/null 2>&1; then
               echo "npm has $VERSION"
               exit 0
             fi
