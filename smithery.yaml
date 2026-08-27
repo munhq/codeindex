@@ -36,7 +36,7 @@ startCommand:
       // The binary is not JavaScript: this npm package is a 4 KB wrapper that
       // fetches the release asset for the platform and executes it. `-y` so an
       // install never waits for a prompt no one is watching.
-      args: ['-y', 'codeindex-mcp'],
+      args: ['-y', '@munhq/codeindex'],
       env: config.workspace ? { CODEINDEX_WORKSPACE: config.workspace } : {},
     })
 

@@ -75,9 +75,9 @@ jobs:
         env:
           VERSION: ${{ steps.v.outputs.version }}
         run: |
-          echo "waiting for codeindex-mcp@$VERSION on npm"
+          echo "waiting for @munhq/codeindex@$VERSION on npm"
           for i in $(seq 1 60); do
-            if npm view "codeindex-mcp@$VERSION" version >/dev/null 2>&1; then
+            if npm view "@munhq/codeindex@$VERSION" version >/dev/null 2>&1; then
               echo "npm has $VERSION"
               exit 0
             fi
