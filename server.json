@@ -1,0 +1,31 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.munhq/codeindex",
+  "title": "codeindex",
+  "description": "Structural code intelligence over MCP: symbols, callers, imports and blast radius, 40+ languages.",
+  "repository": {
+    "url": "https://github.com/munhq/codeindex",
+    "source": "github"
+  },
+  "version": "0.3.2",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@munhq/codeindex",
+      "version": "0.3.2",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "CODEINDEX_WORKSPACE",
+          "description": "Directory to index. Defaults to the enclosing project root of wherever the client starts the server, which is the right answer for every editor and agent that launches it inside a repository. Set it only when the server runs somewhere other than the code.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        }
+      ],
+      "runtimeHint": "npx"
+    }
+  ]
+}
