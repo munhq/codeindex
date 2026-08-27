@@ -30,7 +30,7 @@
 #        publish in about 20 seconds. It says which checks it skipped rather than
 #        passing quietly, and they are the ones a tag push always runs.
 #   Phase 2, once, then forever tokenless:
-#     npmjs.com -> Packages -> codeindex-mcp -> Settings -> Trusted Publisher
+#     npmjs.com -> Packages -> @munhq/codeindex -> Settings -> Trusted Publisher
 #     Publisher: GitHub Actions | Owner: munhq | Repo: codeindex
 #     Workflow: release-npm.yml | Allowed actions: npm publish
 #     Then DELETE the NPM_TOKEN secret. This workflow switches by itself: the
@@ -112,7 +112,7 @@ jobs:
             exit 1
           fi
           echo "version=$PKG" >> "$GITHUB_OUTPUT"
-          echo "publishing codeindex-mcp@$PKG against release v$PKG"
+          echo "publishing @munhq/codeindex@$PKG against release v$PKG"
 
       - name: The resolver must still match the release matrix
         run: bash plugin/test_platform.sh
