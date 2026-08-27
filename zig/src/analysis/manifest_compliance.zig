@@ -95,8 +95,7 @@ pub fn analyze(allocator: std.mem.Allocator, exp: *explorer.Explorer) !Report {
             // table is keyed by a CRATE NAME, so its key can never be a
             // credential — and this is where every false positive came from.
             if (is_cargo and line.len > 2 and line[0] == '[') {
-                section_is_deps = containsInsensitive(line, "dependencies")
-                    or containsInsensitive(line, "[features]");
+                section_is_deps = containsInsensitive(line, "dependencies") or containsInsensitive(line, "[features]");
                 continue;
             }
             if (section_is_deps) continue;
@@ -162,12 +161,12 @@ pub fn analyze(allocator: std.mem.Allocator, exp: *explorer.Explorer) !Report {
 /// the one that mattered: it contains "key", and its VALUE is a list of words
 /// that routinely includes "token" or "secret" for a security-adjacent crate.
 const metadata_keys = [_][]const u8{
-    "name",          "version",     "edition",     "description", "keywords",
-    "categories",    "documentation", "homepage",  "repository",  "authors",
-    "license",       "license-file", "readme",     "exclude",     "include",
-    "rust-version",  "publish",     "workspace",   "default",     "scripts",
-    "dependencies",  "devDependencies", "peerDependencies",       "main",
-    "module",        "types",       "files",       "engines",     "bin",
+    "name",         "version",         "edition",          "description", "keywords",
+    "categories",   "documentation",   "homepage",         "repository",  "authors",
+    "license",      "license-file",    "readme",           "exclude",     "include",
+    "rust-version", "publish",         "workspace",        "default",     "scripts",
+    "dependencies", "devDependencies", "peerDependencies", "main",        "module",
+    "types",        "files",           "engines",          "bin",
 };
 
 fn isMetadataKey(key: []const u8) bool {
@@ -185,13 +184,18 @@ fn normalizeKey(key: []const u8, out: []u8) ?[]const u8 {
     for (key, 0..) |c, i| {
         if (n + 2 > out.len) return null;
         if (c == '-' or c == '.' or c == '/' or c == ' ' or c == '_') {
-            if (n > 0 and out[n - 1] != '_') { out[n] = '_'; n += 1; }
+            if (n > 0 and out[n - 1] != '_') {
+                out[n] = '_';
+                n += 1;
+            }
             continue;
         }
         // camelCase boundary: a capital preceded by a lowercase or digit.
-        if (std.ascii.isUpper(c) and i > 0
-            and (std.ascii.isLower(key[i - 1]) or std.ascii.isDigit(key[i - 1]))) {
-            if (n > 0 and out[n - 1] != '_') { out[n] = '_'; n += 1; }
+        if (std.ascii.isUpper(c) and i > 0 and (std.ascii.isLower(key[i - 1]) or std.ascii.isDigit(key[i - 1]))) {
+            if (n > 0 and out[n - 1] != '_') {
+                out[n] = '_';
+                n += 1;
+            }
         }
         out[n] = std.ascii.toLower(c);
         n += 1;
@@ -235,7 +239,7 @@ fn keyLooksLikeCredential(key: []const u8) bool {
 /// A credential-named key is not enough on its own: `[features] api_key = []`
 /// and `password = "${DB_PASSWORD}"` both name a credential and expose nothing.
 fn valueLooksLikeSecret(value: []const u8) bool {
-    if (value.len < 8) return false;                    // too short to be a live secret
+    if (value.len < 8) return false; // too short to be a live secret
     if (value[0] == '{' or value[0] == '[') return false; // inline table / list
     if (std.mem.startsWith(u8, value, "dep:")) return false;
     // Env indirection and placeholders — the point of both is that the real
@@ -244,14 +248,12 @@ fn valueLooksLikeSecret(value: []const u8) bool {
     if (std.mem.indexOf(u8, value, "<") != null) return false;
     if (std.mem.startsWith(u8, value, "env:")) return false;
     if (std.mem.startsWith(u8, value, "process.env")) return false;
-    for ([_][]const u8{ "changeme", "replace_me", "replace-me", "your_", "your-",
-                        "example", "dummy", "placeholder", "xxxx", "todo" }) |p| {
+    for ([_][]const u8{ "changeme", "replace_me", "replace-me", "your_", "your-", "example", "dummy", "placeholder", "xxxx", "todo" }) |p| {
         if (containsInsensitive(value, p)) return false;
     }
     // A version requirement: ^1.2, ~0.5, >=1, 1.2.3.
     const first = value[0];
-    if (std.ascii.isDigit(first) or first == '^' or first == '~'
-        or first == '>' or first == '<' or first == '=') return false;
+    if (std.ascii.isDigit(first) or first == '^' or first == '~' or first == '>' or first == '<' or first == '=') return false;
     // Prose rather than a token.
     if (std.mem.indexOfScalar(u8, value, ' ') != null) return false;
     return true;
@@ -319,7 +321,7 @@ test "valueLooksLikeSecret rejects versions, placeholders and env lookups" {
     try t.expect(!valueLooksLikeSecret("env:STRIPE_SECRET"));
     try t.expect(!valueLooksLikeSecret("<your-key-here>"));
     try t.expect(!valueLooksLikeSecret("REPLACE_ME_WITH_A_KEY"));
-    try t.expect(!valueLooksLikeSecret("short"));           // under the length floor
+    try t.expect(!valueLooksLikeSecret("short")); // under the length floor
     try t.expect(!valueLooksLikeSecret("{ version = 9 }")); // inline table
     try t.expect(!valueLooksLikeSecret("the account password is rotated"));
 }
