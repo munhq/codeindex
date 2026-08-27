@@ -87,11 +87,21 @@ def main():
         tool(7, "get_imports", {"path": "app.py"}),
         tool(8, "get_outline", {"path": "a.ts"}),
         tool(9, "get_tree", {}),
+        # Standard MCP methods this server does not implement. A client that
+        # probes them on connect — Antigravity does — waited forever for a reply
+        # that never came, because the dispatch chain fell off the end instead of
+        # answering. JSON-RPC 2.0 §5: every REQUEST must be answered.
+        {"jsonrpc": "2.0", "id": 10, "method": "resources/list", "params": {}},
+        {"jsonrpc": "2.0", "id": 11, "method": "prompts/list", "params": {}},
+        # ...and the other half of §5: a NOTIFICATION has no id and must be
+        # answered with nothing at all. A fix that replies to everything would
+        # pass the two checks above and still be wrong.
+        {"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {}},
     ]
     m = rpc(ws, calls)
 
     # Envelope checks: every response well-formed JSON-RPC.
-    for i in range(1, 10):
+    for i in range(1, 12):
         check(i in m, f"response {i} received")
         if i in m:
             check(m[i].get("jsonrpc") == "2.0", f"response {i} jsonrpc=2.0")
@@ -114,6 +124,20 @@ def main():
     check("helpers.py" in text(m[7]), "python import resolves to helpers.py")
     check(json.loads(text(m[8])).get("symbols"), "ts outline has symbols")
     check(json.loads(text(m[9])), "get_tree returns valid JSON array")
+
+    # Unknown methods: an error, the right code, and the method named back so the
+    # client's log says which call it was.
+    for i, method in ((10, "resources/list"), (11, "prompts/list")):
+        err = m.get(i, {}).get("error", {})
+        check(err.get("code") == -32601,
+              f"{method} answered with -32601 (got {err.get('code')})")
+        check(method in (err.get("message") or ""),
+              f"{method} error message names the method (got {err.get('message')!r})")
+        check("result" not in m.get(i, {}), f"{method} did not also return a result")
+
+    # A reply to a notification would arrive as id:null, which rpc() records
+    # under the key None.
+    check(None not in m, "a notification got no reply")
 
     print()
     if failures:
