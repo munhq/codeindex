@@ -46,11 +46,32 @@ jobs:
             echo "present=true" >> "$GITHUB_OUTPUT"
           fi
 
+      # A listing whose install command 404s is worse than no listing. The card
+      # says `npx -y @munhq/codeindex`, so the version must actually be on npm before
+      # this publishes — release-npm runs on the same tag with no ordering
+      # between them, and a first publish can be blocked on a missing token.
+      - name: The npm version must be live
+        if: steps.key.outputs.present == 'true'
+        id: npmlive
+        run: |
+          VERSION=$(node -p "require('./npm/package.json').version")
+          for i in $(seq 1 30); do
+            if npm view "@munhq/codeindex@$VERSION" version >/dev/null 2>&1; then
+              echo "npm has $VERSION"
+              echo "live=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep 20
+          done
+          echo "::warning::@munhq/codeindex@$VERSION is not on npm, so the Smithery listing was NOT updated."
+          echo "::warning::Its install command would have 404'd for everyone who tried it."
+          echo "live=false" >> "$GITHUB_OUTPUT"
+
       # The release job builds and attaches the bundle, so it is downloaded here
       # rather than rebuilt: the listing then describes the exact artefact users
       # can install, not a second build of it.
       - name: Fetch the release bundle and binary
-        if: steps.key.outputs.present == 'true'
+        if: steps.key.outputs.present == 'true' && steps.npmlive.outputs.live == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -75,12 +96,12 @@ jobs:
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
 
       - name: Capture the tool card from the released binary
-        if: steps.key.outputs.present == 'true'
+        if: steps.key.outputs.present == 'true' && steps.npmlive.outputs.live == 'true'
         run: |
           node npm/capture-card.mjs --out card.json -- ./codeindex-x86_64-linux --mcp --workspace .
 
       - name: Publish the listing
-        if: steps.key.outputs.present == 'true'
+        if: steps.key.outputs.present == 'true' && steps.npmlive.outputs.live == 'true'
         env:
           SMITHERY_API_KEY: ${{ secrets.SMITHERY_API_KEY }}
         run: node npm/publish-smithery.mjs --card card.json --bundle "codeindex-$VERSION.mcpb"
