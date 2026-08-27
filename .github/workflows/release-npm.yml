@@ -170,6 +170,19 @@ jobs:
           '
           rm -f handshake.json
 
+      # E403 "You do not have permission to publish" says nothing about WHICH of
+      # the three possible causes it is: a name someone else owns, a token from
+      # the wrong account, or a token whose Packages-and-scopes selector does not
+      # cover a package that does not exist yet. These two lines separate them,
+      # and they print a username and package names — never the token.
+      - name: Who does the token belong to
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          echo "whoami: $(npm whoami 2>&1 | head -1)"
+          echo "writable packages (first 10):"
+          npm access list packages 2>&1 | head -10 || true
+
       - name: Pack (dry run)
         if: inputs.dry_run
         working-directory: npm
