@@ -1,4 +1,21 @@
 {
   "$schema": "https://glama.ai/mcp/schemas/server.json",
-  "maintainers": ["darkkraft"]
+  "maintainers": ["darkkraft"],
+  "name": "codeindex",
+  "description": "Structural code intelligence over MCP — where a symbol is defined, the body of one function, what calls it, imports in both directions, and what a change breaks, instead of reading whole files. tree-sitter across 40+ languages, 16 tools, no account or key and nothing to configure.",
+  "category": "code-analysis",
+  "tags": [
+    "mcp",
+    "code-analysis",
+    "developer-tools",
+    "tree-sitter",
+    "code-search",
+    "static-analysis",
+    "context-window"
+  ],
+  "license": "MIT",
+  "repository": "https://github.com/munhq/codeindex",
+  "runtime": "node",
+  "entryPoint": "npx -y @munhq/codeindex",
+  "environmentVariables": []
 }
