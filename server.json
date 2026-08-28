@@ -7,12 +7,21 @@
     "url": "https://github.com/munhq/codeindex",
     "source": "github"
   },
-  "version": "0.3.3",
+  "version": "0.3.4",
+  "icons": [
+    {
+      "src": "https://raw.githubusercontent.com/munhq/codeindex/main/docs/brand/icon-512.png",
+      "mimeType": "image/png",
+      "sizes": [
+        "512x512"
+      ]
+    }
+  ],
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@munhq/codeindex",
-      "version": "0.3.3",
+      "version": "0.3.4",
       "transport": {
         "type": "stdio"
       },
