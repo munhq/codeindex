@@ -1,6 +1,6 @@
 {
   "name": "@munhq/codeindex",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "mcpName": "io.github.munhq/codeindex",
   "description": "Structural code intelligence for AI coding agents over MCP: find a definition, read one function, see what calls a symbol, trace imports and judge a change's blast radius across 40+ languages \u2014 in tens of tokens instead of the ~1,563 a file read costs.",
   "keywords": [
