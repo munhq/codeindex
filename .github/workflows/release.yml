@@ -131,7 +131,7 @@ jobs:
           chmod +x "$BIN"
           # Declare the tool list the server really advertises by asking the
           # binary being released, rather than a copy in a manifest that drifts.
-          node npm/capture-card.mjs --out card.json -- ./artifacts/codeindex-x86_64-linux/codeindex-x86_64-linux --mcp --workspace src
+          node src/npm/capture-card.mjs --out card.json -- ./artifacts/codeindex-x86_64-linux/codeindex-x86_64-linux --mcp --workspace src
           VERSION=$(node -p "require('./src/npm/package.json').version")
           node src/npm/build-mcpb.mjs --card card.json --out "artifacts/codeindex-$VERSION.mcpb"
 
