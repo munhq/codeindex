@@ -77,6 +77,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # A release bumps the version by hand in six places. 0.3.4 bumped five and
+      # missed .cursor-plugin/marketplace.json, so the Cursor listing advertised
+      # 0.3.3 while npm served 0.3.5. Nothing compared the files, so nothing
+      # failed. This needs no build, so it runs before one.
+      - name: Every manifest must name one version
+        run: python3 check-versions.py
+
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0

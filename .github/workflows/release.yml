@@ -55,6 +55,13 @@ jobs:
         id: version
         run: echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
+      # The binary check below proves the BINARY matches the tag. The manifests
+      # are what the directories read, and they are edited by hand, so they can
+      # name an older release while the binary is right. One runner is enough.
+      - name: Every manifest must name the tag
+        if: matrix.target == 'x86_64-linux'
+        run: python3 check-versions.py "${{ steps.version.outputs.value }}"
+
       - name: Build
         run: |
           cd zig
