@@ -1,0 +1,17 @@
+{
+  "name": "codeindex",
+  "owner": {
+    "name": "munhq"
+  },
+  "metadata": {
+    "description": "Structural code intelligence for agents: symbol lookup, callers, imports and blast radius over 40+ languages, so an agent answers code questions without reading whole files.",
+    "version": "0.3.3"
+  },
+  "plugins": [
+    {
+      "name": "codeindex",
+      "source": "./plugin",
+      "description": "Skills that teach any agent to answer code questions structurally instead of reading whole files — symbol lookup, callers, imports and blast radius. Bundles the codeindex MCP server so install wires everything in one step."
+    }
+  ]
+}
