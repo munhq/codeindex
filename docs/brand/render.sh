@@ -61,6 +61,10 @@ echo "wrote icon-512.png and icon-128.png (the two anything references)"
 if [ "${1:-}" = "--all" ]; then
     out="$(mktemp -d)"
     shot logo.svg 470 140 "$out/logo-470.png" 2 0
+    # GitHub's social preview: 1280x640, uploaded once through repo Settings.
+    # GitHub stores its own copy, so this is never committed — regenerate it here
+    # when the card changes.
+    shot social.svg 1280 640 "$out/social-1280x640.png" 1 1
     python3 - "$out" <<'PY'
 import sys
 from PIL import Image
@@ -69,5 +73,6 @@ im = Image.open('icon-512.png')
 for s in (256, 64, 32, 16):
     im.resize((s, s), Image.LANCZOS).save(f"{out}/icon-{s}.png")
 PY
-    echo "other sizes (not committed): $out"
+    echo "not committed, regenerate as needed: $out"
+    echo "  social-1280x640.png -> upload at Settings > Social preview"
 fi
