@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "codeindex": {
-      "command": "${CLAUDE_PLUGIN_ROOT}/bin/codeindex-launch",
-      "args": ["--mcp"]
+      "command": "npx",
+      "args": ["-y", "@munhq/codeindex"]
     }
   }
 }
