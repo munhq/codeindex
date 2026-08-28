@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" role="img" aria-label="codeindex — structural code intelligence for AI coding agents">
+  <title>codeindex</title>
+  <defs>
+    <linearGradient id="tile" x1="80" y1="248" x2="248" y2="80" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#4f46e5"/><stop offset="1" stop-color="#22d3ee"/>
+    </linearGradient>
+    <linearGradient id="rule" x1="80" y1="0" x2="720" y2="0" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#4f46e5"/><stop offset="1" stop-color="#22d3ee" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- GitHub renders these cards on both light and dark chrome, so the card
+       carries its own dark ground rather than inheriting one. -->
+  <rect width="1280" height="640" fill="#0b1020"/>
+
+  <!-- The mark, from icon.svg by transform — same reason the wordmark does it:
+       re-drawing is how three copies of a logo stop being the same logo.
+       168/512 = 0.328125 -->
+  <rect x="80" y="80" width="168" height="168" rx="46" fill="url(#tile)"/>
+  <g transform="translate(80 80) scale(0.328125)">
+    <g fill="none" stroke="#fff" stroke-linecap="round" stroke-linejoin="round">
+      <g stroke-width="34">
+        <path d="M170 128c-34 0-46 18-46 44v38c0 22-14 34-34 34 20 0 34 12 34 34v38c0 26 12 44 46 44"/>
+        <path d="M342 128c34 0 46 18 46 44v38c0 22 14 34 34 34-20 0-34 12-34 34v38c0 26-12 44-46 44"/>
+      </g>
+      <g stroke-width="30">
+        <path d="M259 226a38 38 0 1 0 0 60"/>
+        <path d="M300 232v56"/>
+        <path d="M300 194v2"/>
+      </g>
+    </g>
+  </g>
+
+  <g font-family="'Hanken Grotesk',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif">
+    <text x="288" y="152" font-size="86" font-weight="700" letter-spacing="-3" fill="#f6f8ff">codeindex</text>
+    <text x="288" y="212" font-size="34" font-weight="500" fill="#8ea0c4">Structural code intelligence for AI coding agents</text>
+
+    <rect x="80" y="316" width="640" height="3" fill="url(#rule)"/>
+
+    <!-- The claim that makes the project worth installing, stated as the measured
+         number rather than an adjective. -->
+    <text x="80" y="392" font-size="40" font-weight="600" fill="#f6f8ff">Answer code questions without reading whole files</text>
+    <text x="80" y="446" font-size="30" font-weight="400" fill="#8ea0c4">Where a symbol is defined · what calls it · what a change breaks</text>
+
+    <g font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace">
+      <text x="80" y="530" font-size="30" fill="#8ea0c4"><tspan fill="#22d3ee">read_symbol</tspan> 35 tokens <tspan fill="#4b5b7d">vs</tspan> 1,563 to read the file</text>
+      <text x="80" y="578" font-size="26" fill="#4b5b7d">npx -y @munhq/codeindex · tree-sitter, 40+ languages, MIT</text>
+    </g>
+  </g>
+</svg>
