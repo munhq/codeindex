@@ -2,7 +2,7 @@
 
 [![npm](https://img.shields.io/npm/v/%40munhq%2Fcodeindex?label=npm&color=cb3837)](https://www.npmjs.com/package/@munhq/codeindex)
 [![MCP Registry](https://img.shields.io/badge/MCP%20Registry-io.github.munhq%2Fcodeindex-000)](https://registry.modelcontextprotocol.io/v0/servers?search=codeindex)
-[![Smithery](https://img.shields.io/badge/Smithery-munhq%2Fcodeindex-7c3aed)](https://smithery.ai/server/munhq/codeindex)
+[![Smithery](https://img.shields.io/badge/Smithery-munhq%2Fcodeindex-7c3aed)](https://smithery.ai/servers/munhq/codeindex)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 [![Install in Cursor](https://img.shields.io/badge/Install-Cursor-000?logo=cursor)](cursor://anysphere.cursor-deeplink/mcp/install?name=codeindex&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsIkBtdW5ocS9jb2RlaW5kZXgiXX0=)
