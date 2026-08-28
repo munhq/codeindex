@@ -206,8 +206,25 @@ jobs:
       # The token path and the OIDC path differ by one thing: whether
       # NODE_AUTH_TOKEN is set. Phase 2 begins the moment the secret is deleted,
       # with no edit here.
+      # Publishing is not idempotent, and re-tagging is normal after a failed
+      # release: both tag pushes start a run, and if the first is still in its
+      # wait loop when the second release succeeds, BOTH reach this point. One
+      # publishes and the other dies on
+      # "403 You cannot publish over the previously published versions".
+      # A version already on npm means the job's work is done, not that it failed.
+      - name: Skip if npm already has this version
+        id: already
+        run: |
+          VERSION=$(node -p "require('./npm/package.json').version")
+          if npm view "@munhq/codeindex@$VERSION" version >/dev/null 2>&1; then
+            echo "::notice::@munhq/codeindex@$VERSION is already on npm — nothing to publish."
+            echo "done=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "done=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish
-        if: '!inputs.dry_run'
+        if: "!inputs.dry_run && steps.already.outputs.done != 'true'"
         working-directory: npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
