@@ -13,3 +13,10 @@ zig/vendor/
 .idea/
 .vscode/
 *.swp
+
+# Scratch that must never reach the public repo. Brand exports that nothing
+# references live here; docs/brand/render.sh regenerates them on demand.
+.local/
+
+# Browser automation leftovers
+.playwright-mcp/
