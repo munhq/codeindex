@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="codeindex">
+  <title>codeindex</title>
+  <defs>
+    <linearGradient id="ci" x1="64" y1="448" x2="448" y2="64" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#4f46e5"/><stop offset="1" stop-color="#22d3ee"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" fill="url(#ci)"/>
+  <!-- {ci}: braces for code, the initials inside.
+       The letters are drawn as strokes, not as <text>. A text element renders
+       differently wherever the font is missing, and this file is consumed by a
+       README, a favicon, an npm page, Smithery and Docker's catalogue — five
+       renderers with five font stacks. Strokes look the same in all of them.
+       Weights are heavy and the counters wide, because 32px is the size that
+       decides whether an icon reads. -->
+  <g fill="none" stroke="#fff" stroke-linecap="round" stroke-linejoin="round">
+    <g stroke-width="34">
+      <path d="M170 128c-34 0-46 18-46 44v38c0 22-14 34-34 34 20 0 34 12 34 34v38c0 26 12 44 46 44"/>
+      <path d="M342 128c34 0 46 18 46 44v38c0 22 14 34 34 34-20 0-34 12-34 34v38c0 26-12 44-46 44"/>
+    </g>
+    <g stroke-width="30">
+      <!-- c: an arc open to the right. Its leftmost point sits ~28px clear of the
+           brace — at 32px an earlier version touched it and the two read as one
+           blob. -->
+      <path d="M259 226a38 38 0 1 0 0 60"/>
+      <!-- i: stem and tittle -->
+      <path d="M300 232v56"/>
+      <path d="M300 194v2"/>
+    </g>
+  </g>
+</svg>
