@@ -1,4 +1,4 @@
-# @munhq/codeindex
+<img src="https://raw.githubusercontent.com/munhq/codeindex/main/docs/brand/logo.svg" alt="codeindex" width="235" height="70">
 
 Structural code intelligence for AI coding agents, as an MCP server. It answers
 "where is X defined", "show me this function", "what calls it" and "what breaks

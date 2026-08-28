@@ -72,6 +72,13 @@ try {
     repository: { type: 'git', url: 'https://github.com/munhq/codeindex' },
     license: 'MIT',
     keywords: ['mcp', 'code-intelligence', 'tree-sitter', 'context-window'],
+    // The bundle is what Claude Desktop installs, and its manifest is the only
+    // place that install can get an icon from. Referenced by URL rather than
+    // packed in, so the 4 KB bundle stays 4 KB.
+    icons: [
+      { src: 'https://raw.githubusercontent.com/munhq/codeindex/main/docs/brand/icon-128.png', size: '128x128' },
+      { src: 'https://raw.githubusercontent.com/munhq/codeindex/main/docs/brand/icon-512.png', size: '512x512' },
+    ],
     server: {
       type: 'node',
       entry_point: 'server/codeindex-mcp.js',
