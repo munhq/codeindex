@@ -1,4 +1,4 @@
-# codeindex
+<img src="docs/brand/logo.svg" alt="codeindex" width="235" height="70">
 
 [![npm](https://img.shields.io/npm/v/%40munhq%2Fcodeindex?label=npm&color=cb3837)](https://www.npmjs.com/package/@munhq/codeindex)
 [![MCP Registry](https://img.shields.io/badge/MCP%20Registry-io.github.munhq%2Fcodeindex-000)](https://registry.modelcontextprotocol.io/v0/servers?search=codeindex)
