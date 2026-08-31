@@ -25,9 +25,14 @@
 #     it cannot parse, a command it cannot classify — degrades to silence, never
 #     to a broken tool call.
 #
-# Fires ONCE per session, and only for a command that a structural tool actually
-# answers better. A reminder on every read would spend more context than the
-# tools save, which would make this hook self-defeating.
+# Fires on the 1st, 8th and 25th code question of a session, and only for a
+# command that a structural tool actually answers better. A reminder on every
+# read would spend more context than the tools save, which would make this hook
+# self-defeating; one reminder per session proved too few. Measured on the
+# session that prompted this change: 17 code questions went to grep, the hook
+# spent its single chance on the first of them, and the routing never changed.
+# The 8th and 25th are one line each. An agent that has passed over three
+# reminders is deciding, not forgetting, and a fourth would only cost context.
 set -u
 
 STATE_DIR="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/codeindex-hints"
@@ -244,11 +249,46 @@ SEGMENTS
     return 1
 }
 
+# How many real commands a line runs. Enforcement (below) refuses a scan only
+# when the scan is the whole line: `cd /repo; npm test; grep -rn Foo src/` also
+# runs the test suite, and refusing that would refuse the work as well as the
+# scan. `cd`, `echo`, `printf` and `pwd` do not count — the agent writes those to
+# frame a command, not to do anything.
+count_real_segments() {
+    _n=0
+    while IFS= read -r _line; do
+        while [ -n "$_line" ]; do
+            case "$_line" in
+                *"|"*) _seg="${_line%%|*}"; _line="${_line#*|}" ;;
+                *)     _seg="$_line";      _line="" ;;
+            esac
+            for _tok in $_seg; do
+                case "$_tok" in
+                    *=*) continue ;;
+                esac
+                case "${_tok##*/}" in
+                    cd|echo|printf|pwd|true|:) ;;
+                    *) _n=$((_n + 1)) ;;
+                esac
+                break
+            done
+        done
+    done <<SEGS
+$(printf '%s' "${1%%<<*}" | tr ';&<>' '\n\n\n\n')
+SEGS
+    printf '%s' "$_n"
+}
+
 # Exercised directly by plugin/test_hint.sh and cross-checked against the
 # Python classifier in plugin/measure_routing.py, so the hint and the
 # measurement never disagree about what counts as a code question.
 if [ "${1:-}" = "--classify" ]; then
     classify_command "${2:-}" || exit 1
+    exit 0
+fi
+if [ "${1:-}" = "--segments" ]; then
+    count_real_segments "${2:-}"
+    printf '\n'
     exit 0
 fi
 
@@ -319,16 +359,118 @@ case "$tool" in
         ;;
 esac
 
-# ── Once per session ──────────────────────────────────────────────────────────
-# The marker is written only when a hint is actually printed. It used to be
-# written before the decision, so a call that produced no hint still spent the
-# session's one chance and the real miss later went unaddressed.
+# ── Enforcement ──────────────────────────────────────────────────────────────
+# A reminder is advice, and advice loses to habit. Measured with
+# plugin/measure_routing.py over one machine's last two days: 215 code questions
+# went to a scan, 2 went to the index, and the reminder had fired in 9 of the 12
+# sessions. Three reminders would have made that four. So the narrow case where
+# the index is strictly better is refused rather than argued with.
+#
+# ON by default, and switched off in one click: `enforce` is a plugin option
+# (plugin.json → userConfig), which Claude Code exports to this hook as
+# CLAUDE_PLUGIN_OPTION_ENFORCE. Nobody edits a settings file by hand to get this
+# behaviour, and nobody edits one to be rid of it. CODEINDEX_ENFORCE overrides
+# the option, for an install without the plugin or a single session.
+#
+# Deliberately narrow, in three ways that keep it from ever being the reason a
+# session cannot proceed:
+#   1. Searches only. A pre-edit read has no structural equivalent — the harness
+#      requires the exact bytes before an Edit — so `kind=file` is never refused.
+#   2. Only when the scan is the whole command line, so a line that also builds
+#      or tests is never refused for the grep at the end of it.
+#   3. Only while a snapshot exists for THIS project, and at most three times per
+#      session. After that the hook goes back to advice, so an agent can always
+#      finish its work even when the index is wrong or absent.
+enforce_on() {
+    # The env var wins where it is set; the plugin option decides otherwise.
+    # A boolean plugin option's exported spelling is not specified, so every
+    # plausible negative spelling counts as off and everything else as on.
+    _enforce="${CODEINDEX_ENFORCE:-}"
+    [ -n "$_enforce" ] || _enforce="${CLAUDE_PLUGIN_OPTION_ENFORCE:-}"
+    case "$_enforce" in
+        0 | false | FALSE | False | no | NO | off | OFF) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+DENY_LIMIT=3
+
+if [ "$kind" = ident ] && enforce_on; then
+    project_root="${CLAUDE_PROJECT_DIR:-$PWD}"
+    if [ -f "$project_root/.codeindex.json" ]; then
+        sole=1
+        if [ "$tool" = Bash ]; then
+            [ "$(count_real_segments "$command_str")" = 1 ] || sole=0
+        fi
+        if [ "$sole" = 1 ]; then
+            dkey="$(printf '%s' "$session" | tr -c 'A-Za-z0-9._-' '_')"
+            dmarker="$STATE_DIR/$dkey.deny"
+            mkdir -p "$STATE_DIR" 2>/dev/null || exit 0
+            denied=0
+            if [ -r "$dmarker" ]; then
+                denied="$(cat "$dmarker" 2>/dev/null)"
+                case "$denied" in
+                    '' | *[!0-9]*) denied=0 ;;
+                esac
+            fi
+            if [ "$denied" -lt "$DENY_LIMIT" ]; then
+                printf '%s' "$((denied + 1))" > "$dmarker" 2>/dev/null || exit 0
+                # One line of JSON, and nothing else: stdout is the decision
+                # channel here, not context. The reason IS what the model reads.
+                printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"codeindex answers this about %s%s"}}\n' \
+                    "$subject" \
+                    " in one call, and this scan was refused so it gets used: find_callers (what calls it), find_symbol (where it is defined), find_word (every mention). Call the tool by its bare name; your tool list shows the live prefix. If the result is empty, call status and check files > 0 and workspace = this repository, then index_workspace with the project path if it is not. If you truly need the raw scan, this hook stops refusing after $DENY_LIMIT refusals in a session."
+                exit 0
+            fi
+        fi
+    fi
+fi
+
+# ── Cadence ───────────────────────────────────────────────────────────────────
+# The marker counts the code questions of this session, and is written only when
+# a call actually carries one: a call that produced no hint must not advance the
+# count, or noise would consume the reminders that matter.
+HINT_ON="1 8 25"
+
 key="$(printf '%s' "$session" | tr -c 'A-Za-z0-9._-' '_')"
 marker="$STATE_DIR/$key"
 
 mkdir -p "$STATE_DIR" 2>/dev/null || exit 0
-[ -e "$marker" ] && exit 0
-: > "$marker" 2>/dev/null || exit 0
+seen=0
+if [ -r "$marker" ]; then
+    seen="$(cat "$marker" 2>/dev/null)"
+    # A marker from an older version of this hook is an empty file. Anything
+    # that is not a number restarts the count rather than breaking arithmetic.
+    case "$seen" in
+        '' | *[!0-9]*) seen=0 ;;
+    esac
+fi
+seen=$((seen + 1))
+printf '%s' "$seen" > "$marker" 2>/dev/null || exit 0
+
+due=0
+for n in $HINT_ON; do
+    [ "$seen" = "$n" ] && due=1
+done
+[ "$due" = 1 ] || exit 0
+
+# The first reminder explains. A later one only names the tool: by then the
+# agent has read the full form once, and repeating it would spend the tokens the
+# hook exists to save.
+if [ "$seen" != 1 ]; then
+    case "$kind" in
+        ident)
+            printf 'codeindex answers this about `%s` in one call: find_callers / find_symbol / find_word %s. Bare name; your tool list shows the prefix.\n' "$subject" "$subject"
+            ;;
+        file)
+            printf 'codeindex answers this about %s in one call: get_outline, then read_symbol for the one function you want.\n' "$subject"
+            ;;
+        *)
+            printf 'codeindex is still available: find_symbol / read_symbol / get_outline / find_word / find_callers answer this more cheaply than a scan.\n'
+            ;;
+    esac
+    exit 0
+fi
 
 # ── The hint ──────────────────────────────────────────────────────────────────
 # Name the tool that answers THIS question, with the identifier or path already

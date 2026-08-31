@@ -31,8 +31,8 @@ later turn.
 That fetches the prebuilt binary for the platform, installs the agent skill into
 every Claude Code home it finds, and registers the MCP server.
 
-As a Claude Code plugin, which ships the skill and a first-read hook with the
-server:
+As a Claude Code plugin, which ships the skill, a SessionStart routing brief and
+a PreToolUse hint with the server:
 
     claude plugin marketplace add munhq/codeindex
     claude plugin install codeindex@codeindex
@@ -107,6 +107,17 @@ Every file-scoped tool takes `path`, relative to the workspace root. It is never
 - `--workspace <dir>` / `CODEINDEX_WORKSPACE` — which project to index. The
   server refuses to index a home directory, a filesystem root, or a directory
   holding several unrelated repositories.
+- Without one of those, the workspace is resolved from `CLAUDE_PROJECT_DIR`, then
+  the launch directory, then the client's MCP `roots` — in `--mcp` mode the
+  launch directory belongs to the client and is often not the user's project.
+  `status` reports the effective root as `workspace`, so an index of the wrong
+  tree is visible rather than silently confident.
+- A refused workspace answers every query with the reason and the call that fixes
+  it (`index_workspace` with the project path), never with "no results".
+- The plugin hook refuses an identifier search that the index answers better, at
+  most three times per session, and never a file read. On by default; the
+  `enforce` plugin option turns it off, and `CODEINDEX_ENFORCE=0` overrides the
+  option for one environment.
 - `CODEINDEX_IDLE_EVICT_SECS` — idle seconds before in-RAM postings are released
   back to the OS; the next query rebuilds them. Default 300, 0 disables.
 - The index persists to `.codeindex.json` inside the workspace it describes, and

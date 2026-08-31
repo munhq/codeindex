@@ -15,6 +15,12 @@ pub const Config = struct {
     respect_gitignore: bool = true,
     skip_hidden: bool = true,
     mcp_mode: bool = false,
+    /// True when the caller named the workspace (`--workspace`, or a
+    /// CODEINDEX_WORKSPACE that is not empty and not "."). A default workspace
+    /// is only a guess about the launch directory, and in --mcp mode the client
+    /// chooses that directory, not the user — so main() is allowed to prefer a
+    /// better candidate over the default, and never over an explicit one.
+    workspace_explicit: bool = false,
     show_version: bool = false,
     show_help: bool = false,
     /// Idle window (seconds) after which the MCP server evicts its in-RAM
@@ -27,8 +33,17 @@ pub const Config = struct {
         var config = Config{};
 
         // Check env vars first
+        // An empty or "." value carries no information: it repeats the
+        // default. Treated as set, it suppressed the launch-directory
+        // resolution in main() and left the server indexing whatever directory
+        // the client happened to spawn it in.
         if (io.getEnv(allocator, "CODEINDEX_WORKSPACE")) |val| {
-            config.workspace_root = val;
+            if (val.len > 0 and !std.mem.eql(u8, val, ".")) {
+                config.workspace_root = val;
+                config.workspace_explicit = true;
+            } else {
+                allocator.free(val);
+            }
         }
 
         if (io.getEnv(allocator, "CODEINDEX_PROJECT_ID")) |val| {
@@ -67,6 +82,7 @@ pub const Config = struct {
             } else if (std.mem.eql(u8, arg, "--workspace")) {
                 if (args.next()) |val| {
                     config.workspace_root = val;
+                    config.workspace_explicit = true;
                 }
             } else if (std.mem.eql(u8, arg, "--project-id")) {
                 if (args.next()) |val| {

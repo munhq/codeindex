@@ -14,5 +14,13 @@
     "tree-sitter",
     "context",
     "mcp"
-  ]
+  ],
+  "userConfig": {
+    "enforce": {
+      "type": "boolean",
+      "title": "Refuse a scan the index answers better",
+      "description": "On: an identifier search that is the whole command line is refused, and the agent is given the structural call that answers it. Never refuses a file read, never refuses a line that also builds or tests, and stops after three refusals in a session. Off: the hooks only advise.",
+      "default": true
+    }
+  }
 }

@@ -480,6 +480,13 @@ pub const Explorer = struct {
         self.cache_order.append(self.allocator, file_id) catch {};
     }
 
+    /// Re-arm the indexing gate. Used when a workspace is adopted after the
+    /// launch directory was refused: queries block on this flag, and the
+    /// refusal path had already cleared it.
+    pub fn mark_indexing_started(self: *Explorer) void {
+        self.indexing = true;
+    }
+
     pub fn mark_indexing_complete(self: *Explorer) void {
         // Resolve the dependency graph in one pass now that every file is known.
         // Per-file resolution in add_file can only see files indexed *before* it,

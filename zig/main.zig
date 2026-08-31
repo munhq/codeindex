@@ -30,6 +30,42 @@ const project_markers = [_][]const u8{
     ".hg",        ".svn",
 };
 
+/// Why a candidate directory is not a workspace, or null when it is usable.
+/// Both the startup path and the client-supplied candidates run through this,
+/// so a directory refused at startup can never be adopted by another route.
+/// `is_guess` marks a directory nobody named explicitly — only a guess gets the
+/// repo-parent check, which exists to catch a stray marker in a folder of many
+/// repositories rather than to override a deliberate `--workspace`.
+fn workspace_refusal(allocator: std.mem.Allocator, eff_abs: []const u8, is_guess: bool) ?[]const u8 {
+    if (eff_abs.len <= 1) return "workspace resolves to the filesystem root";
+    const home = io.getEnv(allocator, "HOME");
+    defer if (home) |h| allocator.free(h);
+    if (home != null and std.mem.eql(u8, eff_abs, home.?)) return "workspace resolves to your home directory";
+    if (is_guess and looks_like_repo_parent(eff_abs)) {
+        // A marker exists here, but the directory is not itself a git repo and
+        // holds several independent repos — a parent/workspace folder (e.g. a
+        // stray package.json in a directory of checkouts). Indexing it would
+        // pull in every project at once.
+        return "the launch directory is not a git repo but contains several independent git repositories — it looks like a parent/workspace folder, not a single project";
+    }
+    return null;
+}
+
+/// Resolve one workspace candidate to a project root the guards allow, or null.
+/// Returns an owned absolute path. A null answer is not an error: the caller
+/// tries the next candidate, and only the last one produces a refusal message.
+pub fn usable_project_root(allocator: std.mem.Allocator, candidate: []const u8) ?[]u8 {
+    if (candidate.len == 0) return null;
+    const abs = io.realpathAlloc(allocator, candidate) catch return null;
+    defer allocator.free(abs);
+    const proj = find_project_root(allocator, abs) orelse return null;
+    if (workspace_refusal(allocator, proj, true) != null) {
+        allocator.free(proj);
+        return null;
+    }
+    return proj;
+}
+
 /// Walk up from `start_abs` looking for a project marker. Returns the owned
 /// absolute path of the enclosing project root, or null if none is found.
 fn find_project_root(allocator: std.mem.Allocator, start_abs: []const u8) ?[]u8 {
@@ -257,36 +293,59 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // repos). Indexing it pulls every project into one index (tens of thousands
     // of files) and makes import resolution quadratic. Flag it for refusal below
     // rather than silently scanning the lot.
+    //
+    // The launch directory is the LAST candidate, not the first. In --mcp mode
+    // the client picks it, and the client's choice is regularly not the user's
+    // project: Claude Code launches a plugin's MCP server from the plugin's own
+    // directory and a user-scope server from the config directory. Both walk up
+    // to something — a plugin's marketplace clone, or nothing at all — so this
+    // server indexed the wrong tree and said nothing, or indexed no tree and
+    // refused. Ask the client where the project is before guessing.
     var no_project_root = false;
-    if (std.mem.eql(u8, cfg.workspace_root, ".")) {
-        if (io.realpathAlloc(allocator, ".")) |abs| {
-            defer allocator.free(abs);
-            if (find_project_root(allocator, abs)) |proj| {
-                defer allocator.free(proj);
-                io.changeCurDir(proj) catch {};
-            } else {
-                no_project_root = true;
+    var workspace_source: []const u8 = if (cfg.workspace_explicit)
+        "--workspace / CODEINDEX_WORKSPACE"
+    else
+        "the launch directory";
+    if (!cfg.workspace_explicit) {
+        var resolved = false;
+
+        // Claude Code sets CLAUDE_PROJECT_DIR in every MCP server it spawns, to
+        // the project root, precisely because the working directory does not
+        // answer that question. Honour it in --mcp mode only: a person running
+        // the CLI in a directory means THAT directory, whatever a parent agent
+        // exported.
+        if (cfg.mcp_mode) {
+            if (io.getEnv(allocator, "CLAUDE_PROJECT_DIR")) |hint| {
+                defer allocator.free(hint);
+                if (usable_project_root(allocator, hint)) |proj| {
+                    defer allocator.free(proj);
+                    if (io.changeCurDir(proj)) |_| {
+                        resolved = true;
+                        workspace_source = "CLAUDE_PROJECT_DIR";
+                    } else |_| {}
+                }
             }
-        } else |_| {}
+        }
+
+        if (!resolved) {
+            if (io.realpathAlloc(allocator, ".")) |abs| {
+                defer allocator.free(abs);
+                if (find_project_root(allocator, abs)) |proj| {
+                    defer allocator.free(proj);
+                    io.changeCurDir(proj) catch {};
+                } else {
+                    no_project_root = true;
+                }
+            } else |_| {}
+        }
     }
 
     var refused_reason: ?[]const u8 = null;
     if (io.realpathAlloc(allocator, cfg.workspace_root)) |eff| {
         defer allocator.free(eff);
-        const home = io.getEnv(allocator, "HOME");
-        defer if (home) |h| allocator.free(h);
-        if (eff.len <= 1) {
-            refused_reason = "workspace resolves to the filesystem root";
-        } else if (home != null and std.mem.eql(u8, eff, home.?)) {
-            refused_reason = "workspace resolves to your home directory";
-        } else if (no_project_root) {
+        refused_reason = workspace_refusal(allocator, eff, std.mem.eql(u8, cfg.workspace_root, "."));
+        if (refused_reason == null and no_project_root) {
             refused_reason = "no enclosing project found (no .git/build.zig/package.json/Cargo.toml/go.mod/… marker walking up from the launch directory)";
-        } else if (std.mem.eql(u8, cfg.workspace_root, ".") and looks_like_repo_parent(eff)) {
-            // A marker exists here, but the directory is not itself a git repo
-            // and holds several independent repos — a parent/workspace folder
-            // (e.g. a stray package.json in ~/code). Indexing it would pull in
-            // every project at once.
-            refused_reason = "the launch directory is not a git repo but contains several independent git repositories — it looks like a parent/workspace folder, not a single project";
         }
     } else |_| {}
 
@@ -312,6 +371,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
     };
     defer allocator.free(workspace_abs);
     io.normalizeKey(workspace_abs);
+
+    if (refused_reason == null) {
+        std.debug.print("codeindex: workspace {s} (from {s})\n", .{ workspace_abs, workspace_source });
+    }
 
     // Every path key in the index is `join(root, rel)`, so the root form decides
     // the key form: a "." root produced "./main.zig" and `--workspace /abs`
@@ -473,6 +536,101 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
         var srv = server.Server.init(allocator, &exp);
         srv.with_parser(&parser, &f);
+        srv.with_workspace(workspace_abs, refused_reason, !cfg.workspace_explicit);
+
+        // A refused launch directory used to end the story: no index, no
+        // watcher, and every tool answering "No results" for the whole session.
+        // A launch directory in the WRONG project was worse — every tool
+        // answered confidently about a tree the user was not working in. The
+        // client knows where the project is, MCP `roots` is how it says so, and
+        // this is what turns that answer into the right index. Adoption
+        // replaces a guessed root only (see Server.workspace_is_guess).
+        const AdoptCtx = struct {
+            allocator: std.mem.Allocator,
+            cfg: *config.Config,
+            exp: *explorer.Explorer,
+            f: *filter.Filter,
+            build_ctx: *BuildCtx,
+            watch_ctx: *WatchCtx,
+            worker: *?std.Thread,
+            /// The watcher's stop flag, shared with main's shutdown path.
+            running: *bool,
+
+            /// Index and watch `path`, or return null when it fails the same
+            /// guards the startup path applies. The returned root is owned for
+            /// the rest of the process: the watcher, the snapshot path and
+            /// `status` all keep it, and it is replaced at most once.
+            fn adopt(ctx_any: *anyopaque, path: []const u8) ?[]const u8 {
+                const ctx: *@This() = @ptrCast(@alignCast(ctx_any));
+                const proj = usable_project_root(ctx.allocator, path) orelse return null;
+
+                // Correcting a live index: stop the worker and take the index
+                // apart only once the thread that writes to it has exited.
+                // Joining also waits out a build still in progress, which is
+                // why this runs during the handshake and never mid-query.
+                if (ctx.worker.*) |t| {
+                    ctx.running.* = false;
+                    t.join();
+                    ctx.worker.* = null;
+                    ctx.running.* = true;
+                    ctx.exp.deinit();
+                    ctx.exp.* = explorer.Explorer.init(ctx.allocator) catch {
+                        ctx.allocator.free(proj);
+                        return null;
+                    };
+                }
+                io.changeCurDir(proj) catch {
+                    ctx.allocator.free(proj);
+                    return null;
+                };
+                io.normalizeKey(proj);
+
+                const snap = config.resolve_snapshot_path(ctx.allocator, proj) catch {
+                    ctx.allocator.free(proj);
+                    return null;
+                };
+                var snap_exists = false;
+                if (io.cwd().openFile(io.io(), snap, .{})) |file| {
+                    file.close(io.io());
+                    snap_exists = true;
+                } else |_| {}
+
+                ctx.f.load_gitignore(proj) catch {};
+                ctx.cfg.workspace_root = proj;
+                ctx.build_ctx.workspace_root = proj;
+                ctx.build_ctx.workspace_abs = proj;
+                ctx.build_ctx.snapshot_path = snap;
+                ctx.build_ctx.snapshot_exists = snap_exists;
+                ctx.build_ctx.start_watcher = true;
+                ctx.watch_ctx.workspace_root = proj;
+
+                // Queries must wait for this build like they wait for the
+                // startup one; the refusal path had already marked indexing
+                // complete, so without this a query could answer from a
+                // half-built index.
+                ctx.exp.mark_indexing_started();
+                ctx.worker.* = std.Thread.spawn(.{}, BuildCtx.build_then_watch, .{ctx.build_ctx}) catch {
+                    ctx.exp.mark_indexing_complete();
+                    return null;
+                };
+                // The caller says WHY the workspace moved: the roots handshake
+                // and an explicit index_workspace call are different stories,
+                // and `status` is where a user reads them.
+                return proj;
+            }
+        };
+        var adopt_ctx = AdoptCtx{
+            .allocator = allocator,
+            .cfg = &cfg,
+            .exp = &exp,
+            .f = &f,
+            .build_ctx = &build_ctx,
+            .watch_ctx = &watch_ctx,
+            .worker = &worker,
+            .running = &watch_running,
+        };
+        srv.with_adopt(AdoptCtx.adopt, &adopt_ctx);
+
         try srv.run_mcp();
     } else {
         // Standalone: build synchronously, then watch in the foreground.
