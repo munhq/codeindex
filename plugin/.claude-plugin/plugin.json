@@ -1,7 +1,7 @@
 {
   "name": "codeindex",
   "description": "Skills that teach any agent to answer code questions structurally instead of reading whole files \u2014 symbol lookup, callers, imports and blast radius. Bundles the codeindex MCP server so install wires everything in one step.",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "author": {
     "name": "munhq"
   },
