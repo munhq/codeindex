@@ -145,9 +145,60 @@ else
     printf '>>> install.sh and the launcher were checked; the wrapper was NOT. <<<\n' >&2
 fi
 
+# ── Which shell runs a shipped script ────────────────────────────────────────
+# Nobody chooses the shell for an installer. The README's one-liner says
+# `curl … | bash`, a user typed `| sh`, and /bin/sh is dash on most Linux: the
+# script died on `${BASH_SOURCE[0]}` — a bash array subscript — with "Bad
+# substitution", before installing anything, and printed nothing that named the
+# cause. `&>` is worse than a syntax error there: POSIX sh reads `cmd &>/dev/null`
+# as "run cmd in the background", so a `command -v` test answers wrongly and
+# silently.
+#
+# So every script that a stranger's shell may run is checked in every shell this
+# machine has. Absent shells are reported as skipped, never as passed.
+shell_scripts="
+install.sh
+plugin/bin/codeindex-launch
+plugin/hooks/first-read-hint.sh
+plugin/hooks/session-brief.sh
+"
+shells_checked=0
+for candidate in dash "busybox sh" bash; do
+    # shellcheck disable=SC2086
+    set -- $candidate
+    command -v "$1" >/dev/null 2>&1 || {
+        printf '>>> SKIPPED the %s syntax check: not installed here. <<<\n' "$candidate" >&2
+        continue
+    }
+    while IFS= read -r rel; do
+        [ -n "$rel" ] || continue
+        shells_checked=$((shells_checked + 1))
+        if ! $candidate -n "$root/$rel" 2>/dev/null; then
+            printf 'FAIL shell  %s is not valid %s — a user whose sh is %s cannot run it\n' \
+                "$rel" "$candidate" "$candidate"
+            fail=$((fail + 1))
+        fi
+    done <<EOF
+$shell_scripts
+EOF
+done
+
+# The two constructs that broke it, matched outside comments. A syntax check
+# cannot catch `&>`: it parses, and does the wrong thing.
+while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    if grep -nE '&>|\$\{[A-Za-z_]+\[[0-9]' "$root/$rel" | grep -qv '^[0-9]*:[[:space:]]*#'; then
+        printf 'FAIL shell  %s uses &> or a bash array; POSIX sh mis-reads both\n' "$rel"
+        fail=$((fail + 1))
+    fi
+done <<EOF
+$shell_scripts
+EOF
+
 if [ "$fail" -gt 0 ]; then
     printf '\n%d platform failure(s) across %d case(s)\n' "$fail" "$checked" >&2
     exit 1
 fi
 printf 'platform mapping: %d case(s) — install.sh, launcher and npm wrapper (%d) match the release matrix\n' \
     "$checked" "$node_checked"
+printf 'shell portability: %d script/shell combination(s) parse\n' "$shells_checked"

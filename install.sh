@@ -1,5 +1,19 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+# POSIX sh, deliberately. The README's one-liner is `curl … | bash`, and someone
+# typed `| sh` — which is /bin/sh, which is dash on most Linux — and the script
+# died on line 16 with "Bad substitution" before installing anything, because
+# ${BASH_SOURCE[0]} is a bash array subscript. An installer is the one script
+# that cannot assume which shell runs it, so this one assumes none: no arrays,
+# no `&>`, no `set -o pipefail` unless the shell has it.
+set -eu
+
+# pipefail is not in POSIX. Where the shell has it, take it — a failing curl in
+# the middle of a pipeline must not read as success. Where it does not, continue
+# without it rather than aborting on an unknown option.
+# shellcheck disable=SC3040
+if (set -o pipefail 2>/dev/null); then
+    set -o pipefail
+fi
 
 BINARY="codeindex"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
@@ -8,13 +22,21 @@ INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 # whose skills directories are separate. A fixed $HOME/.claude/skills installed
 # the skill where the running account could not see it, so nothing ever routed
 # an agent to this server — the exact failure the skill exists to prevent.
-# Empty when piped: `curl … | bash` has no script file, so BASH_SOURCE[0] is
-# unset and `set -u` made merely referencing it fatal. The README leads with the
-# piped form, so that path printed an unbound-variable error, skipped the skill
-# entirely, and still exited 0 — the binary installed and the thing that teaches
-# an agent to use it did not.
-if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
-    SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Empty when piped: `curl … | sh` has no script file to copy the skill from, so
+# the skill is fetched over the network instead (see the piped branch below).
+# That path printed an unbound-variable error once, because `set -u` made
+# referencing an unset BASH_SOURCE fatal, and it broke outright under a non-bash
+# shell, because `${BASH_SOURCE[0]}` is a bash array subscript. So: `$BASH_SOURCE`
+# without a subscript, which is element 0 in bash and a plain unset name
+# everywhere else, and `$0` for a shell that has neither.
+script_path=""
+if [ -n "${BASH_SOURCE:-}" ]; then
+    script_path="$BASH_SOURCE"
+elif [ -f "${0:-}" ]; then
+    script_path="$0"
+fi
+if [ -n "$script_path" ] && [ -f "$script_path" ]; then
+    SRC_DIR="$(cd "$(dirname "$script_path")" && pwd)"
 else
     SRC_DIR=""
 fi
@@ -176,13 +198,13 @@ DL_TMP="$(mktemp "$DEST.dl.XXXXXX")"
 # one tool every caller demonstrably has. Requiring gh sent every stranger down
 # the source-build path, which needs a matching Zig and the vendored grammars.
 # This is the order plugin/bin/codeindex-launch already used.
-if [ -n "$ARTIFACT" ] && command -v curl &>/dev/null &&
+if [ -n "$ARTIFACT" ] && command -v curl >/dev/null 2>&1 &&
    curl -fsSL -o "$DL_TMP" \
      "https://github.com/$REPO/releases/latest/download/$ARTIFACT" 2>/dev/null; then
     atomic_install "$DL_TMP"
     rm -f "$DL_TMP"
     echo "Installed prebuilt binary to $DEST"
-elif [ -n "$ARTIFACT" ] && command -v gh &>/dev/null &&
+elif [ -n "$ARTIFACT" ] && command -v gh >/dev/null 2>&1 &&
    gh release download --repo "$REPO" -p "$ARTIFACT" -O "$DL_TMP" --clobber 2>/dev/null; then
     atomic_install "$DL_TMP"
     rm -f "$DL_TMP"
@@ -190,7 +212,7 @@ elif [ -n "$ARTIFACT" ] && command -v gh &>/dev/null &&
 else
     rm -f "$DL_TMP"
     echo "No prebuilt binary for $ARCH-$OS, building from source..."
-    if ! command -v zig &>/dev/null; then
+    if ! command -v zig >/dev/null 2>&1; then
         echo "Error: zig not found. Install: https://ziglang.org/download/" >&2
         exit 1
     fi
@@ -288,7 +310,7 @@ if [ "$PLUGIN_OWNS" = "1" ]; then
     else
         echo "Skipping MCP registration: the plugin provides it."
     fi
-elif command -v claude &>/dev/null; then
+elif command -v claude >/dev/null 2>&1; then
     # -s user, because `claude mcp add` defaults to local scope and would
     # register the server for one directory only. Re-adding a name that exists
     # errors instead of replacing it, so drop any previous entry in either

@@ -26,7 +26,7 @@ later turn.
 
 ## Install
 
-    curl -fsSL https://raw.githubusercontent.com/munhq/codeindex/main/install.sh | bash
+    curl -fsSL https://raw.githubusercontent.com/munhq/codeindex/main/install.sh | sh
 
 That fetches the prebuilt binary for the platform, installs the agent skill into
 every Claude Code home it finds, and registers the MCP server.

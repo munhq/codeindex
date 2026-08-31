@@ -45,7 +45,7 @@ No Node, or you want the skill and the hook as well:
 
 ```bash
 # Prebuilt binary + skill + MCP registration, in one command
-curl -fsSL https://raw.githubusercontent.com/munhq/codeindex/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/munhq/codeindex/main/install.sh | sh
 
 # Or build from source:
 cd zig && ./fetch-vendor.sh && zig build -Doptimize=ReleaseFast
