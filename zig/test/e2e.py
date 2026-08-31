@@ -12,6 +12,7 @@ Exits non-zero on any failure. Wired into the build as `zig build e2e`.
 """
 import json
 import os
+import pathlib
 import subprocess
 import sys
 import tempfile
@@ -151,7 +152,12 @@ def workspace_recovery():
 
     # 2. The client answers roots/list: the server adopts the project and the
     #    same call now resolves.
-    msgs, asked = dialogue(nowhere, [f"file://{proj}"],
+    # Path.as_uri() is what a correct client sends: file:///tmp/x on POSIX and
+    # file:///C:/Users/... on Windows, percent-encoded. Hand-building
+    # f"file://{proj}" produced file://C:\Users\... on Windows — a malformed URI
+    # that the server rightly refused, so the whole recovery path went untested
+    # on the one platform whose paths differ.
+    msgs, asked = dialogue(nowhere, [pathlib.Path(proj).as_uri()],
                            [tool(21, "find_symbol", {"name": "requireRemote"}),
                             tool(22, "status", {})])
     check(asked, "a refused workspace asks the client for its roots")
