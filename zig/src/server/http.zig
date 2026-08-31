@@ -1498,9 +1498,17 @@ pub fn uri_to_path(allocator: std.mem.Allocator, uri: []const u8) ?[]u8 {
     if (!std.mem.startsWith(u8, uri, "file://")) return null;
     var rest = uri["file://".len..];
     if (rest.len == 0) return null;
-    if (rest[0] != '/') return null; // file://host/path
-    // file:///C:/repo on Windows: the leading slash precedes a drive letter.
-    if (rest.len >= 3 and rest[2] == ':') rest = rest[1..];
+    if (rest[0] == '/') {
+        // file:///C:/repo on Windows: the leading slash precedes a drive letter.
+        if (rest.len >= 3 and rest[2] == ':') rest = rest[1..];
+    } else if (rest.len >= 2 and std.ascii.isAlphabetic(rest[0]) and rest[1] == ':') {
+        // file://C:/repo — the drive written where the authority belongs. Not
+        // the spelling the spec asks for, and a colon cannot appear in a host
+        // name, so it is unambiguous. Accept it: the alternative is refusing
+        // the only root a client offered and staying dead for the session.
+    } else {
+        return null; // file://host/path — another machine's disk.
+    }
 
     var out = allocator.alloc(u8, rest.len) catch return null;
     var n: usize = 0;

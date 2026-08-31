@@ -2158,6 +2158,10 @@ test "mcp roots: a file URI becomes a path, percent-encoding and all" {
         .{ .uri = "file:///home/user/code/example", .want = "/home/user/code/example" },
         .{ .uri = "file:///home/user/my%20project", .want = "/home/user/my project" },
         .{ .uri = "file:///C:/code/example", .want = "C:/code/example" },
+        // The drive written where the authority belongs. Not the spec's
+        // spelling, and some clients send it anyway.
+        .{ .uri = "file://C:/code/example", .want = "C:/code/example" },
+        .{ .uri = "file://d:/code/example", .want = "d:/code/example" },
         // Not a local path: another machine's disk, or another scheme entirely.
         .{ .uri = "file://remote-host/share", .want = null },
         .{ .uri = "https://example.com/repo", .want = null },
