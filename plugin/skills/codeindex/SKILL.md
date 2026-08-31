@@ -98,6 +98,27 @@ Also skip it for non-code files, generated files, and anything the index has not
 seen — check `status` if results look empty, and `index_workspace` if the
 workspace is not indexed yet.
 
+## Check the index before you believe an empty answer
+
+An empty structural result has two very different causes, and they lead to
+opposite actions:
+
+- The symbol is not there. Trust the answer.
+- The index is not pointed at this repository. The answer means nothing.
+
+`status` separates them in one cheap call. Two fields decide it:
+
+- `files` — 0 means nothing is indexed at all.
+- `workspace` — the absolute root actually indexed. In `--mcp` mode the server's
+  working directory is chosen by the client, not by you, so this can be a plugin
+  directory, a config directory, or a different repository altogether. An index
+  of the wrong tree answers every question just as confidently as the right one.
+
+If either is wrong, `index_workspace` with `path` set to the absolute path of the
+project fixes it for the rest of the session, watcher included. A refused
+workspace also says so in every tool result, so a result that starts with
+"codeindex has no index" is a configuration problem, never a code answer.
+
 ## Strategy
 
 1. Classify the question: definition, body, usage, callers, impact, or content.
@@ -106,5 +127,7 @@ workspace is not indexed yet.
 3. Chain narrow calls rather than one broad read: `find_symbol` → `read_symbol`
    costs about 137 tokens where reading the file costs about 1,563.
 4. If a structural call returns nothing, check `status` before concluding the
-   code is absent — an unindexed workspace looks identical to a missing symbol.
+   code is absent — an unindexed or wrongly indexed workspace looks identical to
+   a missing symbol. See the section above for the two fields that tell them
+   apart.
 5. Report file and line for anything you found, so the user can jump to it.

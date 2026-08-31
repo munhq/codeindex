@@ -26,11 +26,44 @@ const io = @import("../core/io.zig");
 const reload = @import("../core/reload.zig");
 const watcher_mod = @import("../watcher.zig");
 
+/// How main() indexes and watches a workspace the client named. Adoption goes
+/// back to main() rather than being re-implemented here: the index build, the
+/// snapshot, the gitignore filter and the file watcher all live there, and a
+/// second copy of that sequence would drift from the first.
+/// Returns the absolute root actually adopted (owned by main(), valid for the
+/// rest of the process), or null when the candidate failed the same guards the
+/// startup path applies.
+pub const AdoptFn = *const fn (ctx: *anyopaque, path: []const u8) ?[]const u8;
+
 pub const Server = struct {
     allocator: std.mem.Allocator,
     exp: *explorer.Explorer,
     parser: ?*treesitter.Parser = null,
     filter: ?*filter_mod.Filter = null,
+
+    /// The absolute root of the tree being served, reported by `status`. A
+    /// caller cannot tell a wrong-tree index from a right one without it: every
+    /// tool answers confidently either way.
+    workspace: []const u8 = ".",
+    /// Why nothing is indexed, when nothing is. Set from main()'s startup
+    /// guards, cleared when a workspace is adopted.
+    dead_reason: ?[]const u8 = null,
+    /// Whether a file watcher is actually running. `status` used to report
+    /// `watcher: true` unconditionally, including on a refused workspace where
+    /// no watcher thread was ever started.
+    watcher_live: bool = false,
+    /// The client advertised `roots` at initialize, so it can be asked where
+    /// the project is instead of the server guessing from a launch directory.
+    client_has_roots: bool = false,
+    /// True when the root came from a launch directory rather than from
+    /// `--workspace`/CODEINDEX_WORKSPACE. A guess may be corrected by the
+    /// client's roots; a root the caller named never is.
+    workspace_is_guess: bool = false,
+    /// Id of the outstanding roots/list request, so its reply is matched and a
+    /// second request is not sent while one is in flight.
+    roots_request_id: ?i64 = null,
+    adopt: ?AdoptFn = null,
+    adopt_ctx: ?*anyopaque = null,
 
     pub fn init(allocator: std.mem.Allocator, exp: *explorer.Explorer) Server {
         return .{ .allocator = allocator, .exp = exp };
@@ -39,6 +72,121 @@ pub const Server = struct {
     pub fn with_parser(self: *Server, p: *treesitter.Parser, f: *filter_mod.Filter) void {
         self.parser = p;
         self.filter = f;
+    }
+
+    /// Tell the server which tree it serves, whether that tree is alive, and
+    /// whether the root was named by the caller or guessed from a launch
+    /// directory. Only a guess may be replaced by what the client reports.
+    pub fn with_workspace(self: *Server, abs: []const u8, dead_reason: ?[]const u8, is_guess: bool) void {
+        self.workspace = abs;
+        self.dead_reason = dead_reason;
+        self.watcher_live = dead_reason == null;
+        self.workspace_is_guess = is_guess;
+    }
+
+    /// Register the adoption path used when the client names a workspace.
+    pub fn with_adopt(self: *Server, f: AdoptFn, ctx: *anyopaque) void {
+        self.adopt = f;
+        self.adopt_ctx = ctx;
+    }
+
+    /// Ask the client where the project is. MCP `roots` exists for exactly this
+    /// asymmetry: the client knows the workspace, the server only knows the
+    /// directory it was spawned in. Claude Code answers with the session's
+    /// launch directory plus every directory added with --add-dir.
+    ///
+    /// Sent only while nothing is indexed, and only once per answer, so a
+    /// healthy server never spends a round trip on it.
+    fn request_roots(self: *Server, out_file: anytype) !void {
+        if (!self.client_has_roots) return;
+        if (self.adopt == null) return;
+        if (self.roots_request_id != null) return;
+        // Nothing to correct: the caller named this root explicitly, and it is
+        // serving. Asking would spend a round trip to confirm what is already
+        // known.
+        if (self.dead_reason == null and !self.workspace_is_guess) return;
+        const rid: i64 = 90001;
+        self.roots_request_id = rid;
+        var buf: [80]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"method\":\"roots/list\"}}\n", .{rid}) catch return;
+        try io.writeAll(out_file, msg);
+        if (self.dead_reason) |reason| {
+            std.debug.print("codeindex: nothing indexed ({s}); asking the client for its roots\n", .{reason});
+        } else {
+            std.debug.print("codeindex: workspace {s} was guessed from the launch directory; asking the client for its roots\n", .{self.workspace});
+        }
+    }
+
+    /// A reply to a request this server sent. Only roots/list is ever sent, so
+    /// an unmatched id is discarded rather than treated as an error: some
+    /// clients reply to their own probes on the same channel.
+    fn handle_client_reply(self: *Server, id: ?std.json.Value, obj: std.json.ObjectMap) void {
+        const want = self.roots_request_id orelse return;
+        const got = switch (id orelse return) {
+            .integer => |n| n,
+            else => return,
+        };
+        if (got != want) return;
+        // Answered, for better or worse: never ask twice for the same answer.
+        self.roots_request_id = null;
+        const result = obj.get("result") orelse return; // an error reply: nothing to adopt
+        self.adopt_first_usable_root(result);
+    }
+
+    /// Adopt the first root the startup guards allow. A client may list several
+    /// (every --add-dir), and the first is the session's launch directory.
+    fn adopt_first_usable_root(self: *Server, result: std.json.Value) void {
+        const adopt = self.adopt orelse return;
+        const ctx = self.adopt_ctx orelse return;
+        const roots_val = switch (result) {
+            .object => |o| o.get("roots") orelse return,
+            else => return,
+        };
+        const roots = switch (roots_val) {
+            .array => |a| a,
+            else => return,
+        };
+        // A live index inside one of the client's roots is the right tree, even
+        // when it is a subdirectory of one (a package in a monorepo) or a parent
+        // of one (a repo the client opened a subfolder of). Leave it alone.
+        if (self.dead_reason == null) {
+            for (roots.items) |entry| {
+                const uri = switch (entry) {
+                    .object => |o| switch (o.get("uri") orelse continue) {
+                        .string => |u| u,
+                        else => continue,
+                    },
+                    else => continue,
+                };
+                const path = uri_to_path(self.allocator, uri) orelse continue;
+                defer self.allocator.free(path);
+                if (paths_related(self.workspace, path)) return;
+            }
+        }
+
+        for (roots.items) |entry| {
+            const uri = switch (entry) {
+                .object => |o| switch (o.get("uri") orelse continue) {
+                    .string => |u| u,
+                    else => continue,
+                },
+                else => continue,
+            };
+            const path = uri_to_path(self.allocator, uri) orelse continue;
+            defer self.allocator.free(path);
+            if (self.dead_reason == null) {
+                std.debug.print("codeindex: indexed tree {s} is outside every root the client reports; correcting to {s}\n", .{ self.workspace, path });
+            }
+            if (adopt(ctx, path)) |root| {
+                self.workspace = root;
+                self.dead_reason = null;
+                self.watcher_live = true;
+                self.exp.set_status("Workspace taken from the client's roots: the launch directory named a different tree, or none.");
+                std.debug.print("codeindex: workspace adopted from the client's roots: {s}\n", .{root});
+                return;
+            }
+        }
+        std.debug.print("codeindex: no usable workspace among the client's roots\n", .{});
     }
 
     pub fn run_mcp(self: *Server) !void {
@@ -96,11 +244,29 @@ pub const Server = struct {
                 defer parsed.deinit();
 
                 const obj = parsed.value.object;
-                const method_val = obj.get("method") orelse continue;
-                const method = method_val.string;
                 const id = obj.get("id");
 
+                // A message with no `method` is a REPLY to something this
+                // server asked the client. The loop used to skip every such
+                // line, which made a server-to-client request pointless: the
+                // answer was read and thrown away. `roots/list` is the one
+                // question this server asks — where is the project? — so the
+                // reply has to be matched.
+                const method_val = obj.get("method") orelse {
+                    self.handle_client_reply(id, obj);
+                    continue;
+                };
+                const method = switch (method_val) {
+                    .string => |m| m,
+                    else => continue,
+                };
+
                 if (std.mem.eql(u8, method, "initialize")) {
+                    // Does this client answer roots/list? Only then is there a
+                    // point in asking where the project is.
+                    if (obj.get("params")) |params| {
+                        self.client_has_roots = client_advertises_roots(params);
+                    }
                     var buf = std.Io.Writer.Allocating.init(self.allocator);
                     defer buf.deinit();
                     const bw = &buf.writer;
@@ -113,7 +279,18 @@ pub const Server = struct {
                     try bw.writeAll(",\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"codeindex\",\"version\":\"" ++ build_options.version ++ "\"}}}\n");
                     try io.writeAll(stdout_file, buf.written());
                 } else if (std.mem.eql(u8, method, "notifications/initialized")) {
-                    // No response needed
+                    // The handshake is complete, so the server may now send
+                    // requests of its own. This is the moment to check the one
+                    // thing the launch directory cannot answer: which tree the
+                    // user is actually working in. request_roots decides
+                    // whether asking is worth a round trip.
+                    try self.request_roots(stdout_file);
+                } else if (std.mem.eql(u8, method, "notifications/roots/list_changed")) {
+                    // The user added or removed a working directory (--add-dir,
+                    // /add-dir). Ask again — the answer may now cover a tree
+                    // this server could not resolve before.
+                    self.roots_request_id = null;
+                    try self.request_roots(stdout_file);
                 } else if (std.mem.eql(u8, method, "tools/list")) {
                     try self.write_tools_list(stdout_file, id);
                 } else if (std.mem.eql(u8, method, "tools/call")) {
@@ -169,6 +346,30 @@ pub const Server = struct {
         defer out.deinit();
         const w = &out.writer;
 
+        // "Nothing indexed" and "nothing found" are different answers, and the
+        // difference decides what the caller does next. Every query tool used to
+        // say "No results." on an empty index, which reads as "that symbol does
+        // not exist" — so a caller whose server had refused its launch
+        // directory concluded the tools were useless, went back to grep for the
+        // rest of the session, and never learned that one call fixes it.
+        if (self.exp.file_count() == 0 and
+            !std.mem.eql(u8, tool, "status") and
+            !std.mem.eql(u8, tool, "index_workspace"))
+        {
+            try w.print(
+                \\codeindex has no index, so this is an UNAVAILABLE answer, not a negative one.
+                \\reason: {s}
+                \\workspace: {s}
+                \\fix it in one call: index_workspace with `path` set to the absolute path of the project you are working in, then repeat this call.
+                \\until that succeeds, do not read this as "not found".
+            , .{
+                self.dead_reason orelse "the index holds 0 files — the indexed tree may contain no supported source files",
+                self.workspace,
+            });
+            try self.write_tool_result(writer, id, out.written(), true);
+            return;
+        }
+
         if (std.mem.eql(u8, tool, "status")) {
             // Calculate token savings stats
             // Naive approach: cat all files = total bytes / 4 (rough tokens estimate)
@@ -184,7 +385,14 @@ pub const Server = struct {
             else
                 0;
 
-            try w.print("{{\"files\":{d},\"symbols\":{d},\"indexing\":{s},\"latest_seq\":{d},\"total_lines\":{d},\"total_bytes\":{d},\"naive_tokens\":{d},\"outline_tokens\":{d},\"savings_pct\":{d},\"watcher\":true,\"watcher_backend\":\"" ++ watcher_mod.backend ++ "\"", .{
+            // `workspace` is not decoration: every tool answers just as
+            // confidently about the wrong tree as the right one, and a client
+            // that launches this server from a directory of its own choosing
+            // (a plugin root, a config directory) is how the wrong tree gets
+            // indexed. Naming it is what makes that visible.
+            // `watcher` was the literal `true`, including on a refused
+            // workspace where no watcher thread was ever started.
+            try w.print("{{\"files\":{d},\"symbols\":{d},\"indexing\":{s},\"latest_seq\":{d},\"total_lines\":{d},\"total_bytes\":{d},\"naive_tokens\":{d},\"outline_tokens\":{d},\"savings_pct\":{d},\"watcher\":{s},\"watcher_backend\":\"" ++ watcher_mod.backend ++ "\",\"workspace\":", .{
                 self.exp.file_count(),
                 self.exp.symbol_count(),
                 if (self.exp.is_indexing()) "true" else "false",
@@ -194,7 +402,9 @@ pub const Server = struct {
                 naive_tokens,
                 outline_tokens,
                 savings_pct,
+                if (self.watcher_live) "true" else "false",
             });
+            try write_json_string(w, self.workspace);
             if (self.exp.status_message) |msg| {
                 try w.writeAll(",\"message\":\"");
                 try w.writeAll(msg);
@@ -460,8 +670,36 @@ pub const Server = struct {
                     return;
                 }
             }
+            // Prefer the same adoption path the client's roots use: it moves the
+            // file watcher and the snapshot to the new root as well. Without it a
+            // hand-fixed workspace was indexed once and never refreshed again,
+            // and `status` went on naming the tree that had been refused.
+            if (path != null) {
+                if (self.adopt) |adopt| {
+                    if (self.adopt_ctx) |ctx| {
+                        if (adopt(ctx, path.?)) |root| {
+                            self.workspace = root;
+                            self.dead_reason = null;
+                            self.watcher_live = true;
+                            self.exp.set_status("Workspace set by an index_workspace call.");
+                            // Adoption builds on a background thread; this tool
+                            // has always answered with counts, so wait for them.
+                            while (self.exp.is_indexing()) {
+                                io.sleep(100 * std.time.ns_per_ms);
+                            }
+                            try w.print("Indexed {s} — {d} files, {d} symbols, watcher active", .{
+                                root, self.exp.file_count(), self.exp.symbol_count(),
+                            });
+                            try self.write_tool_result(writer, id, out.written(), false);
+                            return;
+                        }
+                    }
+                }
+            }
             if (path != null and self.parser != null and self.filter != null) {
-                // Clear the active explorer and re-index the new path
+                // No adoption path, or a directory with no project marker: index
+                // it in place. Unwatched, but a deliberate answer to an explicit
+                // request.
                 self.exp.deinit();
                 self.exp.* = try explorer.Explorer.init(self.allocator);
 
@@ -473,6 +711,10 @@ pub const Server = struct {
                 };
                 if (res.capped) self.exp.set_status("Workspace too large — indexing stopped at the safety cap; results are partial.");
                 self.exp.mark_indexing_complete();
+                // `path` points into the request JSON, which is freed as soon as
+                // this call returns; `status` reads self.workspace long after.
+                if (self.allocator.dupe(u8, path.?)) |owned| self.workspace = owned else |_| {}
+                self.dead_reason = null;
                 if (res.capped) {
                     try w.print("Indexed {d} files — {d} symbols (stopped at safety cap; results partial)", .{
                         res.files, self.exp.symbol_count(),
@@ -1220,6 +1462,77 @@ fn index_refusal_reason(allocator: std.mem.Allocator, path: []const u8) ?[]const
     defer if (home) |h| allocator.free(h);
     if (home != null and std.mem.eql(u8, eff, home.?)) return "path resolves to your home directory";
     return null;
+}
+
+/// True when the client declared the `roots` capability at initialize. Asking a
+/// client that did not is a request it will answer with an error at best, and
+/// silence at worst — and silence would leave a request permanently in flight.
+fn client_advertises_roots(params: std.json.Value) bool {
+    const caps = switch (params) {
+        .object => |o| o.get("capabilities") orelse return false,
+        else => return false,
+    };
+    return switch (caps) {
+        .object => |o| o.get("roots") != null,
+        else => false,
+    };
+}
+
+/// True when one path contains the other, or they are equal. Compared on
+/// directory boundaries, so `/a/repo-old` is not "inside" `/a/repo`.
+pub fn paths_related(a: []const u8, b: []const u8) bool {
+    const x = std.mem.trimEnd(u8, a, "/");
+    const y = std.mem.trimEnd(u8, b, "/");
+    if (std.mem.eql(u8, x, y)) return true;
+    const long, const short = if (x.len > y.len) .{ x, y } else .{ y, x };
+    if (short.len == 0) return false;
+    return std.mem.startsWith(u8, long, short) and long[short.len] == '/';
+}
+
+/// A file:// URI as a filesystem path, or null when it is not a local path.
+/// Roots are URIs, so a path with a space arrives as %20 and a path adopted
+/// without decoding would not exist. Caller owns the result.
+pub fn uri_to_path(allocator: std.mem.Allocator, uri: []const u8) ?[]u8 {
+    // file:///abs/path — three slashes, an empty (localhost) authority. A URI
+    // with a real host names another machine's disk, which is not indexable.
+    if (!std.mem.startsWith(u8, uri, "file://")) return null;
+    var rest = uri["file://".len..];
+    if (rest.len == 0) return null;
+    if (rest[0] != '/') return null; // file://host/path
+    // file:///C:/repo on Windows: the leading slash precedes a drive letter.
+    if (rest.len >= 3 and rest[2] == ':') rest = rest[1..];
+
+    var out = allocator.alloc(u8, rest.len) catch return null;
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < rest.len) {
+        if (rest[i] == '%' and i + 2 < rest.len) {
+            const hi = std.fmt.charToDigit(rest[i + 1], 16) catch {
+                out[n] = rest[i];
+                n += 1;
+                i += 1;
+                continue;
+            };
+            const lo = std.fmt.charToDigit(rest[i + 2], 16) catch {
+                out[n] = rest[i];
+                n += 1;
+                i += 1;
+                continue;
+            };
+            out[n] = @as(u8, hi) * 16 + @as(u8, lo);
+            n += 1;
+            i += 3;
+            continue;
+        }
+        out[n] = rest[i];
+        n += 1;
+        i += 1;
+    }
+    if (n == 0) {
+        allocator.free(out);
+        return null;
+    }
+    return allocator.realloc(out, n) catch out[0..n];
 }
 
 fn get_string_arg(args: ?std.json.Value, key: []const u8) ?[]const u8 {

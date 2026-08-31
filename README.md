@@ -61,8 +61,9 @@ docker run -i --rm -v "$PWD:/workspace:ro" munhq/codeindex
 Register with your AI agent:
 
 ```bash
-# Claude Code — the plugin is the one-step path. It ships the skill, the hook
-# and the MCP server together, and its launcher finds or fetches the binary.
+# Claude Code — the plugin is the one-step path. It ships the skill, both
+# routing hooks and the MCP server together, and its launcher finds or fetches
+# the binary.
 claude plugin marketplace add munhq/codeindex
 claude plugin install codeindex@codeindex
 
@@ -92,7 +93,7 @@ The next time your agent starts, codeindex indexes your project in the backgroun
 
 | Tool | What it does |
 |------|-------------|
-| `status` | Index stats: file count, symbol count, indexing state, token savings % |
+| `status` | Index stats: file count, symbol count, indexing state, token savings %, the indexed `workspace` and whether a `watcher` is live |
 | `search` | Trigram-accelerated full-text search across all indexed files |
 | `find_symbol` | Find symbol definitions (functions, structs, classes…) by name |
 | `find_word` | Exact word/identifier lookup in the inverted word index |
@@ -148,9 +149,64 @@ CODEINDEX_WORKSPACE=/path/to/project     # Same as --workspace
 CODEINDEX_PROJECT_ID=my-project          # Same as --project-id
 ```
 
-codeindex auto-detects the project root by walking up from the working directory looking for `.git`, `package.json`, `Cargo.toml`, `go.mod`, `build.zig`, `pyproject.toml`, etc.
+### Getting it used
 
-It refuses to index your entire home directory or the filesystem root — pass `--workspace` to be explicit.
+A server that registers without telling an agent when to reach for it stays
+idle, and an idle index saves nothing however cheap its calls are. The plugin
+ships three things for that, in the order they act:
+
+1. **A SessionStart brief.** About 240 tokens, once per session, in a repository
+   that holds source files: codeindex is live, and here is the tool for each
+   kind of code question. It lands before the agent has chosen a tool, which is
+   the only moment that can change the first choice.
+2. **A PreToolUse hint.** Fires on the 1st, 8th and 25th code question of a
+   session, when a scan is about to answer something the index answers better,
+   and names the tool for that exact question. It matches `Bash` as well as
+   `Read`/`Grep`/`Glob`, because a permission mode that routes file work through
+   the shell is where most scans actually happen.
+3. **The skill**, which the model loads when it decides the task calls for it.
+
+Advice loses to habit, so the narrow case where the index is strictly better is
+refused rather than argued with: an identifier search that is the whole command
+line, in a project that has been indexed before. It never refuses a file read —
+the bytes are required before an `Edit` — never refuses a line that also builds
+or tests, and stops refusing after three times in a session, so it can never be
+the reason a session cannot proceed.
+
+That is **on by default**, and it is one switch to turn off — no file to edit by
+hand. It is a plugin option, so `/plugin` shows it as "Refuse a scan the index
+answers better" and Claude Code passes your answer to the hook. Outside the
+plugin, or for a single session, `CODEINDEX_ENFORCE=0` in the environment
+overrides the option and `CODEINDEX_ENFORCE=1` restores it.
+
+Measure the effect rather than assuming it: `python3 plugin/measure_routing.py`
+counts, per session, how many code questions went to a scan and how many went to
+the index, across every Claude Code home on the machine.
+
+### Which tree gets indexed
+
+In `--mcp` mode the working directory belongs to the client, not to you, and it
+is regularly not your project: Claude Code launches a plugin's MCP server from
+the plugin's own directory and a user-scope server from its config directory. So
+the workspace is resolved in this order, and the first usable answer wins:
+
+1. `--workspace` or `CODEINDEX_WORKSPACE`. An explicit answer is never overridden.
+2. `CLAUDE_PROJECT_DIR`, which Claude Code sets in every MCP server it spawns.
+3. The launch directory, walking up for a `.git`, `package.json`, `Cargo.toml`,
+   `go.mod`, `build.zig` or `pyproject.toml` marker.
+4. The client's MCP `roots`. The server asks for them at the handshake whenever
+   the root above was a guess, and adopts one when the guess was refused or lands
+   outside every root the client reports. `notifications/roots/list_changed` is
+   honoured too, so a directory added with `--add-dir` can still rescue a session.
+
+`status` reports the effective root as `workspace`, and whether a file watcher is
+running as `watcher`. Check them when a result looks empty: an index of the wrong
+tree answers every question just as confidently as the right one.
+
+It refuses to index your entire home directory, the filesystem root, or a folder
+that merely holds several independent repositories. A refused workspace answers
+every query with the reason and the one call that fixes it — `index_workspace`
+with the project path — rather than with "no results".
 
 ## Architecture
 

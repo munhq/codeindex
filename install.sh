@@ -301,3 +301,15 @@ else
     echo "Claude Code not found — register manually:"
     echo "  claude mcp add -s user codeindex -- $INSTALL_DIR/$BINARY --mcp"
 fi
+
+# The skill applies when the model elects to load it. The plugin's two hooks
+# apply whether it does or not — one at session start, one as the agent is about
+# to scan — and hooks cannot be installed by copying a file: they are entries in
+# a settings file this script has no business rewriting. So say plainly what the
+# plugin adds, rather than leaving a direct install looking equivalent.
+if [ "$PLUGIN_OWNS" != "1" ]; then
+    echo
+    echo "Installed the skill, not the routing hooks: those ship with the plugin."
+    echo "  claude plugin marketplace add $REPO"
+    echo "  claude plugin install codeindex@codeindex"
+fi

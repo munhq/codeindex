@@ -1,6 +1,17 @@
 {
-  "description": "Points the agent at a structural query when it is about to answer a code question by scanning bytes. Matches Bash too: with auto mode active the harness routes file work through grep, cat and sed, so a Read|Grep|Glob matcher never fired in the mode that needs it most.",
+  "description": "Routes code questions to the index instead of a byte scan, at the two moments that decide it: the start of the session, before the agent has chosen a tool, and the moment it is about to scan. The PreToolUse matcher includes Bash because with auto mode active the harness routes file work through grep, cat and sed, so a Read|Grep|Glob matcher never fired in the mode that needs it most.",
   "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/session-brief.sh\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "Read|Grep|Glob|Bash",

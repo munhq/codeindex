@@ -18,6 +18,7 @@ const import_scan = @import("parser/import_scan.zig");
 const duplication = @import("analysis/duplication.zig");
 const clones = @import("analysis/clones.zig");
 const scanner_mod = @import("index/scanner.zig");
+const server_mod = @import("server/http.zig");
 // Imported for its OWN tests, which live beside the rule they cover. It was
 // absent from this aggregator, so the credential_in_manifest matcher shipped
 // untested — and reported 34 critical findings across five repositories, every
@@ -2146,4 +2147,52 @@ test "mcp: the handshake reports the build's version, not a literal" {
     // The real assertion: the string the handshake embeds IS the build option.
     const embedded = "{\"name\":\"codeindex\",\"version\":\"" ++ build_options.version ++ "\"}";
     try testing.expect(std.mem.indexOf(u8, embedded, build_options.version) != null);
+}
+
+test "mcp roots: a file URI becomes a path, percent-encoding and all" {
+    // Roots arrive as URIs, so a project under a directory with a space in its
+    // name arrives as %20. Adopting the raw URI names a directory that does not
+    // exist, and the server then reports "no usable workspace" while looking
+    // straight at the right one.
+    const cases = [_]struct { uri: []const u8, want: ?[]const u8 }{
+        .{ .uri = "file:///home/user/code/example", .want = "/home/user/code/example" },
+        .{ .uri = "file:///home/user/my%20project", .want = "/home/user/my project" },
+        .{ .uri = "file:///C:/code/example", .want = "C:/code/example" },
+        // Not a local path: another machine's disk, or another scheme entirely.
+        .{ .uri = "file://remote-host/share", .want = null },
+        .{ .uri = "https://example.com/repo", .want = null },
+        .{ .uri = "file://", .want = null },
+        // A stray percent that is not an escape must survive, not truncate.
+        .{ .uri = "file:///tmp/100%done", .want = "/tmp/100%done" },
+    };
+    for (cases) |c| {
+        const got = server_mod.uri_to_path(testing.allocator, c.uri);
+        if (c.want) |want| {
+            if (got == null) {
+                std.debug.print("uri_to_path({s}) returned null, want {s}\n", .{ c.uri, want });
+                return error.UriRejected;
+            }
+            defer testing.allocator.free(got.?);
+            try testing.expectEqualStrings(want, got.?);
+        } else {
+            if (got) |g| {
+                defer testing.allocator.free(g);
+                std.debug.print("uri_to_path({s}) returned {s}, want null\n", .{ c.uri, g });
+                return error.UriAccepted;
+            }
+        }
+    }
+}
+
+test "mcp roots: an indexed tree is only left alone when a root contains it" {
+    // The check that decides whether a guessed workspace is corrected. A
+    // prefix comparison without the boundary test treats /a/repo-old as inside
+    // /a/repo, which would leave the wrong tree indexed for the whole session.
+    try testing.expect(server_mod.paths_related("/a/repo", "/a/repo"));
+    try testing.expect(server_mod.paths_related("/a/repo/", "/a/repo"));
+    try testing.expect(server_mod.paths_related("/a/repo/pkg/api", "/a/repo"));
+    try testing.expect(server_mod.paths_related("/a/repo", "/a/repo/pkg/api"));
+    try testing.expect(!server_mod.paths_related("/a/repo-old", "/a/repo"));
+    try testing.expect(!server_mod.paths_related("/a/one", "/b/two"));
+    try testing.expect(!server_mod.paths_related("/a/repo", ""));
 }

@@ -275,10 +275,17 @@ def parse_ts(ts):
         return None
 
 
-# The first line of every hint this hook prints. Its presence in a transcript
-# means the hook fired in that session, which is what makes a before/after
-# comparison self-evidencing rather than a matter of recall.
-HINT_MARK = "codeindex is available"
+# What a codeindex intervention looks like in a transcript. Two hooks now speak:
+# the SessionStart brief, which lands before the agent has chosen a tool, and the
+# PreToolUse hint, which lands as it is about to scan. A session counts as told
+# when either appears, which is what keeps the before/after comparison
+# self-evidencing rather than a matter of recall.
+HINT_MARKS = (
+    "codeindex is available",              # PreToolUse hint, full form
+    "codeindex is live in this session",   # SessionStart brief
+    "codeindex answers this about",        # PreToolUse hint, short form
+    "codeindex is still available",        # PreToolUse hint, short generic form
+)
 
 
 def measure(homes, days, project):
@@ -292,7 +299,7 @@ def measure(homes, days, project):
         sid = os.path.basename(path)[:-6]
         rec = {
             "project": slug, "scanned": 0, "structural": 0,
-            "hinted": transcript_mentions(path, HINT_MARK),
+            "hinted": transcript_mentions(path, HINT_MARKS),
             "by_tool": defaultdict(int), "examples": [], "day": None,
         }
         for ts, name, inp in tool_calls(path):
@@ -335,12 +342,14 @@ def measure(homes, days, project):
     return sessions, days_acc
 
 
-def transcript_mentions(path, needle):
+def transcript_mentions(path, needles):
+    """True when the transcript carries any of `needles`."""
     try:
         with open(path, "r", errors="replace") as fh:
             for line in fh:
-                if needle in line:
-                    return True
+                for needle in needles:
+                    if needle in line:
+                        return True
     except OSError:
         pass
     return False
