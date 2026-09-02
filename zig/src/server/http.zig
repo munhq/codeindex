@@ -24,6 +24,7 @@ const filter_mod = @import("../core/filter.zig");
 const scanner = @import("../index/scanner.zig");
 const io = @import("../core/io.zig");
 const reload = @import("../core/reload.zig");
+const conn_mod = @import("../core/conn.zig");
 const watcher_mod = @import("../watcher.zig");
 
 /// How main() indexes and watches a workspace the client named. Adoption goes
@@ -64,6 +65,10 @@ pub const Server = struct {
     roots_request_id: ?i64 = null,
     adopt: ?AdoptFn = null,
     adopt_ctx: ?*anyopaque = null,
+    /// Guards the shared tree-sitter parser. Set by the daemon, where several
+    /// connections and the file watcher reach for the same parser; null in the
+    /// single-process server, which has only the watcher to contend with.
+    parser_lock: ?*io.Mutex = null,
 
     pub fn init(allocator: std.mem.Allocator, exp: *explorer.Explorer) Server {
         return .{ .allocator = allocator, .exp = exp };
@@ -72,6 +77,13 @@ pub const Server = struct {
     pub fn with_parser(self: *Server, p: *treesitter.Parser, f: *filter_mod.Filter) void {
         self.parser = p;
         self.filter = f;
+    }
+
+    /// Share the parser with other connections under this lock. Without it two
+    /// concurrent `index_workspace` calls enter one tree-sitter parser, which
+    /// keeps mutable scratch state and does not survive that.
+    pub fn with_parser_lock(self: *Server, m: *io.Mutex) void {
+        self.parser_lock = m;
     }
 
     /// Tell the server which tree it serves, whether that tree is alive, and
@@ -109,7 +121,7 @@ pub const Server = struct {
         self.roots_request_id = rid;
         var buf: [80]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"method\":\"roots/list\"}}\n", .{rid}) catch return;
-        try io.writeAll(out_file, msg);
+        try out_file.writeAll(msg);
         if (self.dead_reason) |reason| {
             std.debug.print("codeindex: nothing indexed ({s}); asking the client for its roots\n", .{reason});
         } else {
@@ -189,15 +201,25 @@ pub const Server = struct {
         std.debug.print("codeindex: no usable workspace among the client's roots\n", .{});
     }
 
+    /// Serve MCP on this process's stdio. The single-process path.
     pub fn run_mcp(self: *Server) !void {
-        const stdout_file = io.stdout();
+        return self.run_mcp_conn(.stdio, .stdio);
+    }
+
+    /// Serve MCP over one endpoint pair. `in` and `out` are the same socket in
+    /// the daemon and this process's stdin/stdout in the single-process server.
+    pub fn run_mcp_conn(self: *Server, in: conn_mod.Conn, out: conn_mod.Conn) !void {
 
         // Arm SIGHUP hot-reload: re-exec this binary in place on signal, keeping
         // the client's stdio socket, so a rebuilt binary rolls out to running
         // servers without a session restart. Safe only between requests — see
         // reload.zig; the enter_wait/leave_wait bracket around read() below marks
         // the one window where an immediate re-exec can't truncate a response.
-        reload.arm(self.allocator);
+        // Hot-reload re-execs this process in place, keeping the client's
+        // stdio. A daemon has many clients and none of them own its stdio, so
+        // re-execing there would drop every attached session at once. Arm it
+        // for the single-process server only.
+        if (in == .stdio) reload.arm(self.allocator);
 
         // Read stdin with a direct blocking syscall on fd 0 rather than through
         // the std.Io.Threaded backend. The index build + file watcher run that
@@ -214,7 +236,7 @@ pub const Server = struct {
             // during the blocking read re-execs immediately.
             reload.check_pending();
             reload.enter_wait();
-            const n = io.readSome(io.stdin(), &read_buf) catch {
+            const n = in.readSome(&read_buf) catch {
                 reload.leave_wait();
                 break;
             };
@@ -277,27 +299,27 @@ pub const Server = struct {
                     // answered 0.3.0, so every MCP client and every registry
                     // that reads serverInfo saw a version two releases stale.
                     try bw.writeAll(",\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"codeindex\",\"version\":\"" ++ build_options.version ++ "\"}}}\n");
-                    try io.writeAll(stdout_file, buf.written());
+                    try out.writeAll(buf.written());
                 } else if (std.mem.eql(u8, method, "notifications/initialized")) {
                     // The handshake is complete, so the server may now send
                     // requests of its own. This is the moment to check the one
                     // thing the launch directory cannot answer: which tree the
                     // user is actually working in. request_roots decides
                     // whether asking is worth a round trip.
-                    try self.request_roots(stdout_file);
+                    try self.request_roots(out);
                 } else if (std.mem.eql(u8, method, "notifications/roots/list_changed")) {
                     // The user added or removed a working directory (--add-dir,
                     // /add-dir). Ask again — the answer may now cover a tree
                     // this server could not resolve before.
                     self.roots_request_id = null;
-                    try self.request_roots(stdout_file);
+                    try self.request_roots(out);
                 } else if (std.mem.eql(u8, method, "tools/list")) {
-                    try self.write_tools_list(stdout_file, id);
+                    try self.write_tools_list(out, id);
                 } else if (std.mem.eql(u8, method, "tools/call")) {
                     const params = obj.get("params") orelse continue;
                     const tool_name = (params.object.get("name") orelse continue).string;
                     const arguments = params.object.get("arguments");
-                    try self.handle_tool_call(stdout_file, id, tool_name, arguments);
+                    try self.handle_tool_call(out, id, tool_name, arguments);
                 } else if (id != null) {
                     // Any other REQUEST gets -32601. JSON-RPC 2.0 §5: every
                     // request must be answered; only notifications (no id) may
@@ -319,7 +341,7 @@ pub const Server = struct {
                     try bw.writeAll(",\"error\":{\"code\":-32601,\"message\":\"Method not found: ");
                     try std.json.Stringify.encodeJsonStringChars(method, .{}, bw);
                     try bw.writeAll("\"}}\n");
-                    try io.writeAll(stdout_file, buf.written());
+                    try out.writeAll(buf.written());
                 }
             }
         }
@@ -702,6 +724,12 @@ pub const Server = struct {
                 // request.
                 self.exp.deinit();
                 self.exp.* = try explorer.Explorer.init(self.allocator);
+
+                // One tree-sitter parser, shared with the watcher and, in the
+                // daemon, with every other connection. Entering it twice
+                // corrupts its scratch state, so the scan holds the lock.
+                if (self.parser_lock) |m| m.lock();
+                defer if (self.parser_lock) |m| m.unlock();
 
                 const res = scanner.index_tree(self.allocator, self.exp, self.parser.?, self.filter.?, path.?, 10 * 1024 * 1024, .{}) catch {
                     try w.print("Failed to index: {s}", .{path.?});
@@ -1204,7 +1232,7 @@ pub const Server = struct {
         }
     }
 
-    fn write_tool_result(self: *Server, file: io.File, id: ?std.json.Value, text: []const u8, is_error: bool) !void {
+    fn write_tool_result(self: *Server, file: conn_mod.Conn, id: ?std.json.Value, text: []const u8, is_error: bool) !void {
         // Build the full response into a buffer, then write it atomically
         var buf = std.Io.Writer.Allocating.init(self.allocator);
         defer buf.deinit();
@@ -1218,10 +1246,10 @@ pub const Server = struct {
         try bw.writeAll(if (is_error) "true" else "false");
         try bw.writeAll("}}\n");
 
-        try io.writeAll(file, buf.written());
+        try file.writeAll(buf.written());
     }
 
-    fn write_response(self: *Server, file: io.File, id: ?std.json.Value, result: anytype) !void {
+    fn write_response(self: *Server, file: conn_mod.Conn, id: ?std.json.Value, result: anytype) !void {
         var buf = std.Io.Writer.Allocating.init(self.allocator);
         defer buf.deinit();
         const bw = &buf.writer;
@@ -1230,10 +1258,10 @@ pub const Server = struct {
         try write_id(bw, id);
         try bw.print(",\"result\":{f}}}\n", .{std.json.fmt(result, .{})});
 
-        try io.writeAll(file, buf.written());
+        try file.writeAll(buf.written());
     }
 
-    fn write_tools_list(self: *Server, file: io.File, id: ?std.json.Value) !void {
+    fn write_tools_list(self: *Server, file: conn_mod.Conn, id: ?std.json.Value) !void {
         var buf = std.Io.Writer.Allocating.init(self.allocator);
         defer buf.deinit();
         const bw = &buf.writer;
@@ -1281,7 +1309,7 @@ pub const Server = struct {
         }
         try bw.writeAll("]}}\n");
 
-        try io.writeAll(file, buf.written());
+        try file.writeAll(buf.written());
     }
 };
 

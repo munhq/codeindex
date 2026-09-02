@@ -26,6 +26,27 @@ const { resolveBinary, log } = require('./resolve.js');
   // handshake that never completes, which reads as "the server is broken".
   if (!args.includes('--mcp')) args.unshift('--mcp');
 
+  // Become the binary rather than supervising it.
+  //
+  // Once the binary is resolved this process adds nothing: stdio is already
+  // inherited, and the status it relays below is the child's own. What it does
+  // add is a resident Node heap for the whole life of the MCP session — one per
+  // session, sitting next to a server that is a few megabytes — and on a cold
+  // cache that heap is the one the download inflated. `execve` replaces this
+  // process with the binary, so the heap is gone rather than merely idle, and
+  // the process tree loses a level.
+  //
+  // `args` is the complete argv, argv[0] included. POSIX only, and Node 22.15 /
+  // 23.11 and later; anywhere else the supervised child below runs exactly as
+  // it always did.
+  if (typeof process.execve === 'function') {
+    try {
+      process.execve(bin, [bin, ...args], process.env);
+    } catch (err) {
+      log(`could not exec ${bin} (${err.message}); supervising it instead`);
+    }
+  }
+
   const res = spawnSync(bin, args, { stdio: 'inherit' });
   if (res.error) {
     log(`failed to exec ${bin}: ${res.error.message}`);

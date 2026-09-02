@@ -214,4 +214,4 @@ pub fn build(b: *std.Build) void {
 
 /// What a local build reports when no tag is passed. Keep it at the version
 /// being worked towards, so a developer build is never mistaken for a release.
-const DEFAULT_VERSION = "0.3.6";
+const DEFAULT_VERSION = "0.4.0";

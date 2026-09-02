@@ -7,7 +7,7 @@
     "url": "https://github.com/munhq/codeindex",
     "source": "github"
   },
-  "version": "0.3.6",
+  "version": "0.4.0",
   "icons": [
     {
       "src": "https://raw.githubusercontent.com/munhq/codeindex/main/docs/brand/icon-512.png",
@@ -21,7 +21,7 @@
     {
       "registryType": "npm",
       "identifier": "@munhq/codeindex",
-      "version": "0.3.6",
+      "version": "0.4.0",
       "transport": {
         "type": "stdio"
       },
@@ -29,6 +29,20 @@
         {
           "name": "CODEINDEX_WORKSPACE",
           "description": "Directory to index. Defaults to the enclosing project root of wherever the client starts the server, which is the right answer for every editor and agent that launches it inside a repository. Set it only when the server runs somewhere other than the code.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        },
+        {
+          "name": "CODEINDEX_NO_DAEMON",
+          "description": "Set to 1 to keep the index inside this server process. By default every session on one repository shares a single background daemon that parses and watches the tree once, and each session is a thin relay onto it. Turn that off for a sandbox with no writable runtime directory.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        },
+        {
+          "name": "CODEINDEX_DAEMON_IDLE_SECS",
+          "description": "Seconds with no session attached before the shared daemon exits and returns its memory. Default 900. Set 0 to keep it resident.",
           "isRequired": false,
           "isSecret": false,
           "format": "string"

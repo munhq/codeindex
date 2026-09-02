@@ -18,6 +18,7 @@ const os = require('os');
 const path = require('path');
 const https = require('https');
 const crypto = require('crypto');
+const { Transform, pipeline } = require('stream');
 
 const REPO = 'munhq/codeindex';
 const { version: VERSION } = require('../package.json');
@@ -83,6 +84,50 @@ function get(url, redirects = 0) {
   });
 }
 
+// Stream an asset to `dest`, hashing the bytes as they go past. Resolves to the
+// hex digest.
+//
+// The binary used to be collected chunk by chunk, concatenated into one 53 MB
+// Buffer, hashed, and only then written — two whole copies of it live in the
+// heap at the peak. This wrapper stays resident for the entire MCP session, and
+// V8 does not hand those pages back, so a session that downloaded carried about
+// 175 MB for as long as it lived, to supervise a server of a few megabytes.
+// Nothing here needs the file in memory: the hash is incremental and the write
+// is a pipe.
+function download(url, dest, redirects = 0) {
+  return new Promise((resolve, reject) => {
+    if (redirects > 5) return reject(new Error(`too many redirects for ${url}`));
+    https
+      .get(url, { headers: { 'user-agent': `codeindex-npm/${VERSION}` } }, (res) => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          res.resume();
+          return resolve(download(res.headers.location, dest, redirects + 1));
+        }
+        if (res.statusCode !== 200) {
+          res.resume();
+          return reject(new Error(`GET ${url} -> HTTP ${res.statusCode}`));
+        }
+        const hash = crypto.createHash('sha256');
+        // The hash is a pass-through in the pipeline, not a `data` listener
+        // beside it. Adding a listener puts the response into flowing mode,
+        // which disables backpressure: the bytes arrive as fast as the socket
+        // delivers them and queue inside the write stream, so the whole 53 MB
+        // ends up buffered anyway and the fix fixes nothing. `pipeline` keeps
+        // the source paused whenever the disk is behind.
+        const tap = new Transform({
+          transform(chunk, _enc, cb) {
+            hash.update(chunk);
+            cb(null, chunk);
+          },
+        });
+        pipeline(res, tap, fs.createWriteStream(dest, { mode: 0o755 }), (err) =>
+          err ? reject(err) : resolve(hash.digest('hex'))
+        );
+      })
+      .on('error', reject);
+  });
+}
+
 // The checksum published beside the binary is not proof on its own — whoever can
 // replace one can replace the other. It is here to catch a truncated download
 // and a mismatched tag, which are the failures that actually happen, and to make
@@ -96,16 +141,33 @@ async function verifiedDownload(asset) {
   if (!line) throw new Error(`SHA256SUMS for v${VERSION} does not list ${asset}`);
   const want = line.trim().split(/\s+/)[0];
 
-  const body = await get(`${base}/${asset}`);
-  const got = crypto.createHash('sha256').update(body).digest('hex');
-  if (got !== want) throw new Error(`checksum mismatch for ${asset}: want ${want}, got ${got}`);
-
   const dest = cachedBinary();
   fs.mkdirSync(path.dirname(dest), { recursive: true });
-  // Write then rename, so a killed download never leaves a half file that the
-  // next run treats as installed.
+  // Download to a temp name and rename, so a killed download never leaves a
+  // half file that the next run treats as installed. The name carries this
+  // process's pid because several sessions can start at once on a cold cache,
+  // and one shared temp name would let them write over each other.
   const tmp = `${dest}.tmp-${process.pid}`;
-  fs.writeFileSync(tmp, body, { mode: 0o755 });
+  const discard = () => {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {}
+  };
+
+  let got;
+  try {
+    got = await download(`${base}/${asset}`, tmp);
+  } catch (err) {
+    discard();
+    throw err;
+  }
+  if (got !== want) {
+    discard();
+    throw new Error(`checksum mismatch for ${asset}: want ${want}, got ${got}`);
+  }
+  // A umask can clear the mode the stream was created with, and a binary that
+  // is not executable fails later with a message about the wrong thing.
+  fs.chmodSync(tmp, 0o755);
   fs.renameSync(tmp, dest);
   log(`installed ${dest}`);
   return dest;

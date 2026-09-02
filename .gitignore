@@ -20,3 +20,7 @@ zig/vendor/
 
 # Browser automation leftovers
 .playwright-mcp/
+
+# Local commit guard. Not committed: it is machine tooling, and the list it
+# reads deliberately lives outside every repository.
+.githooks/

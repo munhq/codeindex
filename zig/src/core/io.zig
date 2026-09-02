@@ -13,6 +13,25 @@ pub const File = std.Io.File;
 pub const Dir = std.Io.Dir;
 pub const Limit = std.Io.Limit;
 
+var unique_seq = std.atomic.Value(u64).init(0);
+
+/// A value no other writer will pick, for a private temporary file name.
+///
+/// Not cryptographic and not meant to be: its only job is to stop two processes
+/// saving the same workspace from choosing one temp path and interleaving their
+/// writes into it. Zig 0.16 removed `std.crypto.random`, and a real entropy
+/// source is more than this needs — the clock, this stack's address under ASLR
+/// and a per-process counter separate every caller that matters.
+pub fn uniqueToken() u64 {
+    var local: u8 = 0;
+    var w = std.hash.Wyhash.init(@intFromPtr(&local));
+    const ns = std.Io.Timestamp.now(h(), .real).toNanoseconds();
+    w.update(std.mem.asBytes(&ns));
+    const seq = unique_seq.fetchAdd(1, .monotonic);
+    w.update(std.mem.asBytes(&seq));
+    return w.final();
+}
+
 var backend: std.Io.Threaded = undefined;
 var handle: std.Io = undefined;
 var ready = false;
@@ -223,16 +242,29 @@ pub fn readSome(file: File, buffer: []u8) !usize {
     };
 }
 
+/// Write all of `bytes` to a stream, continuing where the last write ended.
+///
+/// `writerStreaming`, not `writer`. The positional variant starts each writer at
+/// logical offset 0, which is invisible on a pipe — the MCP client's case — and
+/// destroys the output on anything seekable: `codeindex --mcp > log.txt` wrote
+/// every response over the top of the previous one, so the file ended up
+/// holding the last reply followed by the tail of the longest earlier one.
 pub fn writeAll(file: File, bytes: []const u8) !void {
     var buf: [64 * 1024]u8 = undefined;
-    var fw = file.writer(h(), &buf);
+    var fw = file.writerStreaming(h(), &buf);
     try fw.interface.writeAll(bytes);
     try fw.interface.flush();
 }
 
-/// Atomically write `bytes` to `path`: write to `<path>.tmp`, fsync, rename.
+/// Atomically write `bytes` to `path`: write to a private temp file, fsync,
+/// rename.
+///
+/// The temp name is randomised for the same reason the snapshot's is: more than
+/// one process serves a workspace, so a fixed `<path>.tmp` lets two writers
+/// interleave into one file and lets the errdefer delete a sibling's file
+/// mid-write.
 pub fn writeFileAtomic(gpa: std.mem.Allocator, path: []const u8, bytes: []const u8) !void {
-    const tmp_path = try std.fmt.allocPrint(gpa, "{s}.tmp", .{path});
+    const tmp_path = try std.fmt.allocPrint(gpa, "{s}.{x}.tmp", .{ path, uniqueToken() });
     defer gpa.free(tmp_path);
 
     const d = cwd();

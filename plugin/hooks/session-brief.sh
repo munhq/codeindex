@@ -54,7 +54,33 @@ src="$(find "$root" -maxdepth 3 \
 # `mcp__plugin_codeindex_codeindex__` when the plugin registers it — and this
 # hook cannot see which. Printing one form named a tool that does not exist in
 # the other install, which costs a failed call and sends the agent back to grep.
-cat <<'BRIEF'
+# ── One-time notice: this session is paying for npx ──────────────────────────
+#
+# The plugin must launch the server with `npx` — no placeholder it could use
+# resolves in every MCP client, so a plugin-relative path is not available (see
+# the commit that made this npx). The cost is a resident `npm exec` parent doing
+# nothing for the life of the session: measured between 34 MB and 160 MB, which
+# is now larger than the server it launched.
+#
+# Registering the binary directly removes that parent. Say so ONCE per plugin
+# version, only where the advice applies, and never as a nag.
+notice=""
+if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ]; then
+    state="${XDG_STATE_HOME:-$HOME/.local/state}/codeindex"
+    stamp="$state/npx-notice-${CODEINDEX_PLUGIN_VERSION:-0}"
+    if [ ! -e "$stamp" ]; then
+        mkdir -p "$state" 2>/dev/null && : > "$stamp" 2>/dev/null
+        notice="codeindex: the plugin starts this server through npx, which keeps an idle Node parent (34-160 MB) alive for the whole session. To drop it, install the binary and register it directly, then remove the plugin (its skills come with install.sh): curl -fsSL https://raw.githubusercontent.com/munhq/codeindex/main/install.sh | sh   -- do not run both, that is two servers and two writers on one snapshot."
+    fi
+fi
+
+# Plain text on stdout is the SessionStart contract and is what this hook has
+# always emitted. The notice needs a second channel — `systemMessage` is what
+# reaches the PERSON rather than the model — and that requires JSON, so the
+# brief travels as additionalContext in the same object. The plain-text path
+# below is untouched and is what runs on every session but one.
+if [ -n "$notice" ]; then
+    brief="$(cat <<'BRIEF'
 codeindex is live in this session: a tree-sitter index of this repository.
 Answer code questions with it before Read/Grep/Glob — and before `grep`, `rg`,
 `cat`, `sed -n` or `find` in Bash, where the same question goes when a
@@ -71,6 +97,21 @@ Call each tool by its bare name; your tool list shows the live prefix (load
 deferred MCP schemas first if it defers them). An empty result is not proof the
 code is absent: call `status`, and require `files` > 0 with `workspace` set to
 this repository — one `index_workspace` call with the project path fixes it.
+Read the bytes when you need them exactly, before an Edit.
+BRIEF
+)"
+    # Both strings are JSON-escaped rather than interpolated raw: the brief
+    # contains quotes and newlines, and one unescaped byte makes the whole hook
+    # output unparseable, which would drop the brief entirely.
+    esc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | awk 'BEGIN{ORS=""} {print (NR>1 ? "\\n" : "") $0}'; }
+    printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"%s"},"systemMessage":"%s"}\n' \
+        "$(esc "$brief
+$notice")" "$(esc "$notice")"
+    exit 0
+fi
+
+cat <<'BRIEF'
+codeindex is live in this session
 Read the bytes when you need them exactly, before an Edit.
 BRIEF
 exit 0

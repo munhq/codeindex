@@ -13,17 +13,26 @@ A structural code intelligence engine that runs as an **MCP server** for AI codi
 It indexes your codebase with tree-sitter (40+ languages), builds a trigram full-text index, an inverted word index, and a dependency graph — then exposes them through **16 MCP tools**.
 
 ```
- ┌─────────────┐      MCP (stdio)       ┌──────────────┐
- │  AI Agent   │ ◄─────────────────────► │   codeindex  │
- │ (Claude,    │   16 tools, JSON-RPC    │  (Zig binary) │
- │  Cursor…)   │                         │              │
- └─────────────┘                         └──────┬───────┘
-                                                │
-                                   tree-sitter parse (40+ langs)
-                                         trigram + word index
-                                         dependency graph
-                                         snapshot persistence
+ ┌─────────────┐   MCP (stdio)   ┌───────────┐            ┌──────────────────┐
+ │  AI Agent   │ ◄─────────────► │ codeindex │  socket    │ codeindex daemon │
+ │ (Claude,    │ 16 tools,       │  (relay)  │ ◄────────► │  one per         │
+ │  Cursor…)   │ JSON-RPC        └───────────┘            │  workspace       │
+ └─────────────┘                                          └────────┬─────────┘
+ ┌─────────────┐   MCP (stdio)   ┌───────────┐                     │
+ │  AI Agent   │ ◄─────────────► │ codeindex │ ◄───────────────────┘
+ │  (session 2)│                 │  (relay)  │   tree-sitter parse (40+ langs)
+ └─────────────┘                 └───────────┘   trigram + word index
+                                                 dependency graph
+                                                 one file watcher
+                                                 snapshot persistence
 ```
+
+Every session on a repository speaks plain stdio MCP, as before. Behind that,
+they share one index: the tree is parsed once, watched once and written once,
+however many agents are attached. Eight sessions on one repository used to be
+eight copies of the same index, eight file watchers and eight writers of the
+same snapshot; measured on a 720-file project, each session went from 87 MB to
+7 MB, against one shared 77 MB daemon.
 
 ## Why
 
@@ -139,6 +148,8 @@ The next time your agent starts, codeindex indexes your project in the backgroun
 
 ```bash
 codeindex --mcp                          # Run as MCP server (stdio)
+codeindex --mcp --no-daemon              # ...without sharing the workspace daemon
+codeindex --daemon-idle-secs 0           # Keep the daemon resident indefinitely
 codeindex --workspace ./my-project       # Index a specific directory
 codeindex --project-id my-project        # Project identifier
 codeindex -v                             # Print version
@@ -217,6 +228,14 @@ with the project path — rather than with "no results".
 - **Live watcher**: re-indexes on file create/modify/delete (background thread in MCP mode). inotify on Linux; a polling walk on macOS and Windows, which compares mtime and size every couple of seconds. `status` reports which backend is live as `watcher_backend`.
 - **Snapshot**: persists the full index to `.codeindex.json`, so a restart loads the snapshot instead of re-indexing
 - **MCP server**: JSON-RPC over stdio, implements the MCP 2024-11-05 protocol
+- **Workspace daemon**: the first session on a repository starts a background
+  daemon and becomes a relay onto it; later sessions just connect. A Unix-domain
+  socket on Linux, macOS and Windows 10 1803+, in `$XDG_RUNTIME_DIR/codeindex`
+  (or a per-user directory under `TMPDIR`), named by a hash of the workspace
+  **and the binary version** — so a rebuilt binary never inherits the previous
+  version's daemon. It exits after 15 minutes with no session attached. Anything
+  that goes wrong falls back to indexing in-process, which is what happened
+  before the daemon existed. Turn it off with `--no-daemon`.
 
 ## Platform support
 
