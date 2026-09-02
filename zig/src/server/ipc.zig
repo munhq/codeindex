@@ -162,15 +162,13 @@ pub fn paths(gpa: std.mem.Allocator, workspace_abs: []const u8, version: []const
     var dir = try runtime_dir(gpa);
     errdefer gpa.free(dir);
 
-    if (!usable_dir(dir)) {
+    // Each candidate must be creatable, made 0700, and then PROVE it is ours
+    // and closed to others — see `private_usable_dir`.
+    if (!private_usable_dir(dir)) {
         gpa.free(dir);
         dir = try fallback_dir(gpa);
-        if (!usable_dir(dir)) return error.NoRuntimeDir;
+        if (!private_usable_dir(dir)) return error.NoRuntimeDir;
     }
-    // 0700. A socket inherits the directory's reachability, so this is what
-    // stops another local user connecting to the index of this one's private
-    // repository. Best-effort: a platform without POSIX modes ignores it.
-    set_private(dir);
 
     var buf: [16]u8 = undefined;
     const s = slug(&buf, workspace_abs, version);
@@ -196,11 +194,37 @@ fn fallback_dir(gpa: std.mem.Allocator) ![]u8 {
     return std.fmt.allocPrint(gpa, "/tmp/codeindex-{d}", .{std.c.getuid()});
 }
 
-fn set_private(dir: []const u8) void {
+/// A candidate is accepted only when it can be created AND made private.
+///
+/// `usable_dir` alone accepted any writable directory, which on a shared /tmp
+/// includes one another local user created first; our socket would then sit in
+/// their directory, theirs to swap out. The ownership proof is chmod itself:
+/// chmod(2) fails with EPERM for anyone but the owner, so a chmod that
+/// succeeded means we own the directory and its mode is now 0700 — nobody else
+/// can even traverse it. No stat, no uid comparison, no window between the two.
+pub fn private_usable_dir(dir: []const u8) bool {
+    return usable_dir(dir) and set_private(dir);
+}
+
+/// The socket file itself: connect() needs write permission on it, so 0600
+/// closes it to every other user even if the directory were traversable.
+fn restrict_socket(sock_path: []const u8) void {
     if (builtin.os.tag == .windows) return;
-    const z = std.heap.page_allocator.dupeZ(u8, dir) catch return;
+    const z = std.heap.page_allocator.dupeZ(u8, sock_path) catch return;
     defer std.heap.page_allocator.free(z);
-    _ = std.c.chmod(z.ptr, 0o700);
+    _ = std.c.chmod(z.ptr, 0o600);
+}
+
+/// 0700. A socket inherits the directory's reachability, so this is what
+/// stops another local user connecting to the index of this one's private
+/// repository. Returns whether it took effect — which doubles as the proof
+/// that this user owns the directory (see `private_usable_dir`). Windows has
+/// no POSIX modes; the per-user LOCALAPPDATA path is the protection there.
+fn set_private(dir: []const u8) bool {
+    if (builtin.os.tag == .windows) return true;
+    const z = std.heap.page_allocator.dupeZ(u8, dir) catch return false;
+    defer std.heap.page_allocator.free(z);
+    return std.c.chmod(z.ptr, 0o700) == 0;
 }
 
 /// Connect to the daemon for this workspace, or null when none is listening.
@@ -221,6 +245,12 @@ pub fn connect(sock_path: []const u8) ?net.Stream {
 /// now. `AddressInUse` after the unlink means another daemon won the same race
 /// legitimately, and the caller must not take the workspace from it.
 pub fn listen(sock_path: []const u8) !net.Server {
+    const srv = try listen_inner(sock_path);
+    restrict_socket(sock_path);
+    return srv;
+}
+
+fn listen_inner(sock_path: []const u8) !net.Server {
     const addr = try net.UnixAddress.init(sock_path);
     return addr.listen(io.io(), .{}) catch |err| switch (err) {
         error.AddressInUse => {

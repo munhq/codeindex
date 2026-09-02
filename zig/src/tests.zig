@@ -2263,3 +2263,21 @@ test "ipc: a directory that cannot be created is refused, not retried forever" {
 test "ipc: an existing directory is usable without creating anything" {
     try testing.expect(ipc_mod.usable_dir("/tmp"));
 }
+
+test "ipc: a runtime directory another user owns is refused, not adopted" {
+    // The /tmp fallback is where another local user can have created the
+    // directory first. `usable_dir` says yes to anything writable; the
+    // ownership proof is chmod(2), which only the owner may do. /tmp itself is
+    // root-owned and world-writable on every POSIX system — exactly the shape.
+    if (builtin_mod.os.tag == .windows) return error.SkipZigTest;
+    try testing.expect(!ipc_mod.private_usable_dir("/tmp"));
+}
+
+test "ipc: a directory this user creates is accepted and left 0700" {
+    if (builtin_mod.os.tag == .windows) return error.SkipZigTest;
+    var buf: [64]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&buf, "/tmp/codeindex-test-{d}-{d}", .{ std.c.getuid(), std.c.getpid() });
+    defer io_mod.cwd().deleteTree(io_mod.io(), dir) catch {};
+    try testing.expect(ipc_mod.private_usable_dir(dir));
+    try testing.expect(ipc_mod.usable_dir(dir));
+}
