@@ -18,6 +18,7 @@ const import_scan = @import("parser/import_scan.zig");
 const duplication = @import("analysis/duplication.zig");
 const clones = @import("analysis/clones.zig");
 const scanner_mod = @import("index/scanner.zig");
+const ipc_mod = @import("server/ipc.zig");
 const server_mod = @import("server/http.zig");
 // Imported for its OWN tests, which live beside the rule they cover. It was
 // absent from this aggregator, so the credential_in_manifest matcher shipped
@@ -2199,4 +2200,66 @@ test "mcp roots: an indexed tree is only left alone when a root contains it" {
     try testing.expect(!server_mod.paths_related("/a/repo-old", "/a/repo"));
     try testing.expect(!server_mod.paths_related("/a/one", "/b/two"));
     try testing.expect(!server_mod.paths_related("/a/repo", ""));
+}
+
+test "ipc: one workspace always resolves to the same daemon" {
+    // Every client of a repository must derive the same socket name, or each
+    // one starts a daemon of its own and the split buys nothing.
+    var a: [16]u8 = undefined;
+    var b: [16]u8 = undefined;
+    const one = ipc_mod.slug(&a, "/home/user/code/example", "0.4.0");
+    const two = ipc_mod.slug(&b, "/home/user/code/example", "0.4.0");
+    try testing.expectEqualStrings(one, two);
+    try testing.expectEqual(@as(usize, 16), one.len);
+}
+
+test "ipc: two workspaces never share a daemon" {
+    var a: [16]u8 = undefined;
+    var b: [16]u8 = undefined;
+    const one = ipc_mod.slug(&a, "/home/user/code/example", "0.4.0");
+    const two = ipc_mod.slug(&b, "/home/user/code/other", "0.4.0");
+    try testing.expect(!std.mem.eql(u8, one, two));
+}
+
+test "ipc: a rebuilt binary does not inherit the old binary's daemon" {
+    // The upgrade bug this guards against is the invisible one: without the
+    // version in the name a new binary connects to a daemon still running the
+    // old code, the handshake succeeds, and every answer comes from the
+    // version the user believes they replaced.
+    var a: [16]u8 = undefined;
+    var b: [16]u8 = undefined;
+    const old = ipc_mod.slug(&a, "/home/user/code/example", "0.4.0");
+    const new = ipc_mod.slug(&b, "/home/user/code/example", "0.4.1");
+    try testing.expect(!std.mem.eql(u8, old, new));
+}
+
+test "ipc: the socket path stays inside the POSIX sun_path limit" {
+    // POSIX allows 108 bytes for a socket path and macOS 104. A path over the
+    // limit does not fail loudly: the client cannot connect, waits out its
+    // timeout and quietly indexes the workspace itself.
+    if (builtin_mod.os.tag == .windows) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    const dir = try ipc_mod.runtime_dir(gpa);
+    defer gpa.free(dir);
+    // directory + separator + 16 hex characters + ".sock"
+    try testing.expect(dir.len + 1 + 16 + 5 <= 104);
+}
+
+test "ipc: a directory that cannot be created is refused, not retried forever" {
+    // Zig 0.16's `createDirPath` walks BACK to the parent on ENOENT and forward
+    // again when a component exists. `/proc/x` returns ENOENT from mkdir rather
+    // than EACCES, so the parent exists, the child never can, and it oscillates
+    // between them at 100% of a core. The runtime directory comes from
+    // XDG_RUNTIME_DIR or TMPDIR — values this program does not control — so a
+    // hostile or merely stale one must be refused.
+    //
+    // If this regresses, this test does not fail: it hangs. That is the
+    // signature of the bug, and a timeout in CI is the right alarm for it.
+    if (builtin_mod.os.tag == .windows) return error.SkipZigTest;
+    try testing.expect(!ipc_mod.usable_dir("/proc/no-such-place/codeindex"));
+    try testing.expect(!ipc_mod.usable_dir("/proc/one/two/three/four/five/six/seven/eight/nine"));
+}
+
+test "ipc: an existing directory is usable without creating anything" {
+    try testing.expect(ipc_mod.usable_dir("/tmp"));
 }

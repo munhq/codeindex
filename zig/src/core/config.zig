@@ -28,6 +28,23 @@ pub const Config = struct {
     /// disables idle eviction. Env: CODEINDEX_IDLE_EVICT_SECS, flag:
     /// --idle-evict-secs. Only used in --mcp mode.
     idle_evict_secs: i64 = 300,
+    /// Run as the workspace's daemon: bind its socket and serve every client
+    /// that connects, instead of serving one client over stdio. Set by the
+    /// client that finds no daemon listening, never by a person.
+    daemon_mode: bool = false,
+    /// Whether an --mcp launch may hand itself off to a daemon. On by default:
+    /// one index per workspace instead of one per session. `--no-daemon` (or
+    /// CODEINDEX_NO_DAEMON=1) keeps the whole index inside this process, which
+    /// is what a sandbox without a writable runtime directory needs.
+    use_daemon: bool = true,
+    /// Seconds with no client attached before a daemon exits and gives its
+    /// memory back. 0 keeps it resident for the life of the login session.
+    daemon_idle_secs: i64 = 900,
+    /// Where a daemon must listen, as decided by the client that started it.
+    /// The client is already waiting on this exact path, so a daemon never
+    /// recomputes one: the two processes disagreeing is silent and total —
+    /// the daemon serves a socket nobody will ever connect to.
+    socket_path: ?[]const u8 = null,
 
     pub fn from_args(allocator: std.mem.Allocator, args_vec: std.process.Args) !Config {
         var config = Config{};
@@ -48,6 +65,21 @@ pub const Config = struct {
 
         if (io.getEnv(allocator, "CODEINDEX_PROJECT_ID")) |val| {
             config.project_id = val;
+        }
+
+        if (io.getEnv(allocator, "CODEINDEX_NO_DAEMON")) |val| {
+            defer allocator.free(val);
+            const t = std.mem.trim(u8, val, " \t\r\n");
+            if (t.len > 0 and !std.mem.eql(u8, t, "0") and !std.mem.eql(u8, t, "false")) {
+                config.use_daemon = false;
+            }
+        }
+
+        if (io.getEnv(allocator, "CODEINDEX_DAEMON_IDLE_SECS")) |val| {
+            defer allocator.free(val);
+            if (std.fmt.parseInt(i64, std.mem.trim(u8, val, " \t\r\n"), 10)) |secs| {
+                config.daemon_idle_secs = secs;
+            } else |_| {}
         }
 
         if (io.getEnv(allocator, "CODEINDEX_IDLE_EVICT_SECS")) |val| {
@@ -79,6 +111,23 @@ pub const Config = struct {
                 config.show_help = true;
             } else if (std.mem.eql(u8, arg, "--mcp")) {
                 config.mcp_mode = true;
+            } else if (std.mem.eql(u8, arg, "--socket")) {
+                if (args.next()) |val| {
+                    config.socket_path = if (comptime builtin.os.tag == .windows)
+                        allocator.dupe(u8, val) catch null
+                    else
+                        val;
+                }
+            } else if (std.mem.eql(u8, arg, "--daemon")) {
+                config.daemon_mode = true;
+            } else if (std.mem.eql(u8, arg, "--no-daemon")) {
+                config.use_daemon = false;
+            } else if (std.mem.eql(u8, arg, "--daemon-idle-secs")) {
+                if (args.next()) |val| {
+                    if (std.fmt.parseInt(i64, val, 10)) |secs| {
+                        config.daemon_idle_secs = secs;
+                    } else |_| {}
+                }
             } else if (std.mem.eql(u8, arg, "--workspace")) {
                 if (args.next()) |val| {
                     config.workspace_root = val;

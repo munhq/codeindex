@@ -67,12 +67,21 @@ pub const Snapshot = struct {
     /// file sitting in a directory, and any `version`-compatible file found at
     /// the path was loaded and served as the truth.
     pub fn save(exp: *explorer_mod.Explorer, path: []const u8, workspace_abs: []const u8) !void {
-        // Write to .tmp first, then rename for atomicity
+        // Write to a private temp file, then rename for atomicity.
+        //
+        // The temp name carries a random suffix because a workspace is served
+        // by more than one process: several MCP servers on one repository is
+        // the normal case, and every one of them saves after a reconcile. On a
+        // single fixed `<path>.tmp` they interleave their writes into the same
+        // file and rename the mixture into place, and the errdefer below
+        // deletes a sibling's file mid-write. The rename stays atomic; the
+        // write into the temp file now is too, because no one else has the name.
+        var name_buf: [640]u8 = undefined;
         const tmp_path = blk: {
-            var buf: [512]u8 = undefined;
-            const len = std.fmt.count("{s}.tmp", .{path});
-            if (len > buf.len) return error.PathTooLong;
-            break :blk std.fmt.bufPrint(&buf, "{s}.tmp", .{path}) catch unreachable;
+            const token = io.uniqueToken();
+            const len = std.fmt.count("{s}.{x}.tmp", .{ path, token });
+            if (len > name_buf.len) return error.PathTooLong;
+            break :blk std.fmt.bufPrint(&name_buf, "{s}.{x}.tmp", .{ path, token }) catch unreachable;
         };
 
         const file = try io.cwd().createFile(io.io(), tmp_path, .{});

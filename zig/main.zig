@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const models = @import("src/core/models.zig");
 const treesitter = @import("src/parser/treesitter.zig");
 const explorer = @import("src/index/explorer.zig");
@@ -9,6 +10,9 @@ const filter = @import("src/core/filter.zig");
 const config = @import("src/core/config.zig");
 const scanner = @import("src/index/scanner.zig");
 const io = @import("src/core/io.zig");
+const ipc = @import("src/server/ipc.zig");
+const proxy = @import("src/server/proxy.zig");
+const daemon_mod = @import("src/server/daemon.zig");
 
 // 0.2.0 changes two things a user can observe: the snapshot carries an identity
 // and is rejected when it does not match (format 3), and every line number the
@@ -159,6 +163,11 @@ fn print_help() !void {
         \\  --project-id <ID>     Project identifier
         \\  --idle-evict-secs <N> Evict in-RAM postings to the OS after N seconds
         \\                        idle; next query rebuilds them (default 300, 0=off)
+        \\  --no-daemon           Keep the index in this process instead of sharing
+        \\                        the workspace daemon (default: share it)
+        \\  --daemon              Run as the workspace daemon (started for you)
+        \\  --daemon-idle-secs <N> Exit the daemon after N seconds with no client
+        \\                        (default 900, 0=never)
         \\  -v, --version         Print version and exit
         \\  -h, --help            Print this help and exit
         \\
@@ -166,6 +175,8 @@ fn print_help() !void {
         \\  CODEINDEX_WORKSPACE        Same as --workspace
         \\  CODEINDEX_PROJECT_ID       Same as --project-id
         \\  CODEINDEX_IDLE_EVICT_SECS  Same as --idle-evict-secs
+        \\  CODEINDEX_NO_DAEMON        Set to 1 for --no-daemon
+        \\  CODEINDEX_DAEMON_IDLE_SECS Same as --daemon-idle-secs
         \\
     );
 }
@@ -178,6 +189,10 @@ const WatchCtx = struct {
     max_file_size: u64,
     workspace_root: []const u8,
     running: *bool,
+    /// Guards the parser. In the daemon the same parser is reachable from every
+    /// connection's `index_workspace`; tree-sitter parsers hold mutable scratch
+    /// state and cannot be entered twice.
+    parser_lock: ?*io.Mutex = null,
 };
 
 fn watch_callback(c: *WatchCtx, e: watcher.Event) !void {
@@ -190,6 +205,9 @@ fn watch_callback(c: *WatchCtx, e: watcher.Event) !void {
         .create, .modify => {
             const content = io.readFileAlloc(c.allocator, e.path, c.max_file_size) catch return;
             defer c.allocator.free(content);
+
+            if (c.parser_lock) |m| m.lock();
+            defer if (c.parser_lock) |m| m.unlock();
 
             const outline = c.parser.parse_file(e.path, language) catch |err| {
                 if (err == error.UnsupportedLanguage) {
@@ -239,6 +257,16 @@ const IdleCtx = struct {
     exp: *explorer.Explorer,
     running: *bool,
     idle_ms: i64,
+    /// Sessions currently attached, when this server is the workspace daemon.
+    ///
+    /// Eviction is skipped while any of them is connected. On the single-process
+    /// server the reprime that follows an eviction cost the one session that
+    /// asked; in the daemon it runs under `rebuild_mutex` and stalls EVERY
+    /// attached session at once — so the same trade is now several times worse,
+    /// and it is taken on behalf of people who are still working.
+    ///
+    /// Null in the single-process server, where the old behaviour is right.
+    live: ?*std.atomic.Value(i64) = null,
 };
 
 /// Return the in-RAM trigram/word postings to the OS once the MCP server has
@@ -257,9 +285,131 @@ fn idle_loop(ctx: *IdleCtx) void {
         if (!ctx.running.*) break;
         if (ctx.idle_ms <= 0) continue;
         if (ctx.exp.is_indexing() or ctx.exp.is_evicted()) continue;
+        // Somebody is attached. Their next query would pay for this.
+        if (ctx.live) |l| if (l.load(.acquire) > 0) continue;
         const idle = io.milliTimestamp() - ctx.exp.last_activity_ms.load(.acquire);
         if (idle >= ctx.idle_ms) ctx.exp.evict();
     }
+}
+
+/// Absolute path to this binary, resolved from argv[0].
+///
+/// Must be called before anything chdirs. The daemon is spawned later, from the
+/// project root, and a relative argv[0] such as `./codeindex` would no longer
+/// name this binary from there. A bare name is left alone on purpose: `spawn`
+/// resolves one through PATH, which is exactly what a PATH install wants.
+fn resolve_self_exe(allocator: std.mem.Allocator, args_vec: std.process.Args) ?[]u8 {
+    var args = if (comptime builtin.os.tag == .windows)
+        (std.process.Args.Iterator.initAllocator(args_vec, allocator) catch return null)
+    else
+        std.process.Args.Iterator.init(args_vec);
+    defer args.deinit();
+    const a0 = args.next() orelse return null;
+    if (a0.len == 0) return null;
+    if (std.mem.indexOfAny(u8, a0, "/\\") == null) return allocator.dupe(u8, a0) catch null;
+    if (io.realpathAlloc(allocator, a0)) |abs| {
+        defer allocator.free(abs);
+        return allocator.dupe(u8, abs) catch null;
+    } else |_| {
+        return allocator.dupe(u8, a0) catch null;
+    }
+}
+
+/// Start the workspace's daemon and leave it running.
+///
+/// Detached deliberately: its stdio is /dev/null because the client's stdio is
+/// a live JSON-RPC channel that must not carry another process's output, and
+/// its own process group means a Ctrl+C aimed at the session that happened to
+/// start it does not take the index away from every other session.
+fn spawn_daemon(
+    allocator: std.mem.Allocator,
+    environ: std.process.Environ,
+    exe: []const u8,
+    workspace_abs: []const u8,
+    sock_path: []const u8,
+    log_path: []const u8,
+    cfg: config.Config,
+) !void {
+    var idle_buf: [24]u8 = undefined;
+    const idle = try std.fmt.bufPrint(&idle_buf, "{d}", .{cfg.daemon_idle_secs});
+    var evict_buf: [24]u8 = undefined;
+    const evict = try std.fmt.bufPrint(&evict_buf, "{d}", .{cfg.idle_evict_secs});
+
+    // Every setting travels as an argument, including the socket path. The
+    // daemon must not re-derive any of this: it would be deriving it from a
+    // different process's view, and a socket path derived differently is a
+    // daemon nobody can reach.
+    const argv = [_][]const u8{
+        exe,                  "--daemon",
+        "--workspace",        workspace_abs,
+        "--socket",           sock_path,
+        "--daemon-idle-secs", idle,
+        "--idle-evict-secs",  evict,
+    };
+
+    // Hand the child this process's environment explicitly. `spawn` with no
+    // `environ_map` does NOT inherit it — the daemon started with an empty
+    // environment, so XDG_RUNTIME_DIR was unset and it chose a different
+    // runtime directory from the client that had just started it. Nothing
+    // failed loudly: the client waited out its timeout and quietly indexed the
+    // workspace itself, which is the whole cost the daemon exists to remove.
+    var env_map = environ.createMap(allocator) catch null;
+    defer if (env_map) |*m| m.deinit();
+
+    // The daemon's diagnostics go to a file of its own. They cannot go to this
+    // client's stderr: that belongs to one MCP session, and the daemon outlives
+    // it and serves others. A log that cannot be opened is not worth failing
+    // the launch over — the daemon still runs, silently.
+    const log: ?io.File = io.cwd().createFile(io.io(), log_path, .{}) catch null;
+    defer if (log) |lf| lf.close(io.io());
+
+    var child = try std.process.spawn(io.io(), .{
+        .argv = &argv,
+        .environ_map = if (env_map) |*m| m else null,
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = if (log) |lf| .{ .file = lf } else .ignore,
+        .pgid = if (comptime builtin.os.tag == .windows) null else 0,
+    });
+    _ = &child;
+}
+
+/// Serve this session from the workspace's daemon instead of indexing here.
+///
+/// Returns true when the whole session was served over the socket. False means
+/// the caller must go on and be a full server itself — the fallback is never
+/// worse than the behaviour that predates the daemon, so every failure here is
+/// a silent one.
+fn attach_to_daemon(
+    allocator: std.mem.Allocator,
+    environ: std.process.Environ,
+    exe: ?[]const u8,
+    workspace_abs: []const u8,
+    cfg: config.Config,
+) bool {
+    const p = ipc.paths(allocator, workspace_abs, VERSION) catch return false;
+    defer p.deinit(allocator);
+
+    if (ipc.connect(p.sock)) |stream| {
+        proxy.run(stream) catch {};
+        return true;
+    }
+
+    const exe_path = exe orelse return false;
+    spawn_daemon(allocator, environ, exe_path, workspace_abs, p.sock, p.log, cfg) catch return false;
+
+    // The daemon binds its socket before it parses anything, so this waits for
+    // a process to start, never for a tree to be indexed.
+    var waited_ms: u64 = 0;
+    while (waited_ms < 10 * std.time.ms_per_s) {
+        io.sleep(50 * std.time.ns_per_ms);
+        waited_ms += 50;
+        if (ipc.connect(p.sock)) |stream| {
+            proxy.run(stream) catch {};
+            return true;
+        }
+    }
+    return false;
 }
 
 pub fn main(init: std.process.Init.Minimal) !void {
@@ -270,6 +420,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     io.init(allocator);
     defer io.deinit();
+
+    // Before any chdir below: a relative argv[0] stops naming this binary once
+    // the process moves to the project root.
+    const self_exe = resolve_self_exe(allocator, init.args);
+    defer if (self_exe) |e| allocator.free(e);
 
     var cfg = config.Config.from_args(allocator, init.args) catch config.Config{};
 
@@ -383,8 +538,22 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // neither set. Scan, watch and filter from the canonical absolute root only.
     cfg.workspace_root = workspace_abs;
 
+    // One index per workspace, not one per session. Eight agents on one
+    // repository were eight parses of the same tree, eight file watchers and
+    // eight writers of the same snapshot; they are now eight sockets onto one.
+    // Tried before any of the expensive setup below, and skipped entirely when
+    // this launch has nothing to serve.
+    if (cfg.mcp_mode and !cfg.daemon_mode and cfg.use_daemon and ipc.supported and refused_reason == null) {
+        if (attach_to_daemon(allocator, init.environ, self_exe, workspace_abs, cfg)) return;
+        std.debug.print("codeindex: no daemon available, serving this session in-process\n", .{});
+    }
+
     var parser = try treesitter.Parser.init(allocator);
     defer parser.deinit();
+
+    // Shared by the watcher and by every `index_workspace` call. One parser,
+    // one lock: tree-sitter keeps mutable scratch state across a parse.
+    var parser_lock = io.Mutex{};
 
     var f = filter.Filter.init(allocator);
     defer f.deinit();
@@ -429,6 +598,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         .max_file_size = cfg.max_file_size,
         .workspace_root = cfg.workspace_root,
         .running = &watch_running,
+        .parser_lock = &parser_lock,
     };
 
     const BuildCtx = struct {
@@ -510,6 +680,78 @@ pub fn main(init: std.process.Init.Minimal) !void {
         .start_watcher = refused_reason == null,
     };
 
+    if (cfg.daemon_mode) {
+        // The workspace daemon. Started by whichever client found no socket,
+        // never by a person, and always with an explicit --workspace — which is
+        // also why it never adopts a root from a client's `roots`: one session
+        // must not be able to move the tree another session is reading.
+        if (refused_reason != null or !ipc.supported) return;
+
+        // No usable runtime directory means no daemon is possible on this
+        // machine. Exit quietly rather than crash: the client that started us
+        // falls back to serving in-process, which is the behaviour that
+        // predates the daemon.
+        const p = ipc.paths(allocator, workspace_abs, VERSION) catch |err| {
+            std.debug.print("codeindex: no runtime directory for the daemon ({s}); sessions will index in-process\n", .{@errorName(err)});
+            return;
+        };
+        defer p.deinit(allocator);
+
+        // Bind BEFORE indexing. The client that started this process is already
+        // waiting to connect, and the MCP handshake must be answered while the
+        // tree is still being parsed — the same reason the single-process
+        // server builds its index on a background thread.
+        //
+        // AddressInUse means a sibling daemon won the same race honestly. It
+        // serves the workspace; there is nothing for this process to add.
+        // The client that started this daemon already picked the path and is
+        // waiting on it. Its choice wins over anything recomputed here.
+        const sock_path = cfg.socket_path orelse p.sock;
+
+        var listener = ipc.listen(sock_path) catch |err| switch (err) {
+            error.AddressInUse => return,
+            else => return err,
+        };
+        defer listener.deinit(io.io());
+
+        const worker = try std.Thread.spawn(.{}, BuildCtx.build_then_watch, .{&build_ctx});
+
+        // Declared before the idle monitor because the monitor reads its
+        // connection count: postings are not evicted out from under an attached
+        // session.
+        var d = daemon_mod.Daemon{
+            .gpa = allocator,
+            .exp = &exp,
+            .parser = &parser,
+            .filter = &f,
+            .parser_lock = &parser_lock,
+            .workspace_abs = workspace_abs,
+            .snapshot_path = snapshot_path,
+            .sock_path = sock_path,
+            .server = listener,
+            .idle_exit_secs = cfg.daemon_idle_secs,
+        };
+
+        var idle_ctx = IdleCtx{
+            .exp = &exp,
+            .running = &watch_running,
+            .idle_ms = cfg.idle_evict_secs * std.time.ms_per_s,
+            .live = &d.live,
+        };
+        var idle_thread: ?std.Thread = null;
+        if (cfg.idle_evict_secs > 0)
+            idle_thread = try std.Thread.spawn(.{}, idle_loop, .{&idle_ctx});
+        std.debug.print("codeindex: daemon for {s} listening on {s}\n", .{ workspace_abs, sock_path });
+
+        try d.serve();
+
+        watch_running = false;
+        worker.join();
+        if (idle_thread) |t| t.join();
+        daemon_mod.save_on_exit(&d);
+        return;
+    }
+
     if (cfg.mcp_mode) {
         // Build + watch on a background thread so `initialize` is answered NOW,
         // not after a cold index / snapshot reprime (which can exceed the MCP
@@ -536,6 +778,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
         var srv = server.Server.init(allocator, &exp);
         srv.with_parser(&parser, &f);
+        srv.with_parser_lock(&parser_lock);
         srv.with_workspace(workspace_abs, refused_reason, !cfg.workspace_explicit);
 
         // A refused launch directory used to end the story: no index, no
