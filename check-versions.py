@@ -38,6 +38,17 @@ def from_zig(rel, const):
     return f"{rel}:{const}", match.group(1)
 
 
+def from_zon(rel):
+    """The Zig package manifest names the version too. It sat at 0.3.2 through two
+    releases because nothing read it; a stale manifest is a lie to anyone who
+    depends on the package with the Zig package manager."""
+    text = (ROOT / rel).read_text()
+    match = re.search(r'\.version\s*=\s*"([^"]+)"', text)
+    if not match:
+        sys.exit(f"{rel}: no .version — the check needs updating, not skipping")
+    return f"{rel}:.version", match.group(1)
+
+
 def collect():
     return [
         from_json("npm/package.json", "version"),
@@ -46,6 +57,7 @@ def collect():
         from_json("server.json", "packages", 0, "version"),
         from_json(".cursor-plugin/marketplace.json", "metadata", "version"),
         from_zig("zig/build.zig", "DEFAULT_VERSION"),
+        from_zon("zig/build.zig.zon"),
     ]
 
 
