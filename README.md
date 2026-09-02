@@ -3,6 +3,7 @@
 [![npm](https://img.shields.io/npm/v/%40munhq%2Fcodeindex?label=npm&color=cb3837)](https://www.npmjs.com/package/@munhq/codeindex)
 [![MCP Registry](https://img.shields.io/badge/MCP%20Registry-io.github.munhq%2Fcodeindex-000)](https://registry.modelcontextprotocol.io/v0/servers?search=codeindex)
 [![Smithery](https://img.shields.io/badge/Smithery-munhq%2Fcodeindex-7c3aed)](https://smithery.ai/servers/munhq/codeindex)
+[![Glama](https://img.shields.io/badge/Glama-munhq%2Fcodeindex-4f46e5)](https://glama.ai/mcp/servers/munhq/codeindex)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 [![Install in Cursor](https://img.shields.io/badge/Install-Cursor-000?logo=cursor)](cursor://anysphere.cursor-deeplink/mcp/install?name=codeindex&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsIkBtdW5ocS9jb2RlaW5kZXgiXX0=)
@@ -301,7 +302,7 @@ without that protocol in the way.
 
 ## Pairs with chat-recall
 
-codeindex answers questions about the code in front of you. **[chat-recall](https://github.com/munhq/chat-recall)** answers questions about the work you already did — it indexes your Claude Code, Gemini CLI, Codex, OpenCode and Antigravity sessions into one searchable history and exposes that over MCP too.
+codeindex answers questions about the code in front of you. **[chat-recall](https://github.com/munhq/chat-recall)** answers questions about the work you already did — it indexes your Claude Code, Gemini CLI, Codex, OpenCode, Antigravity and Cursor sessions into one searchable history and exposes that over MCP too.
 
 Together they cover both halves of what an agent forgets: codeindex stops it re-reading files it could have outlined, and chat-recall stops it redoing work it already finished. chat-recall detects a codeindex binary on your PATH and registers four extra code-intelligence tools when it finds one — neither requires the other.
 
