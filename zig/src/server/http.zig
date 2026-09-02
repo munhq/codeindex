@@ -53,6 +53,14 @@ pub const Server = struct {
     /// `watcher: true` unconditionally, including on a refused workspace where
     /// no watcher thread was ever started.
     watcher_live: bool = false,
+    /// True inside the workspace daemon, where `exp` is one index read by every
+    /// connection at once. Two things the single-process server may do are then
+    /// forbidden: freeing the index to rebuild it (a reader on another thread
+    /// still holds a pointer into it) and re-pointing it at a different tree
+    /// (one client must not move the tree another client is reading). A
+    /// same-tree re-index runs over the live index instead — `add_file` and
+    /// `remove_file` take the exclusive locks per file, so readers interleave.
+    shared_index: bool = false,
     /// The client advertised `roots` at initialize, so it can be asked where
     /// the project is instead of the server guessing from a launch directory.
     client_has_roots: bool = false,
@@ -718,12 +726,20 @@ pub const Server = struct {
                     }
                 }
             }
+            if (path != null and self.shared_index and !same_tree(path.?, self.workspace)) {
+                try w.print("Refused: this daemon serves {s} and does not re-point a shared index. Start a session in {s} to index it.", .{ self.workspace, path.? });
+                try self.write_tool_result(writer, id, out.written(), true);
+                return;
+            }
             if (path != null and self.parser != null and self.filter != null) {
                 // No adoption path, or a directory with no project marker: index
                 // it in place. Unwatched, but a deliberate answer to an explicit
-                // request.
-                self.exp.deinit();
-                self.exp.* = try explorer.Explorer.init(self.allocator);
+                // request. In the daemon the index stays; the scan updates it
+                // file by file under the per-index write locks.
+                if (!self.shared_index) {
+                    self.exp.deinit();
+                    self.exp.* = try explorer.Explorer.init(self.allocator);
+                }
 
                 // One tree-sitter parser, shared with the watcher and, in the
                 // daemon, with every other connection. Entering it twice
@@ -1476,6 +1492,13 @@ fn write_id(writer: anytype, id: ?std.json.Value) !void {
     } else {
         try writer.writeAll("null");
     }
+}
+
+/// Two paths name the same tree when they are equal after trailing slashes are
+/// dropped. Used to tell "re-index what this daemon serves" from "index some
+/// other directory", which a shared index must refuse.
+fn same_tree(a: []const u8, b: []const u8) bool {
+    return std.mem.eql(u8, std.mem.trimEnd(u8, a, "/"), std.mem.trimEnd(u8, b, "/"));
 }
 
 /// Mirror of main.zig's startup workspace guard. The `index_workspace` tool

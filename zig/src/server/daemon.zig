@@ -39,9 +39,10 @@ pub const Daemon = struct {
     exp: *explorer.Explorer,
     parser: *treesitter.Parser,
     filter: *filter_mod.Filter,
-    /// Guards the tree-sitter parser, which is shared by every connection's
-    /// `index_workspace` and by the watcher thread. Tree-sitter parsers hold
-    /// mutable scratch state and are not safe to enter twice.
+    /// Guards `parser`, which the watcher thread and the single-process server
+    /// share. Connections do NOT take it: each `serve_conn` owns a parser of its
+    /// own (`ts_parser_new` is cheap), so twenty sessions re-indexing at once
+    /// never queue behind one another or behind the watcher.
     parser_lock: *io.Mutex,
     workspace_abs: []const u8,
     snapshot_path: []const u8,
@@ -81,9 +82,19 @@ pub const Daemon = struct {
         };
         defer sock.destroy(gpa);
 
+        // A tree-sitter parser of this connection's own. The alternative — one
+        // parser behind a mutex — serialised every session's re-index behind
+        // every other's and behind the watcher. A parser is a small object;
+        // the grammars are static and shared regardless.
+        var parser = treesitter.Parser.init(gpa) catch return;
+        defer parser.deinit();
+
         var srv = http.Server.init(gpa, d.exp);
-        srv.with_parser(d.parser, d.filter);
-        srv.with_parser_lock(d.parser_lock);
+        srv.with_parser(&parser, d.filter);
+        // The index behind this server is read by every other connection at
+        // the same time. `index_workspace` must therefore never free and
+        // rebuild it in place, nor point it at a different tree.
+        srv.shared_index = true;
         // The daemon is only ever started with a workspace somebody resolved
         // explicitly, so the root is never a guess and the `roots` round trip
         // that corrects a guess never fires. That is also what keeps adoption
