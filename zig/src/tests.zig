@@ -2062,6 +2062,50 @@ test "watcher: the polling backend reports create, modify and delete" {
     try testing.expect(log.deleted >= 1);
 }
 
+test "watcher: the polling backend prunes a skipped directory instead of walking it" {
+    // The filter was consulted for directories and then given no way to act.
+    // `Dir.Walker` has no prune hook: `continue` on a directory entry skips the
+    // entry, not the subtree it has already queued, so every walk enumerated
+    // `target/` and `node_modules/` in full and merely declined to stamp what it
+    // found. Nothing about the reported files can see that — the filter dropped
+    // those either way — so this asserts the shape of the walk, which is where
+    // the cost was: a 325k-file `src-tauri/target` cannot be walked inside
+    // `poll_interval_ms`, so the walk restarted as soon as it finished and held
+    // a fifth of a core for the life of the daemon.
+    const watcher = @import("watcher.zig");
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io_mod.io(), ".", testing.allocator);
+    defer testing.allocator.free(root);
+
+    try tmp.dir.createDirPath(io_mod.io(), "src");
+    try tmp.dir.writeFile(io_mod.io(), .{ .sub_path = "src/a.zig", .data = "pub fn a() void {}\n" });
+
+    // Nested, because the bug was descent past the skip. A single level would
+    // still pass against a filter that only refused to stamp.
+    try tmp.dir.createDirPath(io_mod.io(), "node_modules/pkg/deep");
+    try tmp.dir.writeFile(io_mod.io(), .{ .sub_path = "node_modules/pkg/deep/b.js", .data = "module.exports = 1;\n" });
+
+    const restore = watcher.poll_interval_ms;
+    watcher.poll_interval_ms = 1;
+    defer watcher.poll_interval_ms = restore;
+
+    var w = try watcher.Polling.init(testing.allocator);
+    defer w.deinit();
+    try w.add_recursive(root);
+
+    const Sink = struct {
+        fn on(_: *@This(), _: watcher.Event) !void {}
+    };
+    var sink = Sink{};
+    try w.poll_events(&sink, Sink.on);
+
+    // The root and `src`. `node_modules` is skipped, so neither it nor the two
+    // directories beneath it are ever opened — five would mean it descended.
+    try testing.expectEqual(@as(usize, 2), w.dirs_walked);
+}
+
 test "mcp: a request line ending in CRLF is accepted" {
     // A client on Windows writing JSON-RPC through a text stream sends CRLF.
     // The loop splits on LF, so the CR stayed on the end of the JSON and the
