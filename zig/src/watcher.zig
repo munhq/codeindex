@@ -54,6 +54,14 @@ pub const Polling = struct {
     /// finished indexing or loading a snapshot, so announcing every file as
     /// created would re-index the whole workspace on startup.
     primed: bool,
+    /// Directories opened by the most recent walk.
+    ///
+    /// The cost of this backend is the shape of its walk, not the files it ends
+    /// up reporting, and a pruned subtree is invisible to any assertion about
+    /// reported paths — the filter dropped those files either way. Counting the
+    /// directories actually opened is what lets a test tell a prune from a walk
+    /// that enumerated the whole build tree and then discarded it.
+    dirs_walked: usize,
 
     pub fn init(allocator: std.mem.Allocator) !Polling {
         return .{
@@ -63,6 +71,7 @@ pub const Polling = struct {
             .f = filter_mod.Filter.init(allocator),
             .last_walk_ms = 0,
             .primed = false,
+            .dirs_walked = 0,
         };
     }
 
@@ -83,29 +92,68 @@ pub const Polling = struct {
     fn walk_into(self: *Polling, root: []const u8, current: *std.StringHashMap(io.Stamp)) !void {
         var dir = io.cwd().openDir(io.io(), root, .{ .iterate = true }) catch return;
         defer dir.close(io.io());
-        var walker = try dir.walk(self.allocator);
-        defer walker.deinit();
+        self.dirs_walked += 1;
+        try self.walk_dir(root, &dir, "", current);
+    }
 
-        while (walker.next(io.io()) catch null) |entry| {
-            if (entry.kind == .directory) {
-                if (self.f.should_skip_dir(entry.path)) continue;
-                continue;
-            }
-            if (entry.kind != .file) continue;
-            if (self.f.should_ignore(entry.path)) continue;
+    /// Descend by hand instead of with `Dir.Walker`, so a skipped directory is
+    /// never opened.
+    ///
+    /// The walker has no prune hook: `continue` on a directory entry skips that
+    /// entry, not its subtree, which it has already queued for descent. The
+    /// filter was consulted and then had no way to act, so every walk still
+    /// enumerated `target/` and `node_modules/` in full and only declined to
+    /// stamp what it found. On a Rust or Node workspace that is the entire build
+    /// tree — a `src-tauri/target` of 325k files cannot be walked inside
+    /// `poll_interval_ms`, so the walk restarted the moment it finished and the
+    /// thread sat at a fifth of a core for as long as the daemon lived, with a
+    /// flat 2 MB RSS that made it look idle. `should_skip_dir` is checked here
+    /// before `openDir`, which is what makes it a prune.
+    ///
+    /// `Dir.SelectiveWalker` would also prune, via next()/enter(). This descends
+    /// by hand to stay identical in shape to `scanner.zig`'s walk, so the two
+    /// consult the filter the same way and a change to one is a change to both.
+    fn walk_dir(
+        self: *Polling,
+        root: []const u8,
+        dir: *io.Dir,
+        rel_prefix: []const u8,
+        current: *std.StringHashMap(io.Stamp),
+    ) !void {
+        var it = dir.iterate();
+        while (it.next(io.io()) catch null) |entry| {
+            const rel = if (rel_prefix.len == 0)
+                self.allocator.dupe(u8, entry.name) catch continue
+            else
+                io.joinKey(self.allocator, &.{ rel_prefix, entry.name }) catch continue;
+            defer self.allocator.free(rel);
 
-            const stamp = io.stampFileFrom(entry.dir, entry.basename) orelse continue;
-            const full = std.fs.path.join(self.allocator, &.{ root, entry.path }) catch continue;
-            const gop = current.getOrPut(full) catch {
-                self.allocator.free(full);
-                continue;
-            };
-            if (gop.found_existing) {
-                self.allocator.free(full);
-            } else {
-                gop.key_ptr.* = full;
+            switch (entry.kind) {
+                .directory => {
+                    if (self.f.should_skip_dir(rel)) continue;
+                    var sub = dir.openDir(io.io(), entry.name, .{ .iterate = true }) catch continue;
+                    defer sub.close(io.io());
+                    self.dirs_walked += 1;
+                    try self.walk_dir(root, &sub, rel, current);
+                },
+                .file => {
+                    if (self.f.should_ignore(rel)) continue;
+
+                    const stamp = io.stampFileFrom(dir.*, entry.name) orelse continue;
+                    const full = io.joinKey(self.allocator, &.{ root, rel }) catch continue;
+                    const gop = current.getOrPut(full) catch {
+                        self.allocator.free(full);
+                        continue;
+                    };
+                    if (gop.found_existing) {
+                        self.allocator.free(full);
+                    } else {
+                        gop.key_ptr.* = full;
+                    }
+                    gop.value_ptr.* = stamp;
+                },
+                else => {},
             }
-            gop.value_ptr.* = stamp;
         }
     }
 
@@ -120,6 +168,7 @@ pub const Polling = struct {
             while (it.next()) |k| self.allocator.free(k.*);
             current.deinit();
         }
+        self.dirs_walked = 0;
         for (self.roots.items) |root| try self.walk_into(root, &current);
 
         if (!self.primed) {
