@@ -18,6 +18,11 @@ const cycles = @import("../analysis/cycles.zig");
 const duplication = @import("../analysis/duplication.zig");
 const clones = @import("../analysis/clones.zig");
 const plan_change = @import("../analysis/plan_change.zig");
+const spawn_scan = @import("../analysis/spawn_scan.zig");
+const dep_inventory = @import("../analysis/dep_inventory.zig");
+const leak_shapes = @import("../analysis/leak_shapes.zig");
+const logic_shapes = @import("../analysis/logic_shapes.zig");
+const field_contention = @import("../analysis/field_contention.zig");
 
 const treesitter = @import("../parser/treesitter.zig");
 const filter_mod = @import("../core/filter.zig");
@@ -1144,8 +1149,175 @@ pub const Server = struct {
                     try w.print(",\"fan_in\":{d},\"fan_out\":{d}}}", .{ m.fan_in, m.fan_out });
                 }
                 try w.writeAll("]}");
+            } else if (std.mem.eql(u8, analysis_type, "spawn_scan")) {
+                const findings = try spawn_scan.scan(self.allocator, self.exp);
+                defer spawn_scan.free_findings(self.allocator, findings);
+                const s = spawn_scan.summarize(findings);
+                try w.print("{{\"total\":{d},\"with_known_rate\":{d},\"with_long_lived_peer\":{d},\"findings\":[", .{
+                    s.total, s.with_known_rate, s.with_long_lived_peer,
+                });
+                const cap: usize = 100;
+                const n = @min(findings.len, cap);
+                for (findings[0..n], 0..) |f, i| {
+                    if (i > 0) try w.writeAll(",");
+                    try w.writeAll("{\"file\":");
+                    try write_json_string(w, f.file);
+                    try w.print(",\"line\":{d},\"runtime\":\"{s}\",\"language\":\"{s}\",\"loop_line\":{d},\"cost_score\":{d},", .{
+                        f.line, f.runtime, f.language, f.loop_line, f.cost_score,
+                    });
+                    if (f.period_secs) |p| {
+                        try w.print("\"period_secs\":{d},\"spawns_per_hour\":{d},", .{ p, f.spawns_per_hour.? });
+                    } else {
+                        try w.writeAll("\"period_secs\":null,\"spawns_per_hour\":null,");
+                    }
+                    try w.writeAll("\"via\":");
+                    if (f.via) |v| try write_json_string(w, v) else try w.writeAll("null");
+                    try w.writeAll(",\"long_lived_peer\":");
+                    if (f.long_lived_peer) |p| try write_json_string(w, p) else try w.writeAll("null");
+                    try w.writeAll("}");
+                }
+                try w.print("],\"truncated\":{s}}}", .{if (findings.len > cap) "true" else "false"});
+            } else if (std.mem.eql(u8, analysis_type, "deps")) {
+                var report = try dep_inventory.analyze(self.allocator, self.exp);
+                defer report.deinit(self.allocator);
+                try w.print("{{\"manifests\":{d},\"direct_dependencies\":{d},\"locked_packages\":{d}," ++
+                    "\"duplicate_count\":{d},\"unreferenced_count\":{d},\"single_reference_count\":{d},", .{
+                    report.manifests,      report.direct_dependencies, report.locked_packages,
+                    report.duplicates.len, report.unreferenced.len,    report.single_reference.len,
+                });
+                try w.writeAll("\"duplicates\":[");
+                const dcap: usize = 100;
+                const dn = @min(report.duplicates.len, dcap);
+                for (report.duplicates[0..dn], 0..) |d, i| {
+                    if (i > 0) try w.writeAll(",");
+                    try w.print("{{\"ecosystem\":\"{s}\",\"name\":", .{d.ecosystem.as_str()});
+                    try write_json_string(w, d.name);
+                    try w.writeAll(",\"versions\":[");
+                    for (d.versions, 0..) |v, vi| {
+                        if (vi > 0) try w.writeAll(",");
+                        try write_json_string(w, v);
+                    }
+                    try w.writeAll("]}");
+                }
+                try w.writeAll("],\"unreferenced\":[");
+                for (report.unreferenced, 0..) |d, i| {
+                    if (i > 0) try w.writeAll(",");
+                    try w.print("{{\"ecosystem\":\"{s}\",\"name\":", .{d.ecosystem.as_str()});
+                    try write_json_string(w, d.name);
+                    try w.writeAll(",\"manifest\":");
+                    try write_json_string(w, d.manifest);
+                    try w.writeAll("}");
+                }
+                try w.writeAll("],\"single_reference\":[");
+                for (report.single_reference, 0..) |d, i| {
+                    if (i > 0) try w.writeAll(",");
+                    try w.print("{{\"ecosystem\":\"{s}\",\"name\":", .{d.ecosystem.as_str()});
+                    try write_json_string(w, d.name);
+                    try w.writeAll(",\"manifest\":");
+                    try write_json_string(w, d.manifest);
+                    try w.writeAll("}");
+                }
+                try w.print("],\"duplicates_truncated\":{s},\"reference_scope\":", .{
+                    if (report.duplicates.len > dcap) "true" else "false",
+                });
+                try write_json_string(w, report.reference_scope);
+                try w.writeAll(",\"confirm_unused_with\":");
+                try write_json_string(w, report.confirm_unused_with);
+                try w.writeAll(",\"not_measured\":\"release binary size and resident text size are build and runtime facts, not source facts\"}");
+            } else if (std.mem.eql(u8, analysis_type, "leak_shapes")) {
+                const findings = try leak_shapes.scan(self.allocator, self.exp);
+                defer leak_shapes.free_findings(self.allocator, findings);
+                const s = leak_shapes.summarize(findings);
+                try w.print("{{\"total\":{d},\"leaked_allocation\":{d},\"growing_container\":{d}," ++
+                    "\"unbounded_cache\":{d},\"unbounded_channel\":{d},\"detached_spawn_in_loop\":{d}," ++
+                    "\"confidence\":\"shape\",\"findings\":[", .{
+                    s.total,           s.leaked_allocation, s.growing_container,
+                    s.unbounded_cache, s.unbounded_channel, s.detached_spawn_in_loop,
+                });
+                const cap: usize = 200;
+                const n = @min(findings.len, cap);
+                for (findings[0..n], 0..) |f, i| {
+                    if (i > 0) try w.writeAll(",");
+                    try w.writeAll("{\"file\":");
+                    try write_json_string(w, f.file);
+                    try w.print(",\"line\":{d},\"shape\":\"{s}\",\"confidence\":\"shape\",\"subject\":", .{ f.line, f.shape.as_str() });
+                    if (f.subject) |sub| try write_json_string(w, sub) else try w.writeAll("null");
+                    try w.writeAll(",\"evidence\":");
+                    try write_json_string(w, f.evidence);
+                    try w.writeAll(",\"runtime_check\":");
+                    try write_json_string(w, f.shape.runtime_check());
+                    try w.writeAll("}");
+                }
+                try w.print("],\"truncated\":{s}}}", .{if (findings.len > cap) "true" else "false"});
+            } else if (std.mem.eql(u8, analysis_type, "logic_shapes")) {
+                var report = try logic_shapes.analyze(self.allocator, self.exp);
+                defer report.deinit(self.allocator);
+                try w.print("{{\"total\":{d},\"declared_limits\":{d},\"limits\":[", .{
+                    report.findings.len, report.limits.len,
+                });
+                const lcap: usize = 20;
+                const ln = @min(report.limits.len, lcap);
+                for (report.limits[0..ln], 0..) |l, i| {
+                    if (i > 0) try w.writeAll(",");
+                    try w.writeAll("{\"file\":");
+                    try write_json_string(w, l.file);
+                    try w.print(",\"line\":{d},\"bytes\":{d},\"text\":", .{ l.line, l.bytes });
+                    try write_json_string(w, l.text);
+                    try w.writeAll("}");
+                }
+                try w.writeAll("],\"findings\":[");
+                const cap: usize = 200;
+                const n = @min(report.findings.len, cap);
+                for (report.findings[0..n], 0..) |f, i| {
+                    if (i > 0) try w.writeAll(",");
+                    try w.writeAll("{\"file\":");
+                    try write_json_string(w, f.file);
+                    try w.print(",\"line\":{d},\"kind\":\"{s}\",\"confidence\":\"{s}\",\"subject\":", .{
+                        f.line, f.kind.as_str(), f.kind.confidence(),
+                    });
+                    try write_json_string(w, f.subject);
+                    try w.writeAll(",\"detail\":");
+                    try write_json_string(w, f.detail);
+                    try w.writeAll(",\"evidence\":");
+                    try write_json_string(w, f.evidence);
+                    if (f.kind.runtime_check().len > 0) {
+                        try w.writeAll(",\"runtime_check\":");
+                        try write_json_string(w, f.kind.runtime_check());
+                    }
+                    if (f.constant_bytes) |b| {
+                        try w.print(",\"constant_bytes\":{d},\"percent_of_limit\":{d}", .{ b, f.percent_of_limit.? });
+                    }
+                    try w.writeAll("}");
+                }
+                try w.print("],\"truncated\":{s}}}", .{if (report.findings.len > cap) "true" else "false"});
+            } else if (std.mem.eql(u8, analysis_type, "field_contention")) {
+                var report = try field_contention.analyze(self.allocator, self.exp);
+                defer report.deinit(self.allocator);
+                try w.print("{{\"total_writers\":{d},\"contended_fields\":{d},\"contended\":[", .{
+                    report.total_writers, report.contended.len,
+                });
+                for (report.contended, 0..) |c, i| {
+                    if (i > 0) try w.writeAll(",");
+                    try w.writeAll("{\"field\":");
+                    try write_json_string(w, c.field);
+                    try w.print(",\"owner_count\":{d},\"writers\":[", .{c.owner_count});
+                    const wcap: usize = 40;
+                    const wn = @min(c.writers.len, wcap);
+                    for (c.writers[0..wn], 0..) |wr, wi| {
+                        if (wi > 0) try w.writeAll(",");
+                        try w.print("{{\"owner\":\"{s}\",\"file\":", .{wr.owner.as_str()});
+                        try write_json_string(w, wr.file);
+                        try w.print(",\"line\":{d},\"declares_field_manager\":{s},\"evidence\":", .{
+                            wr.line, if (wr.declares_field_manager) "true" else "false",
+                        });
+                        try write_json_string(w, wr.evidence);
+                        try w.writeAll("}");
+                    }
+                    try w.writeAll("]}");
+                }
+                try w.writeAll("]}");
             } else {
-                try w.print("Unknown analysis: {s}. Available: security, dead_code, unwrap_audit, test_coverage, architecture, crossref, type_drift, db_schema, migration_parity, manifest_compliance, literal_scan, coupling, cycles, duplication, clones, health", .{analysis_type});
+                try w.print("Unknown analysis: {s}. Available: security, dead_code, unwrap_audit, test_coverage, architecture, crossref, type_drift, db_schema, migration_parity, manifest_compliance, literal_scan, coupling, cycles, duplication, clones, spawn_scan, deps, leak_shapes, logic_shapes, field_contention, health", .{analysis_type});
             }
         } else if (std.mem.eql(u8, tool, "read_file")) {
             const path = get_string_arg(args, "path") orelse "";
@@ -1318,7 +1490,7 @@ pub const Server = struct {
             // index_workspace
             "{\"name\":\"index_workspace\",\"description\":\"Index or re-index a workspace directory\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Directory path to index\"}},\"required\":[\"path\"]},\"annotations\":{\"readOnlyHint\":false,\"openWorldHint\":false,\"destructiveHint\":false}}",
             // analyze
-            "{\"name\":\"analyze\",\"description\":\"Run code analysis. Types: security, dead_code, unwrap_audit, test_coverage, architecture, crossref, type_drift, db_schema, migration_parity, manifest_compliance, literal_scan, coupling, cycles, duplication, clones, health\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"analysis\":{\"type\":\"string\",\"description\":\"Analysis type: security, dead_code, unwrap_audit, test_coverage, architecture, crossref, type_drift, db_schema, migration_parity, manifest_compliance, literal_scan, coupling, cycles, duplication, clones, health\"}},\"required\":[\"analysis\"]},\"annotations\":{\"readOnlyHint\":true,\"openWorldHint\":false,\"destructiveHint\":false}}",
+            "{\"name\":\"analyze\",\"description\":\"Run code analysis. Types: security, dead_code, unwrap_audit, test_coverage, architecture, crossref, type_drift, db_schema, migration_parity, manifest_compliance, literal_scan, coupling, cycles, duplication, clones, spawn_scan, deps, leak_shapes, logic_shapes, field_contention, health\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"analysis\":{\"type\":\"string\",\"description\":\"Analysis type: security, dead_code, unwrap_audit, test_coverage, architecture, crossref, type_drift, db_schema, migration_parity, manifest_compliance, literal_scan, coupling, cycles, duplication, clones, spawn_scan, deps, leak_shapes, logic_shapes, field_contention, health\"}},\"required\":[\"analysis\"]},\"annotations\":{\"readOnlyHint\":true,\"openWorldHint\":false,\"destructiveHint\":false}}",
             // read_file
             "{\"name\":\"read_file\",\"description\":\"Read file contents with optional line range. Returns content with line numbers.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"File path relative to workspace root\"},\"start_line\":{\"type\":\"integer\",\"description\":\"Start line (1-based, default 1)\"},\"end_line\":{\"type\":\"integer\",\"description\":\"End line (inclusive, default: end of file)\"}},\"required\":[\"path\"]},\"annotations\":{\"readOnlyHint\":true,\"openWorldHint\":false,\"destructiveHint\":false}}",
             // read_symbol

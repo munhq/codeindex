@@ -118,7 +118,7 @@ The next time your agent starts, codeindex indexes your project in the backgroun
 | `read_file` | Read file contents with optional line range |
 | `read_symbol` | Read just a symbol's source code (with optional context lines) |
 | `index_workspace` | Index or re-index a workspace directory |
-| `analyze` | Run one of 16 code analyses (see below) |
+| `analyze` | Run one of 21 code analyses (see below) |
 
 ### Analyses (`analyze` tool)
 
@@ -139,6 +139,11 @@ The next time your agent starts, codeindex indexes your project in the backgroun
 | `cycles` | Circular dependency detection |
 | `duplication` | Reinvented free functions — the same job written twice |
 | `clones` | Copy-pasted function bodies, ignoring names and whitespace |
+| `spawn_scan` | An interpreter started on a loop or a timer, ranked by startup cost times spawn rate |
+| `deps` | Dependency inventory — duplicate versions, unreferenced crates, single-use crates |
+| `leak_shapes` | Shapes a leak has, each paired with the runtime series that decides it |
+| `logic_shapes` | A fixed byte constant against a declared memory limit, and a round trip per row |
+| `field_contention` | One declared-state field written by two or more owners |
 | `health` | Roll-up of the analyses above into one index-health report |
 
 ## Supported Languages
