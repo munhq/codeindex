@@ -25,9 +25,29 @@ const server_mod = @import("server/http.zig");
 // untested — and reported 34 critical findings across five repositories, every
 // one of them a dependency whose NAME contained a credential word.
 const manifest_compliance = @import("analysis/manifest_compliance.zig");
+// Same reason: these carry their own tests, beside the rule each one covers.
+const spawn_scan = @import("analysis/spawn_scan.zig");
+const dep_inventory = @import("analysis/dep_inventory.zig");
+const leak_shapes = @import("analysis/leak_shapes.zig");
+const logic_shapes = @import("analysis/logic_shapes.zig");
+const field_contention = @import("analysis/field_contention.zig");
+
+// Tests live beside the rule they cover, so every analyzer has to be referenced
+// here or its tests never run. `migration_parity` was absent, and four tests
+// covering the directory grouping compiled but never executed.
+const migration_parity = @import("analysis/migration_parity.zig");
 
 comptime {
     _ = manifest_compliance;
+    _ = spawn_scan;
+    _ = dep_inventory;
+    _ = leak_shapes;
+    _ = logic_shapes;
+    _ = field_contention;
+    _ = migration_parity;
+    _ = unwrap_audit;
+    _ = dead_code;
+    _ = security_scan;
 }
 
 // ── Test helpers ──────────────────────────────────────────────────────────────

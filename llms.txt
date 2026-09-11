@@ -86,8 +86,11 @@ Dependencies and impact:
 Orientation and audits:
 
 - `get_tree`, `get_hot_files`, `status`, `read_file`, `index_workspace`.
-- `analyze` (kind) — 16 analyses: security, dead_code, cycles, architecture,
-  unwrap_audit, clones, duplication, health and others.
+- `analyze` (kind) — 21 analyses: security, dead_code, cycles, architecture,
+  unwrap_audit, clones, duplication, health and others. Production-cost
+  analyses: spawn_scan (an interpreter on a timer), field_contention (one field,
+  two owners), logic_shapes (a fixed size against a declared limit, and N+1),
+  leak_shapes (shapes, each with the runtime series that decides it), deps.
 
 Every file-scoped tool takes `path`, relative to the workspace root. It is never
 `file`.
