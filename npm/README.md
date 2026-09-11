@@ -63,5 +63,5 @@ running whatever `codeindex` happens to be on `PATH` would make that a lie.
 ## Everything else
 
 Source, the other install paths (`curl \| bash`, a Claude Code plugin with the
-skill, a prebuilt binary), the 16 tools and the 16 analyses:
+skill, a prebuilt binary), the 16 tools and the 21 analyses:
 **https://github.com/munhq/codeindex**

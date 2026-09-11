@@ -182,6 +182,7 @@ def main():
     ws = tempfile.mkdtemp(prefix="codeindex_e2e_")
     os.makedirs(f"{ws}/src", exist_ok=True)
     os.makedirs(f"{ws}/util", exist_ok=True)
+    os.makedirs(f"{ws}/deploy", exist_ok=True)
     # Multi-language project. Go's import yields a quote-containing symbol name.
     files = {
         "src/lib.rs":  "pub mod helper;\npub fn run(){}\n",
@@ -193,6 +194,58 @@ def main():
         "a.ts":        "import { b } from './b';\nexport function aa(){return b;}\n",
         "b.ts":        "export const b = 1;\n",
         "conf.toml":   "title = \"x\"\n[server]\nhost = \"h\"\n",
+        # Fixtures for the production-cost analyses. Each one is the shape of a
+        # fault measured in a real repository, reduced to the smallest source
+        # that still triggers it.
+        "deploy/supervisor.sh":
+            "#!/usr/bin/env bash\n"
+            "POLL_SECS=\"${POLL_SECS:-15}\"\n"
+            "s3() { aws --endpoint-url \"$S3_ENDPOINT\" s3 \"$@\"; }\n"
+            "sync_app() {\n"
+            "  local sha; sha=\"$(s3 cp \"$1/DEPLOYED_SHA\" -)\"\n"
+            "}\n"
+            "node /srv/server.mjs &\n"
+            "while true; do\n"
+            "  sync_app /data\n"
+            "  sleep \"$POLL_SECS\"\n"
+            "done\n",
+        "deploy/deploy.sh":
+            "#!/usr/bin/env bash\n"
+            "kubectl set image deployment/api api=\"$IMAGE_DIGEST\"\n",
+        "deploy/tenant.yaml":
+            "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n"
+            "  annotations:\n    keel.sh/policy: force\n"
+            "spec:\n  template:\n    spec:\n      containers:\n"
+            "        - name: api\n          resources:\n            limits:\n"
+            "              memory: \"512Mi\"\n",
+        "src/k8s.rs":
+            "pub fn tenant(image: &str) -> Deployment {\n"
+            "    let container = Container {\n"
+            "        image: Some(image.to_string()),\n"
+            "    };\n"
+            "    Deployment { spec: Some(DeploymentSpec { containers: vec![container] }) }\n"
+            "}\n",
+        "src/db.rs":
+            "pub fn pool(path: &str) -> Result<SqlitePool> {\n"
+            "    let o = SqliteConnectOptions::new()\n"
+            "        .pragma(\"mmap_size\", \"268435456\");\n"
+            "    SqlitePool::connect_with(o)\n"
+            "}\n",
+        "src/store.rs":
+            "pub struct SessionStore {\n"
+            "    sessions: Mutex<HashMap<String, Session>>,\n"
+            "}\n"
+            "impl SessionStore {\n"
+            "    pub fn add(&self, k: String, v: Session) {\n"
+            "        self.sessions.lock().unwrap().insert(k, v);\n"
+            "    }\n"
+            "}\n",
+        "Cargo.toml":
+            "[package]\nname = \"e2e\"\nversion = \"0.1.0\"\n\n"
+            "[dependencies]\nserde_json = \"1\"\nnever_used_crate = \"0.1\"\n",
+        "Cargo.lock":
+            "[[package]]\nname = \"bitflags\"\nversion = \"1.3.2\"\n\n"
+            "[[package]]\nname = \"bitflags\"\nversion = \"2.6.0\"\n",
     }
     for rel, content in files.items():
         with open(f"{ws}/{rel}", "w") as f:
@@ -218,6 +271,14 @@ def main():
         # answered with nothing at all. A fix that replies to everything would
         # pass the two checks above and still be wrong.
         {"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {}},
+        # The analyses hand-write their JSON, so a bad escape ships invalid
+        # content that no unit test sees. Each one is parsed back here.
+        tool(20, "analyze", {"analysis": "spawn_scan"}),
+        tool(21, "analyze", {"analysis": "field_contention"}),
+        tool(22, "analyze", {"analysis": "logic_shapes"}),
+        tool(23, "analyze", {"analysis": "leak_shapes"}),
+        tool(24, "analyze", {"analysis": "deps"}),
+        tool(25, "analyze", {"analysis": "health"}),
     ]
     m = rpc(ws, calls)
 
@@ -259,6 +320,52 @@ def main():
     # A reply to a notification would arrive as id:null, which rpc() records
     # under the key None.
     check(None not in m, "a notification got no reply")
+
+    # Every analysis answers with parseable JSON, and each one reports the
+    # fault its fixture holds.
+    parsed = {}
+    for i, name in ((20, "spawn_scan"), (21, "field_contention"), (22, "logic_shapes"),
+                    (23, "leak_shapes"), (24, "deps"), (25, "health")):
+        check(i in m, f"analyze({name}) answered")
+        try:
+            parsed[name] = json.loads(text(m[i]))
+            check(True, f"analyze({name}) content is valid JSON")
+        except Exception as e:
+            check(False, f"analyze({name}) content valid JSON ({e})")
+
+    if "spawn_scan" in parsed:
+        f = parsed["spawn_scan"].get("findings", [])
+        check(any(x["runtime"] == "aws" and x["period_secs"] == 15 and x["via"] == "s3"
+                  for x in f),
+              f"spawn_scan finds aws every 15s through the s3 wrapper (got {f})")
+        check(any(x["long_lived_peer"] for x in f),
+              "spawn_scan names the long-lived process in the same script")
+
+    if "field_contention" in parsed:
+        c = parsed["field_contention"].get("contended", [])
+        check(any(x["field"] == "image" and x["owner_count"] >= 3 for x in c),
+              f"field_contention finds three owners of image (got {c})")
+
+    if "logic_shapes" in parsed:
+        f = parsed["logic_shapes"].get("findings", [])
+        check(any(x["kind"] == "sized_constant" and x["constant_bytes"] == 268435456
+                  and x["percent_of_limit"] == 50 for x in f),
+              f"logic_shapes finds mmap_size at 50% of the declared 512Mi (got {f})")
+
+    if "leak_shapes" in parsed:
+        f = parsed["leak_shapes"].get("findings", [])
+        check(any(x["subject"] == "SessionStore.sessions" for x in f),
+              f"leak_shapes finds the growing struct field (got {f})")
+        check(all(x.get("runtime_check") for x in f),
+              "every leak shape names the runtime series that settles it")
+
+    if "deps" in parsed:
+        d = parsed["deps"]
+        check(any(x["name"] == "bitflags" and len(x["versions"]) == 2
+                  for x in d.get("duplicates", [])),
+              f"deps finds bitflags in two versions (got {d.get('duplicates')})")
+        check(any(x["name"] == "never_used_crate" for x in d.get("unreferenced", [])),
+              f"deps finds the unreferenced crate (got {d.get('unreferenced')})")
 
     workspace_recovery()
 
