@@ -16,6 +16,7 @@ import pathlib
 import subprocess
 import sys
 import tempfile
+import time
 
 # Absolute: the workspace-recovery tests launch the server from a directory of
 # their own, and the build passes this path relative to zig/.
@@ -27,6 +28,24 @@ def check(cond, msg):
     print(("  ok  " if cond else " FAIL ") + msg)
     if not cond:
         failures.append(msg)
+
+
+# A daemon outlives the session that started it — that is the point of it. A
+# test must still not leave one running: on Windows the post-job cache clear
+# could not unlink codeindex.exe while a daemon held it, and the job failed
+# after every check had passed. One second of idle retires it.
+DAEMON_IDLE_SECS = "1"
+
+
+def server_env():
+    env = dict(os.environ)
+    env["CODEINDEX_DAEMON_IDLE_SECS"] = DAEMON_IDLE_SECS
+    return env
+
+
+def await_daemon_exit():
+    """Give any daemon this run started time to retire."""
+    time.sleep(int(DAEMON_IDLE_SECS) + 3)
 
 
 def daemon_logs():
@@ -56,7 +75,7 @@ def rpc(ws, calls):
     """Send a batch of JSON-RPC lines, return {id: parsed_message}."""
     p = subprocess.Popen([BIN, "--mcp", "--workspace", ws],
                          stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                         stderr=subprocess.PIPE, text=True)
+                         stderr=subprocess.PIPE, text=True, env=server_env())
     try:
         out, err = p.communicate("".join(json.dumps(c) + "\n" for c in calls), timeout=60)
     except subprocess.TimeoutExpired:
@@ -106,7 +125,7 @@ def dialogue(cwd, roots, calls, env_extra=None, settle=4.0):
     import threading
     import time
 
-    env = dict(os.environ)
+    env = server_env()
     for k in ("CODEINDEX_WORKSPACE", "CLAUDE_PROJECT_DIR"):
         env.pop(k, None)
     env.update(env_extra or {})
@@ -413,6 +432,8 @@ def main():
               f"deps finds the unreferenced crate (got {d.get('unreferenced')})")
 
     workspace_recovery()
+
+    await_daemon_exit()
 
     print()
     if failures:
