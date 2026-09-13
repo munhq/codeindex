@@ -29,12 +29,47 @@ def check(cond, msg):
         failures.append(msg)
 
 
+def daemon_logs():
+    """The daemon writes its own stderr to a log beside its socket. When a
+    session hangs, that file is the only account of what the daemon did."""
+    bases = []
+    for var in ("LOCALAPPDATA", "TEMP", "XDG_RUNTIME_DIR", "TMPDIR"):
+        v = os.environ.get(var)
+        if v:
+            bases += [os.path.join(v, "codeindex", "run"),
+                      os.path.join(v, "codeindex-run"),
+                      os.path.join(v, "codeindex")]
+    out = {}
+    for d in bases:
+        try:
+            for name in os.listdir(d):
+                if not name.endswith(".log"):
+                    continue
+                with open(os.path.join(d, name), errors="replace") as f:
+                    out[os.path.join(d, name)] = f.read()[-800:]
+        except OSError:
+            continue
+    return out or "no daemon log found"
+
+
 def rpc(ws, calls):
     """Send a batch of JSON-RPC lines, return {id: parsed_message}."""
     p = subprocess.Popen([BIN, "--mcp", "--workspace", ws],
                          stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                         stderr=subprocess.DEVNULL, text=True)
-    out, _ = p.communicate("".join(json.dumps(c) + "\n" for c in calls), timeout=60)
+                         stderr=subprocess.PIPE, text=True)
+    try:
+        out, err = p.communicate("".join(json.dumps(c) + "\n" for c in calls), timeout=60)
+    except subprocess.TimeoutExpired:
+        # A timeout used to abort the whole run with a traceback and no account
+        # of what the server did. Kill it, keep what it managed to say, and let
+        # the remaining checks report.
+        p.kill()
+        out, err = p.communicate()
+        failures.append(
+            "the server never exited\n"
+            f"      stderr    : {err!r}\n"
+            f"      stdout    : {out[:500]!r}\n"
+            f"      daemon log: {daemon_logs()!r}")
     msgs = {}
     for line in out.splitlines():
         line = line.strip()
