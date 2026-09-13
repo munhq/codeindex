@@ -96,7 +96,7 @@ pub const Config = struct {
         // Windows has no argv array to point into: the OS hands over one UTF-16
         // command line, so std refuses `init` there and requires an allocator to
         // split it. The slices are then owned by the iterator, and every value
-        // kept in `config` must outlive it — see the dupes below.
+        // kept in `config` must outlive it — pass it through `keep`.
         var args = if (comptime builtin.os.tag == .windows)
             try std.process.Args.Iterator.initAllocator(args_vec, allocator)
         else
@@ -113,10 +113,7 @@ pub const Config = struct {
                 config.mcp_mode = true;
             } else if (std.mem.eql(u8, arg, "--socket")) {
                 if (args.next()) |val| {
-                    config.socket_path = if (comptime builtin.os.tag == .windows)
-                        allocator.dupe(u8, val) catch null
-                    else
-                        val;
+                    config.socket_path = try keep(allocator, val);
                 }
             } else if (std.mem.eql(u8, arg, "--daemon")) {
                 config.daemon_mode = true;
@@ -130,12 +127,12 @@ pub const Config = struct {
                 }
             } else if (std.mem.eql(u8, arg, "--workspace")) {
                 if (args.next()) |val| {
-                    config.workspace_root = val;
+                    config.workspace_root = try keep(allocator, val);
                     config.workspace_explicit = true;
                 }
             } else if (std.mem.eql(u8, arg, "--project-id")) {
                 if (args.next()) |val| {
-                    config.project_id = val;
+                    config.project_id = try keep(allocator, val);
                 }
             } else if (std.mem.eql(u8, arg, "--idle-evict-secs")) {
                 if (args.next()) |val| {
@@ -151,6 +148,23 @@ pub const Config = struct {
         return config;
     }
 };
+
+/// Keep an argument past the iterator that produced it.
+///
+/// On Windows the iterator decodes argv into memory it owns and releases on
+/// `deinit`, so a slice retained in `config` dangles the moment `parse` returns.
+/// On POSIX the slices point into the process's own argv block, which outlives
+/// every caller, so there is nothing to copy.
+///
+/// `--workspace` kept the raw slice. The daemon is the only process started
+/// with `--workspace` on its command line, so on Windows it indexed freed
+/// memory, held 0 files, and answered every tool with "codeindex has no index"
+/// while reporting 64 bytes of rubbish as its workspace. Every session that
+/// proxied onto it got the same answer.
+fn keep(allocator: std.mem.Allocator, val: []const u8) ![]const u8 {
+    if (comptime builtin.os.tag != .windows) return val;
+    return allocator.dupe(u8, val);
+}
 
 pub const SNAPSHOT_NAME = ".codeindex.json";
 
