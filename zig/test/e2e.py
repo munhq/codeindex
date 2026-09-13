@@ -172,10 +172,20 @@ def workspace_recovery():
     # 3. CLAUDE_PROJECT_DIR, which Claude Code sets in every MCP server it
     #    spawns, is honoured without any round trip at all.
     msgs, asked = dialogue(nowhere, None,
-                           [tool(23, "find_symbol", {"name": "requireRemote"})],
+                           [tool(23, "find_symbol", {"name": "requireRemote"}),
+                            tool(24, "status", {})],
                            env_extra={"CLAUDE_PROJECT_DIR": proj})
     body = text(msgs[23]) if 23 in msgs else ""
-    check("app.ts" in body, f"CLAUDE_PROJECT_DIR names the workspace (got {body[:60]!r})")
+    # The refusal carries the reason and the workspace it settled on, and a
+    # 60-character slice cut both off — the Windows failure named no cause for
+    # five releases. On failure, say everything the server said.
+    st = text(msgs[24]) if 24 in msgs else ""
+    adopted = "app.ts" in body
+    check(adopted, "CLAUDE_PROJECT_DIR names the workspace" if adopted else
+          f"CLAUDE_PROJECT_DIR names the workspace\n"
+          f"      asked for: {proj!r}\n"
+          f"      answered : {body!r}\n"
+          f"      status   : {st!r}")
 
 
 def main():
