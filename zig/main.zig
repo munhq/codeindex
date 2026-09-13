@@ -363,6 +363,12 @@ fn spawn_daemon(
     const log: ?io.File = io.cwd().createFile(io.io(), log_path, .{}) catch null;
     defer if (log) |lf| lf.close(io.io());
 
+    // The daemon outlives this session, so it must not hold any part of the
+    // session's stdio. Pointing its own stdio elsewhere is not enough on
+    // Windows: an inheritable handle travels into the child whatever the child
+    // sets. See `io.disinherit_std_handles`.
+    io.disinherit_std_handles();
+
     var child = try std.process.spawn(io.io(), .{
         .argv = &argv,
         .environ_map = if (env_map) |*m| m else null,

@@ -8,6 +8,7 @@
 //! Zig release reshuffles the I/O API again, this is the only place to touch.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub const File = std.Io.File;
 pub const Dir = std.Io.Dir;
@@ -127,6 +128,35 @@ pub fn stdout() File {
 
 pub fn stdin() File {
     return File.stdin();
+}
+
+/// Keep this process's standard handles out of the children it spawns.
+///
+/// Windows `CreateProcess` with handle inheritance duplicates every inheritable
+/// handle into the child, whatever the child's own stdio is set to. The daemon
+/// is spawned with its stdio pointed at NUL and a log file, and it inherited
+/// the session's stdin and stdout anyway. The MCP client then closed stdin and
+/// the session's read never reached EOF, because the daemon was holding the
+/// write end open. The session never exited, and a client that reads to EOF —
+/// which is every one of them — waited on it forever.
+///
+/// Call this before spawning the daemon. It changes nothing about how this
+/// process uses its own handles; it only stops them travelling.
+pub fn disinherit_std_handles() void {
+    if (comptime builtin.os.tag != .windows) return;
+    const w = std.os.windows;
+    const k32 = struct {
+        extern "kernel32" fn SetHandleInformation(
+            hObject: w.HANDLE,
+            dwMask: w.DWORD,
+            dwFlags: w.DWORD,
+        ) callconv(.winapi) w.BOOL;
+    };
+    const HANDLE_FLAG_INHERIT: w.DWORD = 0x0000_0001;
+    const handles = [_]File{ File.stdin(), File.stdout(), File.stderr() };
+    for (handles) |f| {
+        _ = k32.SetHandleInformation(f.handle, HANDLE_FLAG_INHERIT, 0);
+    }
 }
 
 /// Change the process working directory (process-global, unrelated to `handle`).
