@@ -55,6 +55,21 @@ pub fn run(stream: net.Stream) !void {
     // Tell the daemon this client is finished so it can retire the connection,
     // then wait for anything still in flight the other way.
     stream.shutdown(io.io(), .send) catch {};
+
+    // The reader is blocked inside `readVec`, and `done` cannot wake it — only
+    // the socket can. Ending the send side asks the daemon to close its half,
+    // which is what unblocks the read; a peer that does not close leaves this
+    // process alive forever, and the MCP client then waits on a stdout that
+    // never reaches EOF. Give the drain a bounded moment, then end the read
+    // side here so the session always exits.
+    const drain_ms: u64 = 2000;
+    var waited_ms: u64 = 0;
+    while (!done.load(.acquire) and waited_ms < drain_ms) {
+        io.sleep(10 * std.time.ns_per_ms);
+        waited_ms += 10;
+    }
+    if (!done.load(.acquire)) stream.shutdown(io.io(), .recv) catch {};
+
     t.join();
     stream.close(io.io());
 }
