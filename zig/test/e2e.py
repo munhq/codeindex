@@ -43,9 +43,16 @@ def server_env():
     return env
 
 
+# The daemon's idle monitor polls every 5 s (src/server/daemon.zig), so a short
+# idle setting is noticed on the next poll, not when it elapses. Waiting four
+# seconds left the daemon still holding codeindex.exe, and the Windows cleanup
+# failed exactly as before.
+DAEMON_POLL_SECS = 5
+
+
 def await_daemon_exit():
-    """Give any daemon this run started time to retire."""
-    time.sleep(int(DAEMON_IDLE_SECS) + 3)
+    """Give any daemon this run started time to notice it is idle and retire."""
+    time.sleep(int(DAEMON_IDLE_SECS) + DAEMON_POLL_SECS + 4)
 
 
 def daemon_logs():
