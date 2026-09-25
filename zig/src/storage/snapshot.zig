@@ -169,19 +169,21 @@ pub const Snapshot = struct {
                 if (ii > 0) try w.writeAll(",");
                 try writeJsonString(w, imp);
             }
-            // Calls as [name, line, kind, self_receiver]; loops as
-            // [line_start, line_end, kind].
+            // Calls as [name, line, kind, self_receiver, qualifier, deferred,
+            // col]; loops as [line_start, line_end, kind, body_line, body_col].
             try w.writeAll("],\"calls\":[");
             for (o.calls, 0..) |c, ci| {
                 if (ci > 0) try w.writeAll(",");
                 try w.writeAll("[");
                 try writeJsonString(w, c.name);
-                try w.print(",{d},{d},{d}]", .{ c.line, @intFromEnum(c.kind), @intFromBool(c.self_receiver) });
+                try w.print(",{d},{d},{d},", .{ c.line, @intFromEnum(c.kind), @intFromBool(c.self_receiver) });
+                try writeJsonString(w, c.qualifier);
+                try w.print(",{d},{d}]", .{ @intFromBool(c.deferred), c.col });
             }
             try w.writeAll("],\"loops\":[");
             for (o.loops, 0..) |l, li| {
                 if (li > 0) try w.writeAll(",");
-                try w.print("[{d},{d},{d}]", .{ l.line_start, l.line_end, @intFromEnum(l.kind) });
+                try w.print("[{d},{d},{d},{d},{d}]", .{ l.line_start, l.line_end, @intFromEnum(l.kind), l.body_line, l.body_col });
             }
             try w.writeAll("]}");
         }
@@ -402,8 +404,8 @@ fn load_calls(allocator: std.mem.Allocator, value: ?std.json.Value) !LoadedCalls
     const arr = if (value) |v| (if (v == .array) v.array.items else &[_]std.json.Value{}) else &[_]std.json.Value{};
     var total: usize = 0;
     for (arr) |c| {
-        if (c != .array or c.array.items.len != 4 or c.array.items[0] != .string) return error.InvalidSnapshot;
-        total += c.array.items[0].string.len;
+        if (c != .array or c.array.items.len != 7 or c.array.items[0] != .string or c.array.items[4] != .string) return error.InvalidSnapshot;
+        total += c.array.items[0].string.len + c.array.items[4].string.len;
     }
     const names = try allocator.alloc(u8, total);
     errdefer allocator.free(names);
@@ -413,14 +415,19 @@ fn load_calls(allocator: std.mem.Allocator, value: ?std.json.Value) !LoadedCalls
     for (arr, 0..) |c, i| {
         const items = c.array.items;
         const n = items[0].string;
+        const q = items[4].string;
         @memcpy(names[off .. off + n.len], n);
+        @memcpy(names[off + n.len .. off + n.len + q.len], q);
         calls[i] = .{
             .name = names[off .. off + n.len],
             .line = @intCast(items[1].integer),
             .kind = std.enums.fromInt(models.CallKind, items[2].integer) orelse return error.InvalidSnapshot,
             .self_receiver = items[3].integer != 0,
+            .qualifier = names[off + n.len .. off + n.len + q.len],
+            .deferred = items[5].integer != 0,
+            .col = @intCast(items[6].integer),
         };
-        off += n.len;
+        off += n.len + q.len;
     }
     return .{ .calls = calls, .names = names };
 }
@@ -430,12 +437,14 @@ fn load_loops(allocator: std.mem.Allocator, value: ?std.json.Value) ![]models.Lo
     const loops = try allocator.alloc(models.Loop, arr.len);
     errdefer allocator.free(loops);
     for (arr, 0..) |l, i| {
-        if (l != .array or l.array.items.len != 3) return error.InvalidSnapshot;
+        if (l != .array or l.array.items.len != 5) return error.InvalidSnapshot;
         const items = l.array.items;
         loops[i] = .{
             .line_start = @intCast(items[0].integer),
             .line_end = @intCast(items[1].integer),
             .kind = std.enums.fromInt(models.LoopKind, items[2].integer) orelse return error.InvalidSnapshot,
+            .body_line = @intCast(items[3].integer),
+            .body_col = @intCast(items[4].integer),
         };
     }
     return loops;
