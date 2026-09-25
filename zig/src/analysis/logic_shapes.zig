@@ -8,6 +8,17 @@
 //! fixed constant in a repository that declares a memory limit the constant
 //! never reads, and the number that makes it actionable is the ratio.
 //!
+//! The limit a constant is compared with belongs to a deploy unit that runs
+//! the constant's file (`deploy_units.zig`). The tightest limit anywhere in the
+//! repository often belongs to another service.
+//!
+//! `pool_capacity` — more database connections than the pooler accepts. No
+//! single file holds it: the replica count sits in a manifest, the pool size in
+//! the code or its env, the capacity in the pooler's config.
+//!
+//!     replicas × pool_size  vs  max_client_conn
+//!        6     ×    20      vs        20
+//!
 //! The N+1 shape that lived here as `call_in_loop` is `call_cost.zig`: it
 //! counts round trips through the call graph.
 
@@ -15,16 +26,18 @@ const std = @import("std");
 const explorer = @import("../index/explorer.zig");
 const models = @import("../core/models.zig");
 const txt = @import("text.zig");
+const deploy_units = @import("deploy_units.zig");
 
 pub const Kind = enum {
     sized_constant,
+    pool_capacity,
 
     pub fn as_str(self: Kind) []const u8 {
         return @tagName(self);
     }
 
-    /// `sized_constant` is decidable: the constant either fits inside the
-    /// declared limit or it does not, and both numbers are in the repository.
+    /// Both are decidable: the numbers are in the repository, and they either
+    /// fit or they do not.
     pub fn confidence(self: Kind) []const u8 {
         _ = self;
         return "finding";
@@ -49,9 +62,13 @@ pub const Finding = struct {
     evidence: []const u8,
     /// `sized_constant`: the constant, in bytes.
     constant_bytes: ?u64 = null,
-    /// `sized_constant`: percent of the smallest declared limit. A constant at
-    /// or above 100% cannot fit, and one near it leaves nothing for the heap.
+    /// `sized_constant`: percent of the tightest limit of a unit that runs the
+    /// file. A constant at or above 100% cannot fit, and one near it leaves
+    /// nothing for the heap. Null when no limit is known to apply.
     percent_of_limit: ?u32 = null,
+    /// `pool_capacity`: connections the units open, and what the pooler takes.
+    demand: ?u64 = null,
+    capacity: ?u64 = null,
 };
 
 /// A memory limit the repository declares.
@@ -271,17 +288,24 @@ pub fn analyze(allocator: std.mem.Allocator, exp: *explorer.Explorer) !Report {
         try collect_limits(allocator, outline, content, &limits);
     }
 
-    // The tightest limit is the one a constant has to fit inside. Which file
-    // declares it goes into the finding, because the tightest limit in a
-    // multi-service repository often belongs to another service, and the reader
-    // has to see that to judge the ratio.
-    var smallest: ?u64 = null;
+    var units = try deploy_units.find(allocator, exp);
+    defer units.deinit();
+    var unit_idx = std.ArrayList(usize).empty;
+    defer unit_idx.deinit(allocator);
+
+    // One scope for the whole repository: at most one deploy unit declares a
+    // memory limit, or every declared limit sits in one file.
+    var limited_units: usize = 0;
+    for (units.units.items) |u| {
+        if (u.memory_limits.items.len > 0) limited_units += 1;
+    }
+    var one_scope = limited_units <= 1;
+    for (limits.items) |l| {
+        if (!std.mem.eql(u8, l.file, limits.items[0].file) and limited_units == 0) one_scope = false;
+    }
     var smallest_at: ?usize = null;
     for (limits.items, 0..) |l, i| {
-        if (smallest == null or l.bytes < smallest.?) {
-            smallest = l.bytes;
-            smallest_at = i;
-        }
+        if (smallest_at == null or l.bytes < limits.items[smallest_at.?].bytes) smallest_at = i;
     }
 
     // Pass 2: the shapes.
@@ -294,7 +318,21 @@ pub fn analyze(allocator: std.mem.Allocator, exp: *explorer.Explorer) !Report {
         const lang = outline.language;
         const content = exp.content_of(allocator, file_id) orelse continue;
         const file_reads_limit = contains_any(content, &derives_from_limit);
-        if (smallest == null or file_reads_limit) continue;
+        if (limits.items.len == 0 or file_reads_limit) continue;
+
+        // The tightest limit among the units that run this file.
+        try units.units_for(outline.path, &unit_idx, allocator);
+        var unit_limit: ?deploy_units.Quantity = null;
+        var unit_name: []const u8 = "";
+        for (unit_idx.items) |ui| {
+            const u = units.units.items[ui];
+            for (u.memory_limits.items) |q| {
+                if (unit_limit == null or q.bytes < unit_limit.?.bytes) {
+                    unit_limit = q;
+                    unit_name = u.name;
+                }
+            }
+        }
 
         var line_no: usize = 0;
         var line_it = std.mem.splitScalar(u8, content, '\n');
@@ -304,25 +342,41 @@ pub fn analyze(allocator: std.mem.Allocator, exp: *explorer.Explorer) !Report {
             if (t.len == 0 or txt.is_comment(t, lang)) continue;
             if (!contains_any_ci(t, &sizing_keys)) continue;
             const bytes = sizing_constant(t) orelse continue;
-            // A fixed byte constant against a declared limit.
-            const pct: u32 = @intCast(@min(@as(u64, 100_000), bytes * 100 / smallest.?));
-            const tightest = limits.items[smallest_at.?];
+            var pct: ?u32 = null;
+            const detail = if (unit_limit) |q| blk: {
+                pct = @intCast(@min(@as(u64, 100_000), bytes * 100 / q.bytes));
+                break :blk try std.fmt.allocPrint(
+                    allocator,
+                    "{d} bytes is fixed. The unit that runs this file, {s}, is limited to {s} at {s}:{d}, so the constant is {d}% of it. Nothing links them.",
+                    .{ bytes, unit_name, q.text, q.at.file, q.at.line, pct.? },
+                );
+            } else if (one_scope and smallest_at != null) blk: {
+                const tightest = limits.items[smallest_at.?];
+                pct = @intCast(@min(@as(u64, 100_000), bytes * 100 / tightest.bytes));
+                break :blk try std.fmt.allocPrint(
+                    allocator,
+                    "{d} bytes is fixed. The memory limit this repository declares is {s} at {s}:{d}, so the constant is {d}% of it. Nothing links them.",
+                    .{ bytes, tightest.text, tightest.file, tightest.line, pct.? },
+                );
+            } else try std.fmt.allocPrint(
+                allocator,
+                "{d} bytes is fixed. The repository declares memory limits for {d} deploy units, and no unit found runs this file, so no limit is known to apply.",
+                .{ bytes, limited_units },
+            );
             try findings.append(allocator, .{
                 .file = outline.path,
                 .line = line_no,
                 .kind = .sized_constant,
                 .subject = try allocator.dupe(u8, sizing_key_in(t) orelse "size"),
-                .detail = try std.fmt.allocPrint(
-                    allocator,
-                    "{d} bytes is fixed. The tightest memory limit this repository declares is {s} at {s}:{d}, so the constant is {d}% of it. Nothing links them.",
-                    .{ bytes, tightest.text, tightest.file, tightest.line, pct },
-                ),
+                .detail = detail,
                 .evidence = try allocator.dupe(u8, t),
                 .constant_bytes = bytes,
                 .percent_of_limit = pct,
             });
         }
     }
+
+    try pool_capacity(allocator, exp, &units, &findings);
 
     const found = try findings.toOwnedSlice(allocator);
     // The tightest fit first: a constant at 90% of the limit before one at 5%.
@@ -339,6 +393,142 @@ pub fn analyze(allocator: std.mem.Allocator, exp: *explorer.Explorer) !Report {
         .limits = try limits.toOwnedSlice(allocator),
         .findings = found,
     };
+}
+
+// ── Shape: more connections than the pooler takes ────────────────────────────
+
+/// Env vars that size a connection pool.
+const pool_env_names = [_][]const u8{
+    "POOL_SIZE", "POOL_MAX", "MAX_POOL_SIZE", "DB_POOL", "DATABASE_POOL", "PG_POOL", "MAX_CONNECTIONS", "DB_MAX_CONNECTIONS", "CONNECTION_LIMIT",
+};
+
+/// Calls and keys that size a connection pool in code, each followed by the
+/// integer: sqlx `max_connections(20)`, deadpool and bb8 `max_size(20)`,
+/// SQLAlchemy `pool_size=20`, Go `SetMaxOpenConns(20)`, node-postgres and
+/// mysql2 `connectionLimit: 20`, Prisma `connection_limit=20`.
+const pool_markers = [_][]const u8{
+    ".max_connections(", ".max_size(",        "pool_size=", "pool_size =", "SetMaxOpenConns(", "maxPoolSize:", "maxPoolSize =",
+    "connectionLimit:",  "connection_limit=",
+};
+
+const PoolSize = struct { value: u64, at: deploy_units.Located, text: []const u8 };
+
+/// The first integer right after a marker: `.max_connections(20)` → 20. A
+/// value read from somewhere (`env::var`, a variable) states no number.
+fn pool_size_in(line: []const u8) ?u64 {
+    for (&pool_markers) |m| {
+        const at = std.mem.indexOf(u8, line, m) orelse continue;
+        const rest = std.mem.trimStart(u8, line[at + m.len ..], " \t\"'");
+        var end: usize = 0;
+        while (end < rest.len and std.ascii.isDigit(rest[end])) end += 1;
+        if (end == 0) continue;
+        if (end < rest.len and (ident_char(rest[end]) or rest[end] == '.')) continue;
+        return std.fmt.parseInt(u64, rest[0..end], 10) catch null;
+    }
+    return null;
+}
+
+fn env_pool_size(u: deploy_units.Unit) ?PoolSize {
+    var best: ?PoolSize = null;
+    for (u.env.items) |e| {
+        var named = false;
+        for (&pool_env_names) |n| {
+            if (std.ascii.indexOfIgnoreCase(e.name, n) != null) named = true;
+        }
+        if (!named) continue;
+        const v = std.fmt.parseInt(u64, std.mem.trim(u8, e.value, " \t\"'"), 10) catch continue;
+        if (best == null or v > best.?.value) best = .{ .value = v, .at = e.at, .text = e.name };
+    }
+    return best;
+}
+
+/// Whether the unit's env or code names the provider: a `DATABASE_URL` that
+/// points at `pg-pooler-rw`.
+fn unit_names(u: deploy_units.Unit, name: []const u8) bool {
+    for (u.env.items) |e| {
+        if (std.mem.indexOf(u8, e.value, name) != null) return true;
+    }
+    return false;
+}
+
+fn pool_capacity(allocator: std.mem.Allocator, exp: *explorer.Explorer, units: *deploy_units.Units, findings: *std.ArrayList(Finding)) !void {
+    if (units.providers.items.len == 0 or units.units.items.len == 0) return;
+
+    // Each unit's pool: its env first, then the code its image builds. The
+    // largest size a unit states is what it can open.
+    const pools = try allocator.alloc(?PoolSize, units.units.items.len);
+    defer allocator.free(pools);
+    for (units.units.items, 0..) |u, i| pools[i] = env_pool_size(u);
+
+    var idx = std.ArrayList(usize).empty;
+    defer idx.deinit(allocator);
+    var it = exp.outlines.iterator();
+    while (it.next()) |entry| {
+        const file_id = entry.key_ptr.*;
+        if (exp.deleted_files.get(file_id) != null) continue;
+        const outline = entry.value_ptr.*;
+        if (is_excluded_path(outline.path)) continue;
+        switch (outline.language) {
+            .rust, .python, .go, .typescript, .javascript, .java, .kotlin => {},
+            else => continue,
+        }
+        const content = exp.content_of(allocator, file_id) orelse continue;
+        var line_no: usize = 0;
+        var li = std.mem.splitScalar(u8, content, '\n');
+        while (li.next()) |raw| {
+            line_no += 1;
+            const t = std.mem.trim(u8, raw, " \t\r");
+            if (t.len == 0 or txt.is_comment(t, outline.language)) continue;
+            const v = pool_size_in(t) orelse continue;
+            try units.units_for(outline.path, &idx, allocator);
+            for (idx.items) |ui| {
+                if (pools[ui] == null or v > pools[ui].?.value) pools[ui] = .{ .value = v, .at = .{ .file = outline.path, .line = line_no }, .text = t };
+            }
+        }
+    }
+
+    for (units.providers.items) |p| {
+        var demand: u64 = 0;
+        var consumers: usize = 0;
+        var last: usize = 0;
+        var parts = std.ArrayList(u8).empty;
+        defer parts.deinit(allocator);
+        for (units.units.items, 0..) |u, i| {
+            const pool = pools[i] orelse continue;
+            // A unit that names the provider uses it; with one provider in the
+            // repository, every unit with a pool does.
+            if (units.providers.items.len > 1 and !unit_names(u, p.name)) continue;
+            const copies = u.copies();
+            demand += copies.value * pool.value;
+            consumers += 1;
+            last = i;
+            if (parts.items.len > 0) try parts.appendSlice(allocator, "; ");
+            if (u.replicas == null and u.max_replicas == null) {
+                try parts.print(allocator, "{s}: 1 replica (none stated in {s}) × pool {d} ({s}:{d}) = {d}", .{
+                    u.name, u.at.file, pool.value, pool.at.file, pool.at.line, pool.value,
+                });
+            } else {
+                try parts.print(allocator, "{s}: {d} replicas ({s}:{d}) × pool {d} ({s}:{d}) = {d}", .{
+                    u.name,     copies.value, copies.at.file, copies.at.line,
+                    pool.value, pool.at.file, pool.at.line,   copies.value * pool.value,
+                });
+            }
+        }
+        if (consumers == 0 or demand <= p.capacity) continue;
+        const pool = pools[last].?;
+        try findings.append(allocator, .{
+            .file = pool.at.file,
+            .line = pool.at.line,
+            .kind = .pool_capacity,
+            .subject = try allocator.dupe(u8, p.name),
+            .detail = try std.fmt.allocPrint(allocator, "{s}. That is {d} connections, and {s} ({s}) accepts {d} at {s}:{d}.", .{
+                parts.items, demand, p.name, p.kind, p.capacity, p.at.file, p.at.line,
+            }),
+            .evidence = try allocator.dupe(u8, pool.text),
+            .demand = demand,
+            .capacity = p.capacity,
+        });
+    }
 }
 
 fn sizing_key_in(line: []const u8) ?[]const u8 {
@@ -452,4 +642,109 @@ test "logic_shapes: a product folds into one constant" {
     try testing.expectEqual(@as(?u64, 268435456), sizing_constant(".pragma(\"mmap_size\", \"268435456\")"));
     // Below a mebibyte is not a memory region worth reporting.
     try testing.expectEqual(@as(?u64, null), sizing_constant("let buffer_size = 4096;"));
+}
+
+const two_services =
+    \\apiVersion: apps/v1
+    \\kind: Deployment
+    \\metadata:
+    \\  name: api
+    \\spec:
+    \\  replicas: 6
+    \\  template:
+    \\    spec:
+    \\      containers:
+    \\        - name: api
+    \\          image: ghcr.io/acme/api:1
+    \\          resources:
+    \\            limits:
+    \\              memory: 2Gi
+    \\---
+    \\apiVersion: apps/v1
+    \\kind: Deployment
+    \\metadata:
+    \\  name: worker
+    \\spec:
+    \\  template:
+    \\    spec:
+    \\      containers:
+    \\        - name: worker
+    \\          image: ghcr.io/acme/worker:1
+    \\          resources:
+    \\            limits:
+    \\              memory: 256Mi
+    \\
+;
+
+test "logic_shapes: a constant is compared with the limit of the service that runs it" {
+    const allocator = testing.allocator;
+    var exp = try explorer.Explorer.init(allocator);
+    defer exp.deinit();
+    const code = "let opts = Options::new().pragma(\"mmap_size\", \"268435456\");\n";
+    _ = try exp.add_file(try one_file(allocator, "/ws/deploy/services.yaml", .yaml, two_services), two_services);
+    _ = try exp.add_file(try one_file(allocator, "/ws/api/Dockerfile", .dockerfile, "FROM scratch\n"), "FROM scratch\n");
+    _ = try exp.add_file(try one_file(allocator, "/ws/worker/Dockerfile", .dockerfile, "FROM scratch\n"), "FROM scratch\n");
+    _ = try exp.add_file(try one_file(allocator, "/ws/api/src/db.rs", .rust, code), code);
+    exp.mark_indexing_complete();
+
+    var report = try analyze(allocator, &exp);
+    defer report.deinit(allocator);
+    try testing.expectEqual(@as(usize, 1), report.findings.len);
+    // 256 MiB of the api's 2 GiB: 12%. The worker's 256 MiB would read 100%.
+    try testing.expectEqual(@as(?u32, 12), report.findings[0].percent_of_limit);
+    try testing.expect(std.mem.indexOf(u8, report.findings[0].detail, "api") != null);
+}
+
+test "logic_shapes: a constant no unit runs is not compared with another unit's limit" {
+    const allocator = testing.allocator;
+    var exp = try explorer.Explorer.init(allocator);
+    defer exp.deinit();
+    const code = "let opts = Options::new().pragma(\"mmap_size\", \"268435456\");\n";
+    _ = try exp.add_file(try one_file(allocator, "/ws/deploy/services.yaml", .yaml, two_services), two_services);
+    _ = try exp.add_file(try one_file(allocator, "/ws/api/Dockerfile", .dockerfile, "FROM scratch\n"), "FROM scratch\n");
+    _ = try exp.add_file(try one_file(allocator, "/ws/worker/Dockerfile", .dockerfile, "FROM scratch\n"), "FROM scratch\n");
+    _ = try exp.add_file(try one_file(allocator, "/ws/tools/bench.rs", .rust, code), code);
+    exp.mark_indexing_complete();
+
+    var report = try analyze(allocator, &exp);
+    defer report.deinit(allocator);
+    try testing.expectEqual(@as(usize, 1), report.findings.len);
+    try testing.expectEqual(@as(?u32, null), report.findings[0].percent_of_limit);
+}
+
+test "logic_shapes: replicas times the pool size against the pooler, naming all three files" {
+    const allocator = testing.allocator;
+    var exp = try explorer.Explorer.init(allocator);
+    defer exp.deinit();
+    const pooler =
+        \\apiVersion: postgresql.cnpg.io/v1
+        \\kind: Pooler
+        \\metadata:
+        \\  name: pg-pooler-rw
+        \\spec:
+        \\  instances: 1
+        \\  pgbouncer:
+        \\    parameters:
+        \\      max_client_conn: "20"
+        \\
+    ;
+    const code = "let pool = PgPoolOptions::new().max_connections(20).connect(&url).await?;\n";
+    _ = try exp.add_file(try one_file(allocator, "/ws/deploy/services.yaml", .yaml, two_services), two_services);
+    _ = try exp.add_file(try one_file(allocator, "/ws/deploy/pooler.yaml", .yaml, pooler), pooler);
+    _ = try exp.add_file(try one_file(allocator, "/ws/api/Dockerfile", .dockerfile, "FROM scratch\n"), "FROM scratch\n");
+    _ = try exp.add_file(try one_file(allocator, "/ws/worker/Dockerfile", .dockerfile, "FROM scratch\n"), "FROM scratch\n");
+    _ = try exp.add_file(try one_file(allocator, "/ws/api/src/db.rs", .rust, code), code);
+    exp.mark_indexing_complete();
+
+    var report = try analyze(allocator, &exp);
+    defer report.deinit(allocator);
+    try testing.expectEqual(@as(usize, 1), report.findings.len);
+    const f = report.findings[0];
+    try testing.expectEqual(Kind.pool_capacity, f.kind);
+    try testing.expectEqual(@as(?u64, 120), f.demand);
+    try testing.expectEqual(@as(?u64, 20), f.capacity);
+    try testing.expectEqualStrings("/ws/api/src/db.rs", f.file);
+    try testing.expect(std.mem.indexOf(u8, f.detail, "/ws/deploy/services.yaml:6") != null);
+    try testing.expect(std.mem.indexOf(u8, f.detail, "/ws/api/src/db.rs:1") != null);
+    try testing.expect(std.mem.indexOf(u8, f.detail, "/ws/deploy/pooler.yaml:9") != null);
 }

@@ -297,6 +297,15 @@ def main():
             "spec:\n  template:\n    spec:\n      containers:\n"
             "        - name: api\n          resources:\n            limits:\n"
             "              memory: \"512Mi\"\n",
+        # 1 replica with a pool of 30 against a pooler that takes 20. The
+        # three numbers sit in three files.
+        "deploy/pooler.yaml":
+            "apiVersion: postgresql.cnpg.io/v1\nkind: Pooler\nmetadata:\n  name: pg-pooler-rw\n"
+            "spec:\n  instances: 1\n  pgbouncer:\n    parameters:\n      max_client_conn: \"20\"\n",
+        "src/pool.rs":
+            "pub async fn connect(url: &str) -> Result<PgPool> {\n"
+            "    PgPoolOptions::new().max_connections(30).connect(url).await\n"
+            "}\n",
         "src/k8s.rs":
             "pub fn tenant(image: &str) -> Deployment {\n"
             "    let container = Container {\n"
@@ -482,6 +491,9 @@ def main():
         check(any(x["kind"] == "sized_constant" and x["constant_bytes"] == 268435456
                   and x["percent_of_limit"] == 50 for x in f),
               f"logic_shapes finds mmap_size at 50% of the declared 512Mi (got {f})")
+        check(any(x["kind"] == "pool_capacity" and x.get("demand") == 30 and x.get("capacity") == 20
+                  and "pooler.yaml" in x["detail"] and "tenant.yaml" in x["detail"] for x in f),
+              f"logic_shapes finds 30 connections against a pooler that takes 20 (got {f})")
 
     if "call_cost" in parsed:
         f = parsed["call_cost"].get("findings", [])

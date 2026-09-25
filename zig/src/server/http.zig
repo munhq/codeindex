@@ -1346,8 +1346,10 @@ pub const Server = struct {
                         try write_json_string(w, f.kind.runtime_check());
                     }
                     if (f.constant_bytes) |b| {
-                        try w.print(",\"constant_bytes\":{d},\"percent_of_limit\":{d}", .{ b, f.percent_of_limit.? });
+                        try w.print(",\"constant_bytes\":{d},\"percent_of_limit\":", .{b});
+                        if (f.percent_of_limit) |pct| try w.print("{d}", .{pct}) else try w.writeAll("null");
                     }
+                    if (f.demand) |d| try w.print(",\"demand\":{d},\"capacity\":{d}", .{ d, f.capacity.? });
                     try w.writeAll("}");
                 }
                 try w.print("],\"truncated\":{s}}}", .{if (report.findings.len > cap) "true" else "false"});

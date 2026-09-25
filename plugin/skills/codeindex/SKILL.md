@@ -77,8 +77,8 @@ Dependency questions: `get_imports` (`path`) for what a file needs, and
 
 Production-cost questions have their own analyses. Ask `spawn_scan` what starts
 an interpreter on a timer, `field_contention` which declared-state field two
-owners write, `logic_shapes` which fixed byte constant ignores the declared
-memory limit, `call_cost` which loop makes the most round trips per element,
+owners write, `logic_shapes` which fixed byte constant ignores its unit's
+memory limit and which pool opens more connections than the pooler takes, `call_cost` which loop makes the most round trips per element,
 `leak_shapes` which container only grows, and `deps` what the dependency tree
 holds. A `leak_shapes` finding is a SHAPE: it names the runtime
 series that decides it, so pair it with that series before acting.

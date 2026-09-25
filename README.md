@@ -142,7 +142,7 @@ The next time your agent starts, codeindex indexes your project in the backgroun
 | `spawn_scan` | An interpreter started on a loop or a timer, across files, ranked by startup cost times spawn rate |
 | `deps` | Dependency inventory — duplicate versions, unreferenced crates, single-use crates |
 | `leak_shapes` | Shapes a leak has, each paired with the runtime series that decides it |
-| `logic_shapes` | A fixed byte constant against a declared memory limit |
+| `logic_shapes` | A fixed byte constant against the memory limit of the unit that deploys it, and replicas × pool size against a pooler's connection capacity |
 | `call_cost` | Loops over rows ranked by the database and HTTP round trips each element costs, counted through the call graph |
 | `field_contention` | One declared-state field written by two or more owners |
 | `health` | Roll-up of the analyses above into one index-health report |

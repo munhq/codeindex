@@ -40,6 +40,7 @@ const structure = @import("parser/structure.zig");
 const callgraph = @import("index/callgraph.zig");
 const call_cost = @import("analysis/call_cost.zig");
 const db_schema = @import("analysis/db_schema.zig");
+const deploy_units = @import("analysis/deploy_units.zig");
 
 comptime {
     _ = manifest_compliance;
@@ -56,6 +57,7 @@ comptime {
     _ = callgraph;
     _ = call_cost;
     _ = db_schema;
+    _ = deploy_units;
 }
 
 // ── Test helpers ──────────────────────────────────────────────────────────────
