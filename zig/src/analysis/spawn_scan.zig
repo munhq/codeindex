@@ -19,6 +19,7 @@
 const std = @import("std");
 const explorer = @import("../index/explorer.zig");
 const models = @import("../core/models.zig");
+const callgraph = @import("../index/callgraph.zig");
 
 /// An interpreter, or a CLI written in one.
 ///
@@ -949,132 +950,84 @@ fn last_integer(text: []const u8) ?u32 {
     return best;
 }
 
-/// A loop in application code. Brace languages close it by depth, Python by
-/// indent. The region is resolved before anything is reported, because the
-/// `sleep` that states the period usually sits BELOW the spawn it paces.
+/// A loop in application code, read from the syntax tree, with the period its
+/// body sleeps. The sleep that states the period usually sits BELOW the spawn
+/// it paces, so every region is resolved before anything is reported.
 const CodeLoop = struct {
+    loop: models.Loop,
+    /// 1-based.
     header_line: usize,
-    /// 1-based, inclusive.
-    end_line: usize,
-    /// Brace depth the body sits at, or the indent column for Python.
-    body_level: usize,
     period_secs: ?u32 = null,
     parent: ?usize = null,
 };
 
-fn line_starts_loop(trimmed: []const u8, lang: models.Language) bool {
-    const common = [_][]const u8{ "while ", "for ", "while(", "for(" };
-    for (&common) |k| {
-        if (std.mem.startsWith(u8, trimmed, k)) return true;
+/// Every loop region in the file, with its period. A sleep belongs to the
+/// innermost loop that holds it, and a loop that states none inherits the
+/// nearest enclosing loop's.
+fn code_loops(allocator: std.mem.Allocator, outline: models.FileOutline, lines: []const []const u8) ![]CodeLoop {
+    var regions = try allocator.alloc(CodeLoop, outline.loops.len);
+    errdefer allocator.free(regions);
+    for (outline.loops, 0..) |l, i| {
+        regions[i] = .{ .loop = l, .header_line = @as(usize, l.line_start) + 1 };
     }
-    if (lang == .python) return false;
-    // Rust's bare `loop`.
-    if (std.mem.startsWith(u8, trimmed, "loop ") or std.mem.startsWith(u8, trimmed, "loop{")) return true;
-    return false;
-}
-
-fn brace_delta(line: []const u8) isize {
-    var d: isize = 0;
-    var in_single = false;
-    var in_double = false;
-    var i: usize = 0;
-    while (i < line.len) : (i += 1) {
-        const c = line[i];
-        if (c == '\\') {
-            i += 1;
-            continue;
+    for (regions, 0..) |*r, i| {
+        var best: ?usize = null;
+        for (regions, 0..) |o, j| {
+            if (i == j) continue;
+            const inside = o.loop.line_start <= r.loop.line_start and o.loop.line_end >= r.loop.line_end and
+                !(o.loop.line_start == r.loop.line_start and o.loop.line_end == r.loop.line_end and j > i);
+            if (!inside) continue;
+            if (best == null or o.loop.line_start >= regions[best.?].loop.line_start) best = j;
         }
-        if (c == '\'' and !in_double) in_single = !in_single;
-        if (c == '"' and !in_single) in_double = !in_double;
-        if (in_single or in_double) continue;
-        if (c == '{') d += 1;
-        if (c == '}') d -= 1;
+        r.parent = best;
     }
-    return d;
-}
-
-fn indent_of(line: []const u8) usize {
-    var n: usize = 0;
-    while (n < line.len and (line[n] == ' ' or line[n] == '\t')) n += 1;
-    return n;
-}
-
-/// Pass 1: every loop region in the file, with the period it sleeps.
-fn code_loops(allocator: std.mem.Allocator, lines: []const []const u8, lang: models.Language) ![]CodeLoop {
-    var regions = std.ArrayList(CodeLoop).empty;
-    errdefer regions.deinit(allocator);
-    var open = std.ArrayList(usize).empty;
-    defer open.deinit(allocator);
-
-    var depth: isize = 0;
-    for (lines, 0..) |raw, i| {
-        const line_no = i + 1;
-        const trimmed = std.mem.trimStart(u8, raw, " \t");
-
-        // Close the regions this line left.
-        if (lang == .python) {
-            if (trimmed.len > 0) {
-                const ind = indent_of(raw);
-                while (open.items.len > 0 and ind <= regions.items[open.items[open.items.len - 1]].body_level) {
-                    const top = open.pop().?;
-                    regions.items[top].end_line = line_no - 1;
-                }
-            }
-        } else {
-            while (open.items.len > 0 and depth < @as(isize, @intCast(regions.items[open.items[open.items.len - 1]].body_level))) {
-                const top = open.pop().?;
-                regions.items[top].end_line = line_no - 1;
-            }
+    for (lines, 0..) |raw, li| {
+        const secs = code_sleep_seconds(raw) orelse continue;
+        const line: u32 = @intCast(li);
+        var best: ?usize = null;
+        for (regions, 0..) |r, i| {
+            if (line < r.loop.line_start or line > r.loop.line_end) continue;
+            if (best == null or r.loop.line_start >= regions[best.?].loop.line_start) best = i;
         }
-
-        // A sleep belongs to the innermost open loop.
-        if (open.items.len > 0) {
-            if (code_sleep_seconds(raw)) |secs| {
-                const top = open.items[open.items.len - 1];
-                if (regions.items[top].period_secs == null) regions.items[top].period_secs = secs;
-            }
+        if (best) |bi| {
+            if (regions[bi].period_secs == null) regions[bi].period_secs = secs;
         }
-
-        if (line_starts_loop(trimmed, lang)) {
-            const body_level: usize = if (lang == .python)
-                indent_of(raw)
-            else
-                @intCast(@max(@as(isize, 0), depth + brace_delta(raw)));
-            const parent: ?usize = if (open.items.len > 0) open.items[open.items.len - 1] else null;
-            try regions.append(allocator, .{
-                .header_line = line_no,
-                .end_line = lines.len,
-                .body_level = body_level,
-                .parent = parent,
-            });
-            try open.append(allocator, regions.items.len - 1);
-        }
-        if (lang != .python) depth += brace_delta(raw);
     }
-
-    // Inherit the period from the nearest enclosing loop that states one.
-    for (regions.items) |*r| {
+    for (regions) |*r| {
         if (r.period_secs != null) continue;
         var p = r.parent;
-        while (p) |pi| {
-            if (regions.items[pi].period_secs) |secs| {
+        var hops: usize = 0;
+        while (p) |pi| : (hops += 1) {
+            if (hops > regions.len) break;
+            if (regions[pi].period_secs) |secs| {
                 r.period_secs = secs;
                 break;
             }
-            p = regions.items[pi].parent;
+            p = regions[pi].parent;
         }
     }
-    return regions.toOwnedSlice(allocator);
+    return regions;
 }
 
-/// The innermost region containing `line`.
-fn enclosing_code_loop(regions: []const CodeLoop, line: usize) ?usize {
+/// The innermost loop that repeats the 0-based position.
+fn enclosing_code_loop(regions: []const CodeLoop, line: u32, col: u32) ?usize {
     var best: ?usize = null;
     for (regions, 0..) |r, i| {
-        if (line <= r.header_line or line > r.end_line) continue;
-        if (best == null or r.header_line > regions[best.?].header_line) best = i;
+        if (!r.loop.repeats(line, col)) continue;
+        if (best == null or r.loop.line_start >= regions[best.?].loop.line_start) best = i;
     }
     return best;
+}
+
+/// The interpreter a line starts, and the column of the call that starts it.
+fn direct_spawn(raw: []const u8, lang: models.Language) ?struct { runtime: usize, col: usize } {
+    for (&spawn_apis) |api| {
+        if (!api_applies(api, lang)) continue;
+        const at = std.mem.indexOf(u8, raw, api.text) orelse continue;
+        const ri = program_runtime(raw, at + api.text.len) orelse continue;
+        return .{ .runtime = ri, .col = at };
+    }
+    return null;
 }
 
 fn scan_code(
@@ -1087,35 +1040,121 @@ fn scan_code(
     const lines = try split_lines(allocator, content);
     defer allocator.free(lines);
 
-    const regions = try code_loops(allocator, lines, lang);
+    const regions = try code_loops(allocator, outline, lines);
     defer allocator.free(regions);
 
     for (lines, 0..) |raw, i| {
         const line_no = i + 1;
-        const in_loop = enclosing_code_loop(regions, line_no);
+        const spawn = direct_spawn(raw, lang) orelse continue;
+        const in_loop = enclosing_code_loop(regions, @intCast(i), @intCast(spawn.col));
         const timer = timer_period(raw);
         if (in_loop == null and timer == null) continue;
+        const ri = spawn.runtime;
+        const period: ?u32 = if (timer) |t| t else regions[in_loop.?].period_secs;
+        const per_hour: ?u32 = if (period) |p| @intCast(@max(@as(u32, 1), 3600 / p)) else null;
+        try findings.append(allocator, .{
+            .file = outline.path,
+            .line = line_no,
+            .command = runtimes[ri].command,
+            .runtime = runtimes[ri].command,
+            .language = runtimes[ri].language,
+            .period_secs = period,
+            .spawns_per_hour = per_hour,
+            .cost_score = if (per_hour) |ph| @as(u64, runtimes[ri].startup_ms) * ph else 0,
+            .loop_line = if (in_loop) |li| regions[li].header_line else line_no,
+            .via = null,
+            .long_lived_peer = null,
+        });
+    }
+}
 
-        for (&spawn_apis) |api| {
-            if (!api_applies(api, lang)) continue;
-            const at = std.mem.indexOf(u8, raw, api.text) orelse continue;
-            const ri = program_runtime(raw, at + api.text.len) orelse continue;
+fn is_code_language(lang: models.Language) bool {
+    return switch (lang) {
+        .rust, .typescript, .javascript, .python, .go => true,
+        else => false,
+    };
+}
+
+/// A loop or timer that calls, through any number of files, a function that
+/// starts an interpreter. The spawn is written in a helper and the loop sits in
+/// another module, so neither file alone holds the finding. It is reported at
+/// the call site the loop repeats, with the path to the spawn.
+fn scan_code_calls(allocator: std.mem.Allocator, exp: *explorer.Explorer, findings: *std.ArrayList(Finding)) !void {
+    var graph = try callgraph.build(allocator, exp);
+    defer graph.deinit();
+
+    // The functions whose own body starts an interpreter.
+    const own = try allocator.alloc(u64, graph.nodes.len);
+    defer allocator.free(own);
+    @memset(own, 0);
+    const spawner_runtime = try allocator.alloc(?usize, graph.nodes.len);
+    defer allocator.free(spawner_runtime);
+    @memset(spawner_runtime, null);
+
+    var it = exp.outlines.iterator();
+    while (it.next()) |entry| {
+        const file_id = entry.key_ptr.*;
+        if (exp.deleted_files.get(file_id) != null) continue;
+        const outline = entry.value_ptr.*;
+        if (!is_code_language(outline.language) or is_excluded_path(outline.path)) continue;
+        const content = exp.content_of(allocator, file_id) orelse continue;
+        var li: u32 = 0;
+        var lit = std.mem.splitScalar(u8, content, '\n');
+        while (lit.next()) |raw| : (li += 1) {
+            const spawn = direct_spawn(raw, outline.language) orelse continue;
+            const node = graph.enclosing(file_id, li) orelse continue;
+            own[node] = 1;
+            if (spawner_runtime[node] == null) spawner_runtime[node] = spawn.runtime;
+        }
+    }
+
+    const skip = try allocator.alloc(bool, graph.edges.len);
+    defer allocator.free(skip);
+    for (graph.edges, 0..) |e, i| skip[i] = e.deferred;
+    const reach = try callgraph.transitive(allocator, &graph, own, skip);
+    defer allocator.free(reach);
+
+    var it2 = exp.outlines.iterator();
+    while (it2.next()) |entry| {
+        const file_id = entry.key_ptr.*;
+        if (exp.deleted_files.get(file_id) != null) continue;
+        const outline = entry.value_ptr.*;
+        if (!is_code_language(outline.language) or is_excluded_path(outline.path)) continue;
+        if (outline.calls.len == 0) continue;
+        const content = exp.content_of(allocator, file_id) orelse continue;
+        const lines = try split_lines(allocator, content);
+        defer allocator.free(lines);
+        const regions = try code_loops(allocator, outline, lines);
+        defer allocator.free(regions);
+
+        for (outline.calls, 0..) |call, ci| {
+            if (call.deferred or call.line >= lines.len) continue;
+            const target = graph.target(file_id, ci) orelse continue;
+            if (reach[target].total == 0) continue;
+            const raw = lines[call.line];
+            // A spawn written on the line itself is `scan_code`'s finding.
+            if (direct_spawn(raw, outline.language) != null) continue;
+            const in_loop = enclosing_code_loop(regions, call.line, call.col);
+            const timer = timer_period(raw);
+            if (in_loop == null and timer == null) continue;
+            const ri = spawner_runtime[callgraph.path_end(&graph, reach, target)] orelse continue;
             const period: ?u32 = if (timer) |t| t else regions[in_loop.?].period_secs;
             const per_hour: ?u32 = if (period) |p| @intCast(@max(@as(u32, 1), 3600 / p)) else null;
+            const via = try callgraph.path_string(allocator, &graph, reach, target);
+            errdefer allocator.free(via);
             try findings.append(allocator, .{
                 .file = outline.path,
-                .line = line_no,
+                .line = @as(usize, call.line) + 1,
                 .command = runtimes[ri].command,
                 .runtime = runtimes[ri].command,
                 .language = runtimes[ri].language,
                 .period_secs = period,
                 .spawns_per_hour = per_hour,
                 .cost_score = if (per_hour) |ph| @as(u64, runtimes[ri].startup_ms) * ph else 0,
-                .loop_line = if (in_loop) |li| regions[li].header_line else line_no,
-                .via = null,
+                .loop_line = if (in_loop) |l| regions[l].header_line else @as(usize, call.line) + 1,
+                .via = via,
                 .long_lived_peer = null,
             });
-            break;
         }
     }
 }
@@ -1164,6 +1203,7 @@ pub fn scan(allocator: std.mem.Allocator, exp: *explorer.Explorer) ![]Finding {
             else => {},
         }
     }
+    try scan_code_calls(allocator, exp, &findings);
 
     // Costliest first: startup cost times spawn rate, exactly the ranking the
     // fault needs — a 15-second loop above an hourly one.
@@ -1340,15 +1380,7 @@ test "spawn_scan: Rust Command::new inside a loop" {
     ;
     var exp = try explorer.Explorer.init(allocator);
     defer exp.deinit();
-    _ = try exp.add_file(.{
-        .path = try allocator.dupe(u8, "src/poll.rs"),
-        .language = .rust,
-        .line_count = 6,
-        .byte_size = src.len,
-        .symbols = &[_]models.Symbol{},
-        .imports = &[_][]const u8{},
-    }, src);
-    exp.mark_indexing_complete();
+    try index_code(&exp, &.{.{ "src/poll.rs", src }});
 
     const findings = try scan(allocator, &exp);
     defer free_findings(allocator, findings);
@@ -1356,6 +1388,56 @@ test "spawn_scan: Rust Command::new inside a loop" {
     try testing.expectEqual(@as(usize, 3), findings[0].line);
     try testing.expectEqualStrings("aws", findings[0].runtime);
     try testing.expectEqual(@as(?u32, 30), findings[0].period_secs);
+}
+
+fn index_code(exp: *explorer.Explorer, files: []const [2][]const u8) !void {
+    const treesitter = @import("../parser/treesitter.zig");
+    var parser = try treesitter.Parser.init(testing.allocator);
+    defer parser.deinit();
+    for (files) |f| {
+        const o = try parser.parse_source(f[0], models.Language.from_path(f[0]), f[1]);
+        _ = try exp.add_file(o, f[1]);
+    }
+    exp.mark_indexing_complete();
+}
+
+test "spawn_scan: a loop in one file that reaches a spawn in another" {
+    const allocator = testing.allocator;
+    var exp = try explorer.Explorer.init(allocator);
+    defer exp.deinit();
+    try index_code(&exp, &.{
+        .{
+            "src/s3.rs",
+            \\pub fn read_marker(key: &str) -> String {
+            \\    let out = Command::new("aws").args(["s3", "cp", key, "-"]).output().unwrap();
+            \\    String::from_utf8_lossy(&out.stdout).into_owned()
+            \\}
+            \\pub fn sync_app(root: &str) -> String {
+            \\    read_marker(root)
+            \\}
+            \\
+        },
+        .{
+            "src/supervisor.rs",
+            \\use crate::s3::sync_app;
+            \\pub async fn supervise() {
+            \\    loop {
+            \\        let sha = sync_app("/data");
+            \\        tokio::time::sleep(Duration::from_secs(15)).await;
+            \\    }
+            \\}
+            \\
+        },
+    });
+    const findings = try scan(allocator, &exp);
+    defer free_findings(allocator, findings);
+    try testing.expectEqual(@as(usize, 1), findings.len);
+    const f = findings[0];
+    try testing.expectEqualStrings("src/supervisor.rs", f.file);
+    try testing.expectEqual(@as(usize, 4), f.line);
+    try testing.expectEqualStrings("aws", f.runtime);
+    try testing.expectEqual(@as(?u32, 15), f.period_secs);
+    try testing.expectEqualStrings("sync_app → read_marker", f.via.?);
 }
 
 test "spawn_scan: Dockerfile HEALTHCHECK on an interpreter" {
