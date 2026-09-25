@@ -107,7 +107,7 @@ The next time your agent starts, codeindex indexes your project in the backgroun
 | `search` | Trigram-accelerated full-text search across all indexed files |
 | `find_symbol` | Find symbol definitions (functions, structs, classes…) by name |
 | `find_word` | Exact word/identifier lookup in the inverted word index |
-| `find_callers` | Approximate callers of a symbol (heuristic, no full name resolution) |
+| `find_callers` | Call sites of a symbol, each with the function that holds it. Matched by name, so a same-named definition elsewhere is included |
 | `get_outline` | Structural outline of a file (symbols, line counts) |
 | `get_tree` | Directory tree with file metadata |
 | `get_imports` | What files does a given file import/depend on |
@@ -126,12 +126,12 @@ The next time your agent starts, codeindex indexes your project in the backgroun
 |----------|--------------|
 | `security` | Hardcoded secrets, SQL injection patterns, unsafe blocks, eval usage |
 | `dead_code` | Symbols nothing names outside their own definition, split from the unused public API of a library package |
-| `unwrap_audit` | `.unwrap()` / panic-prone error handling (Rust) |
+| `unwrap_audit` | `.unwrap()` / `expect` / `panic!` sites (Rust), ranked by whether a request handler, a loop or `main` reaches them |
 | `test_coverage` | Files without test coverage |
 | `architecture` | Architectural smells — god modules, circular deps, islands |
 | `crossref` | Cross-file symbol references |
 | `type_drift` | Type signature mismatches across modules |
-| `db_schema` | Database schema drift between migrations and code |
+| `db_schema` | Tables the migrations create that no code names, and SQL ORM models no migration creates |
 | `migration_parity` | Missing migrations for schema changes |
 | `manifest_compliance` | package.json / Cargo.toml / go.mod compliance issues |
 | `literal_scan` | Hardcoded URLs, IPs, ports, absolute paths, TODOs |
@@ -139,7 +139,7 @@ The next time your agent starts, codeindex indexes your project in the backgroun
 | `cycles` | Circular dependency detection |
 | `duplication` | Reinvented free functions — the same job written twice |
 | `clones` | Copy-pasted function bodies, ignoring names and whitespace |
-| `spawn_scan` | An interpreter started on a loop or a timer, ranked by startup cost times spawn rate |
+| `spawn_scan` | An interpreter started on a loop or a timer, across files, ranked by startup cost times spawn rate |
 | `deps` | Dependency inventory — duplicate versions, unreferenced crates, single-use crates |
 | `leak_shapes` | Shapes a leak has, each paired with the runtime series that decides it |
 | `logic_shapes` | A fixed byte constant against a declared memory limit |
