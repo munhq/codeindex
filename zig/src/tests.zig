@@ -1241,6 +1241,27 @@ test "find_file_id does not match across path-segment boundaries" {
     try testing.expect(exp.get_outline("barfoo.rs") != null);
 }
 
+test "a suffix that two files share names neither of them" {
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
+    defer exp.deinit();
+    const o_a = try make_outline(testing.allocator, "/ws/src/a/mod.rs", .rust, &.{}, &.{});
+    const o_b = try make_outline(testing.allocator, "/ws/src/b/mod.rs", .rust, &.{}, &.{});
+    _ = try exp.add_file(o_a, "fn a() {}\n");
+    _ = try exp.add_file(o_b, "fn b() {}\n");
+    exp.mark_indexing_complete();
+
+    // `mod.rs` used to resolve to whichever file the map yielded first.
+    switch (exp.lookup_file("mod.rs")) {
+        .ambiguous => |n| try testing.expectEqual(@as(usize, 2), n),
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expect(exp.get_outline("mod.rs") == null);
+    // More of the path names one file, and a leading "./" is accepted.
+    try testing.expect(exp.lookup_file("a/mod.rs") == .found);
+    try testing.expect(exp.lookup_file("./src/b/mod.rs") == .found);
+    try testing.expect(exp.lookup_file("c/mod.rs") == .missing);
+}
+
 test "zig @import resolves relative paths" {
     var exp = try explorer_mod.Explorer.init(testing.allocator);
     defer exp.deinit();
