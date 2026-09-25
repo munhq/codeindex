@@ -294,21 +294,6 @@ pub fn walks_rows(header: []const u8, lang: models.Language) bool {
     return true;
 }
 
-/// `a → b → c`: the calls from `start` along the largest share of its cost.
-fn chain(allocator: std.mem.Allocator, g: *const callgraph.Graph, reach: []const callgraph.Reach, start: u32) ![]u8 {
-    var out = std.ArrayList(u8).empty;
-    errdefer out.deinit(allocator);
-    try out.appendSlice(allocator, g.nodes[start].name);
-    var cur = start;
-    var hops: usize = 0;
-    while (reach[cur].via != callgraph.none and hops < 8) : (hops += 1) {
-        cur = g.edges[reach[cur].via].to;
-        try out.appendSlice(allocator, " → ");
-        try out.appendSlice(allocator, g.nodes[cur].name);
-    }
-    return out.toOwnedSlice(allocator);
-}
-
 pub fn analyze(allocator: std.mem.Allocator, exp: *explorer.Explorer) !Report {
     var graph = try callgraph.build(allocator, exp);
     defer graph.deinit();
@@ -414,7 +399,7 @@ pub fn analyze(allocator: std.mem.Allocator, exp: *explorer.Explorer) !Report {
             const cost = reach[target].total;
             if (cost == 0) continue;
             const li = innermost(loops.items, call.line, call.col) orelse continue;
-            const via = try chain(allocator, &graph, reach, target);
+            const via = try callgraph.path_string(allocator, &graph, reach, target);
             errdefer allocator.free(via);
             try sites[li].append(allocator, .{
                 .line = @as(usize, call.line) + 1,

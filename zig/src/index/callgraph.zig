@@ -591,6 +591,31 @@ pub fn transitive(allocator: std.mem.Allocator, g: *const Graph, own: []const u6
     return reach;
 }
 
+/// `a → b → c`: the calls from `start` along the largest share of its cost.
+/// Caller frees.
+pub fn path_string(allocator: std.mem.Allocator, g: *const Graph, reach: []const Reach, start: u32) ![]u8 {
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, g.nodes[start].name);
+    var cur = start;
+    var hops: usize = 0;
+    while (reach[cur].via != none and hops < 8) : (hops += 1) {
+        cur = g.edges[reach[cur].via].to;
+        try out.appendSlice(allocator, " → ");
+        try out.appendSlice(allocator, g.nodes[cur].name);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+/// The node at the end of `start`'s largest-share path: where the cost it
+/// carries is written.
+pub fn path_end(g: *const Graph, reach: []const Reach, start: u32) u32 {
+    var cur = start;
+    var hops: usize = 0;
+    while (reach[cur].via != none and hops < 64) : (hops += 1) cur = g.edges[reach[cur].via].to;
+    return cur;
+}
+
 /// Past this a count means "unbounded" to every reader, and it keeps the sum
 /// far from overflow.
 pub const max_cost: u64 = 1_000_000;
