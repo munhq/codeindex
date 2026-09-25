@@ -37,6 +37,7 @@ const field_contention = @import("analysis/field_contention.zig");
 // covering the directory grouping compiled but never executed.
 const migration_parity = @import("analysis/migration_parity.zig");
 const structure = @import("parser/structure.zig");
+const callgraph = @import("index/callgraph.zig");
 
 comptime {
     _ = manifest_compliance;
@@ -50,6 +51,7 @@ comptime {
     _ = dead_code;
     _ = security_scan;
     _ = structure;
+    _ = callgraph;
 }
 
 // ── Test helpers ──────────────────────────────────────────────────────────────
@@ -2622,4 +2624,93 @@ test "snapshot: calls, loops, visibility and flags survive a save and a load" {
     try testing.expectEqual(@as(u32, 1), o.calls[0].line);
     try testing.expectEqual(@as(usize, 1), o.loops.len);
     try testing.expectEqual(models.LoopKind.each, o.loops[0].kind);
+}
+
+// ── Call graph ───────────────────────────────────────────────────────────────
+
+/// Parse each (path, source) pair and add it to `exp`, then resolve imports.
+fn index_sources(exp: *explorer_mod.Explorer, files: []const [2][]const u8) !void {
+    var parser = try treesitter.Parser.init(testing.allocator);
+    defer parser.deinit();
+    for (files) |f| {
+        const lang = models.Language.from_path(f[0]);
+        const o = try parser.parse_source(f[0], lang, f[1]);
+        _ = try exp.add_file(o, f[1]);
+    }
+    exp.mark_indexing_complete();
+}
+
+fn node_named(g: *const callgraph.Graph, name: []const u8) ?u32 {
+    for (g.nodes, 0..) |n, i| {
+        if (std.mem.eql(u8, n.name, name)) return @intCast(i);
+    }
+    return null;
+}
+
+test "callgraph: calls resolve across an import, and a cost sums per call site" {
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
+    defer exp.deinit();
+    try index_sources(&exp, &.{
+        .{ "/ws/src/db.rs",
+            \\pub fn insert_node(p: &Pool) { sqlx::query("insert"); }
+            \\pub fn import_triple(p: &Pool) {
+            \\    insert_node(p);
+            \\    insert_node(p);
+            \\}
+            \\
+        },
+        .{ "/ws/src/main.rs",
+            \\mod db;
+            \\use crate::db::import_triple;
+            \\fn run(rows: &[Row], p: &Pool) {
+            \\    for r in rows { import_triple(p); }
+            \\}
+            \\fn spin() { spin(); }
+            \\
+        },
+    });
+    var g = try callgraph.build(testing.allocator, &exp);
+    defer g.deinit();
+
+    const insert = node_named(&g, "insert_node").?;
+    const triple = node_named(&g, "import_triple").?;
+    const run = node_named(&g, "run").?;
+    const spin = node_named(&g, "spin").?;
+    try testing.expectEqual(@as(usize, 2), g.out(triple).len);
+    try testing.expectEqual(triple, g.out(run)[0].to);
+    try testing.expectEqual(@as(u32, 3), g.out(run)[0].line); // 0-based line 4
+
+    const own = try testing.allocator.alloc(u64, g.nodes.len);
+    defer testing.allocator.free(own);
+    @memset(own, 0);
+    own[insert] = 1;
+    const reach = try callgraph.transitive(testing.allocator, &g, own);
+    defer testing.allocator.free(reach);
+    try testing.expectEqual(@as(u64, 2), reach[triple].total);
+    try testing.expectEqual(@as(u64, 2), reach[run].total);
+    // Recursion adds nothing and ends the walk.
+    try testing.expectEqual(@as(u64, 0), reach[spin].total);
+
+    try testing.expectEqual(@as(usize, 2), try callgraph.caller_count(testing.allocator, &g, insert));
+}
+
+test "callgraph: a name several files define, called with no import, resolves to none" {
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
+    defer exp.deinit();
+    try index_sources(&exp, &.{
+        .{ "/ws/a.py", "def helper():\n    pass\n" },
+        .{ "/ws/b.py", "def helper():\n    pass\n" },
+        .{ "/ws/c.py", "def main():\n    helper()\n" },
+        .{ "/ws/d.py", "def only_here():\n    pass\n" },
+        .{ "/ws/e.py", "def uses():\n    only_here()\n    obj.only_here()\n" },
+    });
+    var g = try callgraph.build(testing.allocator, &exp);
+    defer g.deinit();
+    try testing.expectEqual(@as(usize, 0), g.out(node_named(&g, "main").?).len);
+    try testing.expect(g.stats.ambiguous >= 1);
+    // A plain call with one definition anywhere resolves; a method call on an
+    // unknown receiver does not reach across the repository.
+    const uses = g.out(node_named(&g, "uses").?);
+    try testing.expectEqual(@as(usize, 1), uses.len);
+    try testing.expectEqual(node_named(&g, "only_here").?, uses[0].to);
 }
