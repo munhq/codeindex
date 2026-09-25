@@ -2628,6 +2628,8 @@ test "snapshot: calls, loops, visibility and flags survive a save and a load" {
     try testing.expectEqual(@as(u32, 1), o.calls[0].line);
     try testing.expectEqual(@as(usize, 1), o.loops.len);
     try testing.expectEqual(models.LoopKind.each, o.loops[0].kind);
+    // The function body, lines 0 to 2.
+    try testing.expectEqual(@as(u32, 2), o.block_opened_at(0).?);
 }
 
 // ── Call graph ───────────────────────────────────────────────────────────────

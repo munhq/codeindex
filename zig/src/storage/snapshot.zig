@@ -185,6 +185,12 @@ pub const Snapshot = struct {
                 if (li > 0) try w.writeAll(",");
                 try w.print("[{d},{d},{d},{d},{d}]", .{ l.line_start, l.line_end, @intFromEnum(l.kind), l.body_line, l.body_col });
             }
+            // Blocks as a flat [start, end, start, end, …] list.
+            try w.writeAll("],\"blocks\":[");
+            for (o.blocks, 0..) |b, bi| {
+                if (bi > 0) try w.writeAll(",");
+                try w.print("{d},{d}", .{ b.line_start, b.line_end });
+            }
             try w.writeAll("]}");
         }
         try w.writeAll("},");
@@ -345,6 +351,8 @@ pub const Snapshot = struct {
             }
             const loops = try load_loops(allocator, obj.get("loops"));
             errdefer allocator.free(loops);
+            const blocks = try load_blocks(allocator, obj.get("blocks"));
+            errdefer allocator.free(blocks);
 
             try exp.outlines.put(id, .{
                 .path = try allocator.dupe(u8, exp.files.items[id]),
@@ -356,6 +364,7 @@ pub const Snapshot = struct {
                 .calls = calls.calls,
                 .call_names = calls.names,
                 .loops = loops,
+                .blocks = blocks,
             });
         }
 
@@ -430,6 +439,20 @@ fn load_calls(allocator: std.mem.Allocator, value: ?std.json.Value) !LoadedCalls
         off += n.len + q.len;
     }
     return .{ .calls = calls, .names = names };
+}
+
+fn load_blocks(allocator: std.mem.Allocator, value: ?std.json.Value) ![]models.Block {
+    const arr = if (value) |v| (if (v == .array) v.array.items else &[_]std.json.Value{}) else &[_]std.json.Value{};
+    if (arr.len % 2 != 0) return error.InvalidSnapshot;
+    const blocks = try allocator.alloc(models.Block, arr.len / 2);
+    errdefer allocator.free(blocks);
+    for (blocks, 0..) |*b, i| {
+        const a = arr[2 * i];
+        const e = arr[2 * i + 1];
+        if (a != .integer or e != .integer) return error.InvalidSnapshot;
+        b.* = .{ .line_start = @intCast(a.integer), .line_end = @intCast(e.integer) };
+    }
+    return blocks;
 }
 
 fn load_loops(allocator: std.mem.Allocator, value: ?std.json.Value) ![]models.Loop {
