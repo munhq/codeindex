@@ -279,7 +279,7 @@ pub fn scan(allocator: std.mem.Allocator, exp: *explorer.Explorer) ![]Finding {
             else => {},
         }
 
-        const content = exp.content_cache.get(file_id) orelse continue;
+        const content = exp.content_of(allocator, file_id) orelse continue;
         const ext = blk: {
             const e = std.fs.path.extension(outline.path);
             if (e.len > 1) break :blk e[1..];

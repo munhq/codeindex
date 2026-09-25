@@ -246,7 +246,7 @@ pub fn analyze(allocator: std.mem.Allocator, exp: *explorer.Explorer) !Report {
         const outline = entry.value_ptr.*;
         if (is_excluded_path(outline.path)) continue;
         const lang = outline.language;
-        const content = exp.content_cache.get(file_id) orelse continue;
+        const content = exp.content_of(allocator, file_id) orelse continue;
 
         // A reconciler is code that writes a Kubernetes object. Deciding that
         // per file, not per line, is what keeps the detector off every `.apply(`

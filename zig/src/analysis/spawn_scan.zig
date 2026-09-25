@@ -1155,7 +1155,7 @@ pub fn scan(allocator: std.mem.Allocator, exp: *explorer.Explorer) ![]Finding {
         if (exp.deleted_files.get(file_id) != null) continue;
         const outline = entry.value_ptr.*;
         if (is_excluded_path(outline.path)) continue;
-        const content = exp.content_cache.get(file_id) orelse continue;
+        const content = exp.content_of(allocator, file_id) orelse continue;
 
         switch (outline.language) {
             .bash => try scan_shell(allocator, outline, content, &findings),

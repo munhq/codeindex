@@ -570,6 +570,36 @@ test "explorer search falls back to disk when content is evicted" {
     try testing.expectEqual(@as(usize, 1), words.len);
 }
 
+test "an analysis reads a file the content cache evicted" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const src = "fn load() { let v = parse().unwrap(); }\n";
+    try tmp.dir.writeFile(io_mod.io(), .{ .sub_path = "evicted.rs", .data = src });
+    const real_path = try tmp.dir.realPathFileAlloc(io_mod.io(), "evicted.rs", testing.allocator);
+    defer testing.allocator.free(real_path);
+
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
+    defer exp.deinit();
+    exp.max_cache_bytes = 0;
+    _ = try exp.add_file(.{
+        .path = try testing.allocator.dupe(u8, real_path),
+        .language = .rust,
+        .line_count = 1,
+        .byte_size = src.len,
+        .symbols = &[_]models.Symbol{},
+        .imports = &[_][]const u8{},
+    }, src);
+    exp.mark_indexing_complete();
+    try testing.expect(exp.content_cache.count() == 0);
+
+    // The analyses skipped every file the cache did not hold. The disk read
+    // lives in the arena, as it does in the analyze handler.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const findings = try unwrap_audit.audit(arena.allocator(), &exp);
+    try testing.expectEqual(@as(usize, 1), findings.len);
+}
+
 test "explorer oversized file gets no postings" {
     var exp = try explorer_mod.Explorer.init(testing.allocator);
     defer exp.deinit();

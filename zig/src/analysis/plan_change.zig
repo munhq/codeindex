@@ -258,10 +258,12 @@ fn is_entry(p: []const u8) bool {
 }
 
 fn scan_file_literals(allocator: std.mem.Allocator, exp: *explorer.Explorer, path: []const u8) !LiteralSummary {
-    _ = allocator;
     var out = std.mem.zeroes(LiteralSummary);
     const file_id = exp.file_map.get(path) orelse return out;
-    const content = exp.content_cache.get(file_id) orelse return out;
+    // Only counts leave this function, so a disk read is freed here.
+    const cached = exp.content_cache.get(file_id);
+    const content = cached orelse (exp.content_of(allocator, file_id) orelse return out);
+    defer if (cached == null) allocator.free(content);
 
     var line_num: usize = 0;
     var it = std.mem.splitScalar(u8, content, '\n');

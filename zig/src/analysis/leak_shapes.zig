@@ -926,7 +926,7 @@ fn field_scope_files(
         if (exp.deleted_files.get(hit) != null) continue;
         const outline = exp.outlines.get(hit) orelse continue;
         if (outline.language != field.lang) continue;
-        const content = exp.content_cache.get(hit) orelse continue;
+        const content = exp.content_of(allocator, hit) orelse continue;
         const owns = switch (field.lang) {
             .rust => impl_of(content, field.owner),
             .typescript, .javascript => extends_of(content, field.owner),
@@ -1066,7 +1066,7 @@ fn scan_struct_fields(
             .rust, .typescript, .javascript, .python, .go => {},
             else => continue,
         }
-        const content = exp.content_cache.get(file_id) orelse continue;
+        const content = exp.content_of(allocator, file_id) orelse continue;
         try collect_field_decls(allocator, file_id, outline, content, &fields);
     }
 
@@ -1087,7 +1087,7 @@ fn scan_struct_fields(
         var bounded = false;
         for (scope.items) |sid| {
             const outline = exp.outlines.get(sid) orelse continue;
-            const content = exp.content_cache.get(sid) orelse continue;
+            const content = exp.content_of(allocator, sid) orelse continue;
             if (container_is_bounded(content, field.name, field.decl)) bounded = true;
             const use = try scan_field_uses(content, field.name, field.lang, allocator);
             if (use.shrinks) shrinks = true;
@@ -1149,7 +1149,7 @@ pub fn scan(allocator: std.mem.Allocator, exp: *explorer.Explorer) ![]Finding {
             .rust, .typescript, .javascript, .python, .go => {},
             else => continue,
         }
-        const content = exp.content_cache.get(file_id) orelse continue;
+        const content = exp.content_of(allocator, file_id) orelse continue;
         const file_undoes_leak = contains_any(content, &leak_undo);
         var reported_names = std.StringHashMap(void).init(allocator);
         defer reported_names.deinit();

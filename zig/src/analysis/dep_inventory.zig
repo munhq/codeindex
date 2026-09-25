@@ -126,7 +126,7 @@ const Usage = struct {
 ///
 /// The word index narrows this to the handful of files that hold the word, so
 /// the line scan never touches the whole tree.
-fn count_usage(exp: *explorer.Explorer, ident: []const u8) Usage {
+fn count_usage(allocator: std.mem.Allocator, exp: *explorer.Explorer, ident: []const u8) Usage {
     var usage = Usage{ .files = 0, .references = 0 };
     const hits = exp.words.search(ident);
     for (hits) |file_id| {
@@ -137,7 +137,10 @@ fn count_usage(exp: *explorer.Explorer, ident: []const u8) Usage {
             .markdown, .json, .toml, .yaml, .unknown, .gitignore, .diff => continue,
             else => {},
         }
-        const content = exp.content_cache.get(file_id) orelse continue;
+        // Only counts leave this function, so a disk read is freed here.
+        const cached = exp.content_cache.get(file_id);
+        const content = cached orelse (exp.content_of(allocator, file_id) orelse continue);
+        defer if (cached == null) allocator.free(content);
         var lines: usize = 0;
         var it = std.mem.splitScalar(u8, content, '\n');
         while (it.next()) |line| {
@@ -378,7 +381,7 @@ pub fn analyze(allocator: std.mem.Allocator, exp: *explorer.Explorer) !Report {
         if (std.mem.indexOf(u8, outline.path, "node_modules") != null) continue;
         if (std.mem.indexOf(u8, outline.path, "/vendor/") != null) continue;
 
-        const content = exp.content_cache.get(file_id) orelse continue;
+        const content = exp.content_of(allocator, file_id) orelse continue;
         report.manifests += 1;
 
         direct.clearRetainingCapacity();
@@ -392,7 +395,7 @@ pub fn analyze(allocator: std.mem.Allocator, exp: *explorer.Explorer) !Report {
         for (if (ecosystem == .cargo) direct.items else &[_][]const u8{}) |name| {
             const ident = try code_identifier(allocator, name, ecosystem);
             defer allocator.free(ident);
-            const usage = count_usage(exp, ident);
+            const usage = count_usage(allocator, exp, ident);
             if (usage.references == 0) {
                 try unreferenced.append(allocator, .{
                     .ecosystem = ecosystem,
@@ -574,8 +577,8 @@ test "dep_inventory: an unreferenced crate is separated from a single-use one" {
     }, src);
     exp.mark_indexing_complete();
 
-    try testing.expectEqual(@as(usize, 2), count_usage(&exp, "serde_json").references);
-    try testing.expectEqual(@as(usize, 0), count_usage(&exp, "criterion").references);
+    try testing.expectEqual(@as(usize, 2), count_usage(testing.allocator, &exp, "serde_json").references);
+    try testing.expectEqual(@as(usize, 0), count_usage(testing.allocator, &exp, "criterion").references);
 }
 
 test "dep_inventory: a manifest does not count as a reference to its own dep" {
@@ -594,5 +597,5 @@ test "dep_inventory: a manifest does not count as a reference to its own dep" {
     }, manifest);
     exp.mark_indexing_complete();
 
-    try testing.expectEqual(@as(usize, 0), count_usage(&exp, "criterion").references);
+    try testing.expectEqual(@as(usize, 0), count_usage(testing.allocator, &exp, "criterion").references);
 }

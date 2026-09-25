@@ -425,7 +425,7 @@ pub fn analyze(allocator: std.mem.Allocator, exp: *explorer.Explorer) !Report {
         if (exp.deleted_files.get(file_id) != null) continue;
         const outline = entry.value_ptr.*;
         if (is_excluded_path(outline.path)) continue;
-        const content = exp.content_cache.get(file_id) orelse continue;
+        const content = exp.content_of(allocator, file_id) orelse continue;
         try collect_limits(allocator, outline, content, &limits);
     }
 
@@ -450,7 +450,7 @@ pub fn analyze(allocator: std.mem.Allocator, exp: *explorer.Explorer) !Report {
         const outline = entry.value_ptr.*;
         if (is_excluded_path(outline.path)) continue;
         const lang = outline.language;
-        const content = exp.content_cache.get(file_id) orelse continue;
+        const content = exp.content_of(allocator, file_id) orelse continue;
         const file_reads_limit = contains_any(content, &derives_from_limit);
 
         var line_no: usize = 0;
