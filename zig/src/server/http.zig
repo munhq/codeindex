@@ -945,8 +945,8 @@ pub const Server = struct {
             } else if (std.mem.eql(u8, analysis_type, "db_schema")) {
                 const report = try db_schema.analyze(aa, self.exp);
                 defer aa.free(report.issues);
-                try w.print("{{\"tables_in_migrations\":{d},\"tables_in_code\":{d},\"issues\":{d},\"issue_details\":[", .{
-                    report.tables_in_migrations, report.tables_in_code, report.issues.len,
+                try w.print("{{\"migration_files\":{d},\"tables_in_migrations\":{d},\"tables_in_code\":{d},\"issues\":{d},\"issue_details\":[", .{
+                    report.migration_files, report.tables_in_migrations, report.tables_in_code, report.issues.len,
                 });
                 const ds_cap: usize = 200;
                 const dsn = @min(report.issues.len, ds_cap);
