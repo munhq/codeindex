@@ -161,13 +161,27 @@ pub const Snapshot = struct {
                     try w.writeAll(",\"d\":");
                     try writeJsonString(w, d);
                 }
-                try w.writeAll("}");
+                try w.print(",\"v\":{d},\"f\":{d}}}", .{ @intFromEnum(s.visibility), @as(u8, @bitCast(s.flags)) });
             }
 
             try w.writeAll("],\"imports\":[");
             for (o.imports, 0..) |imp, ii| {
                 if (ii > 0) try w.writeAll(",");
                 try writeJsonString(w, imp);
+            }
+            // Calls as [name, line, kind, self_receiver]; loops as
+            // [line_start, line_end, kind].
+            try w.writeAll("],\"calls\":[");
+            for (o.calls, 0..) |c, ci| {
+                if (ci > 0) try w.writeAll(",");
+                try w.writeAll("[");
+                try writeJsonString(w, c.name);
+                try w.print(",{d},{d},{d}]", .{ c.line, @intFromEnum(c.kind), @intFromBool(c.self_receiver) });
+            }
+            try w.writeAll("],\"loops\":[");
+            for (o.loops, 0..) |l, li| {
+                if (li > 0) try w.writeAll(",");
+                try w.print("[{d},{d},{d}]", .{ l.line_start, l.line_end, @intFromEnum(l.kind) });
             }
             try w.writeAll("]}");
         }
@@ -304,6 +318,8 @@ pub const Snapshot = struct {
                     .line_start = @intCast((sobj.get("s") orelse continue).integer),
                     .line_end = @intCast((sobj.get("e") orelse continue).integer),
                     .detail = if (sobj.get("d")) |d| try allocator.dupe(u8, d.string) else null,
+                    .visibility = if (sobj.get("v")) |v| std.enums.fromInt(models.Visibility, v.integer) orelse .unknown else .unknown,
+                    .flags = if (sobj.get("f")) |f| @bitCast(@as(u8, @intCast(f.integer & 0xff))) else .{},
                 };
             }
 
@@ -314,6 +330,20 @@ pub const Snapshot = struct {
                 imports[i] = try allocator.dupe(u8, imp.string);
             }
 
+            errdefer {
+                for (symbols) |*sy| sy.deinit(allocator);
+                allocator.free(symbols);
+                for (imports) |im| allocator.free(im);
+                allocator.free(imports);
+            }
+            const calls = try load_calls(allocator, obj.get("calls"));
+            errdefer {
+                allocator.free(calls.calls);
+                allocator.free(calls.names);
+            }
+            const loops = try load_loops(allocator, obj.get("loops"));
+            errdefer allocator.free(loops);
+
             try exp.outlines.put(id, .{
                 .path = try allocator.dupe(u8, exp.files.items[id]),
                 .language = @enumFromInt(@as(u32, @intCast(lang_int))),
@@ -321,6 +351,9 @@ pub const Snapshot = struct {
                 .line_count = line_count,
                 .symbols = symbols,
                 .imports = imports,
+                .calls = calls.calls,
+                .call_names = calls.names,
+                .loops = loops,
             });
         }
 
@@ -360,6 +393,53 @@ pub const Snapshot = struct {
     // scanner.reconcile_tree re-parses the files that actually changed and
     // leaves the rest, which is both cheaper and more precise.
 };
+
+const LoadedCalls = struct { calls: []models.Call, names: []u8 };
+
+/// Rebuild a file's calls with their names in one buffer, as the parser
+/// stores them.
+fn load_calls(allocator: std.mem.Allocator, value: ?std.json.Value) !LoadedCalls {
+    const arr = if (value) |v| (if (v == .array) v.array.items else &[_]std.json.Value{}) else &[_]std.json.Value{};
+    var total: usize = 0;
+    for (arr) |c| {
+        if (c != .array or c.array.items.len != 4 or c.array.items[0] != .string) return error.InvalidSnapshot;
+        total += c.array.items[0].string.len;
+    }
+    const names = try allocator.alloc(u8, total);
+    errdefer allocator.free(names);
+    const calls = try allocator.alloc(models.Call, arr.len);
+    errdefer allocator.free(calls);
+    var off: usize = 0;
+    for (arr, 0..) |c, i| {
+        const items = c.array.items;
+        const n = items[0].string;
+        @memcpy(names[off .. off + n.len], n);
+        calls[i] = .{
+            .name = names[off .. off + n.len],
+            .line = @intCast(items[1].integer),
+            .kind = std.enums.fromInt(models.CallKind, items[2].integer) orelse return error.InvalidSnapshot,
+            .self_receiver = items[3].integer != 0,
+        };
+        off += n.len;
+    }
+    return .{ .calls = calls, .names = names };
+}
+
+fn load_loops(allocator: std.mem.Allocator, value: ?std.json.Value) ![]models.Loop {
+    const arr = if (value) |v| (if (v == .array) v.array.items else &[_]std.json.Value{}) else &[_]std.json.Value{};
+    const loops = try allocator.alloc(models.Loop, arr.len);
+    errdefer allocator.free(loops);
+    for (arr, 0..) |l, i| {
+        if (l != .array or l.array.items.len != 3) return error.InvalidSnapshot;
+        const items = l.array.items;
+        loops[i] = .{
+            .line_start = @intCast(items[0].integer),
+            .line_end = @intCast(items[1].integer),
+            .kind = std.enums.fromInt(models.LoopKind, items[2].integer) orelse return error.InvalidSnapshot,
+        };
+    }
+    return loops;
+}
 
 fn writeJsonString(writer: anytype, s: []const u8) !void {
     try writer.writeByte('"');

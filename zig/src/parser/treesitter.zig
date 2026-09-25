@@ -3,7 +3,9 @@ const models = @import("../core/models.zig");
 const import_scan = @import("import_scan.zig");
 const io = @import("../core/io.zig");
 
-const ts = @cImport({
+const structure = @import("structure.zig");
+
+pub const ts = @cImport({
     @cInclude("tree_sitter/api.h");
 });
 
@@ -99,8 +101,11 @@ const proto_tags = @embedFile("queries/proto_tags.scm");
 /// number and refuses to load when it differs.
 ///
 /// BUMP THIS when symbol extraction changes: a tags query under
-/// src/parser/queries/, `map_kind`, or `drop_local_bindings`.
-pub const EXTRACTION_VERSION: u32 = 2;
+/// src/parser/queries/, `map_kind`, `drop_local_bindings`, or what
+/// `structure.zig` records.
+///
+/// 3: symbols carry visibility and flags; outlines carry calls and loops.
+pub const EXTRACTION_VERSION: u32 = 3;
 
 pub const Parser = struct {
     allocator: std.mem.Allocator,
@@ -217,11 +222,14 @@ pub const Parser = struct {
                             }
                         }
                         if (!dup) {
+                            const class = structure.classify(language, current_kind, content, node, name_node.?, name);
                             try symbols.append(self.allocator, models.Symbol{
                                 .name = try self.allocator.dupe(u8, name),
                                 .kind = current_kind,
                                 .line_start = line_start,
                                 .line_end = ts.ts_node_end_point(node).row,
+                                .visibility = class.visibility,
+                                .flags = class.flags,
                             });
                         }
                     }
@@ -231,7 +239,12 @@ pub const Parser = struct {
 
         try drop_local_bindings(self.allocator, &symbols);
 
-        return self.create_outline(path, language, content, &symbols, &imports);
+        const extracted = try structure.extract(self.allocator, language, content, root_node);
+        var outline = try self.create_outline(path, language, content, &symbols, &imports);
+        outline.calls = extracted.calls;
+        outline.call_names = extracted.call_names;
+        outline.loops = extracted.loops;
+        return outline;
     }
 
     /// Drop `const`/`var` bindings that are function locals.
