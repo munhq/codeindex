@@ -826,18 +826,27 @@ pub const Server = struct {
             } else if (std.mem.eql(u8, analysis_type, "unwrap_audit")) {
                 const findings = try unwrap_audit.audit(aa, self.exp);
                 defer aa.free(findings);
-                try w.print("{{\"total\":{d},\"findings\":[", .{findings.len});
-                for (findings, 0..) |f, fi| {
+                var by: [5]usize = .{ 0, 0, 0, 0, 0 };
+                for (findings) |f| by[@intFromEnum(f.severity)] += 1;
+                try w.print("{{\"total\":{d},\"critical\":{d},\"high\":{d},\"medium\":{d},\"low\":{d},\"info\":{d},\"findings\":[", .{
+                    findings.len, by[0], by[1], by[2], by[3], by[4],
+                });
+                const cap: usize = 300;
+                for (findings[0..@min(findings.len, cap)], 0..) |f, fi| {
                     if (fi > 0) try w.writeAll(",");
-                    try w.print("{{\"file\":\"{s}\",\"line\":{d},\"kind\":\"{s}\",\"severity\":\"{s}\",\"line_text\":", .{
-                        f.file, f.line, f.kind.as_str(), f.severity.as_str(),
+                    try w.writeAll("{\"file\":");
+                    try write_json_string(w, f.file);
+                    try w.print(",\"line\":{d},\"kind\":\"{s}\",\"severity\":\"{s}\",\"callers\":{d},\"reached_from\":", .{
+                        f.line, f.kind.as_str(), f.severity.as_str(), f.callers,
                     });
+                    if (f.reached_from) |r| try write_json_string(w, r) else try w.writeAll("null");
+                    try w.writeAll(",\"line_text\":");
                     try write_json_string(w, f.line_text);
                     try w.writeAll(",\"scope\":");
                     try write_json_string(w, f.scope orelse "");
                     try w.writeAll("}");
                 }
-                try w.writeAll("]}");
+                try w.print("],\"truncated\":{s}}}", .{if (findings.len > cap) "true" else "false"});
             } else if (std.mem.eql(u8, analysis_type, "test_coverage")) {
                 const modules = try test_coverage.analyze(aa, self.exp);
                 defer aa.free(modules);
@@ -1111,6 +1120,12 @@ pub const Server = struct {
                 defer dead.deinit(aa);
                 const unwraps = try unwrap_audit.audit(aa, self.exp);
                 defer aa.free(unwraps);
+                // Test sites and `main.rs` are `info`; the count is what
+                // production code can hit.
+                var panic_sites: usize = 0;
+                for (unwraps) |u| {
+                    if (u.severity != .info) panic_sites += 1;
+                }
                 const sec_findings = try security_scan.scan(aa, self.exp);
                 defer security_scan.free_findings(aa, sec_findings);
                 const sec = security_scan.summarize(sec_findings);
@@ -1128,7 +1143,7 @@ pub const Server = struct {
                     "\"circular_deps\":{d},\"god_modules\":{d},\"dead_symbols\":{d}," ++
                     "\"duplicate_names\":{d},\"clone_groups\":{d},\"cloned_functions\":{d},", .{
                     self.exp.file_count(), self.exp.symbol_count(), coup.total_edges,
-                    sec.critical,          sec.total,               unwraps.len,
+                    sec.critical,          sec.total,               panic_sites,
                     cyc.cycles.len,        coup.god_modules.len,    dead.dead.len,
                     dup.total_clusters,    cln.total_groups,        cln.total_cloned_fns,
                 });

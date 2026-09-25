@@ -23,6 +23,7 @@ pub const Node = struct {
     name: []const u8,
     kind: models.SymbolKind,
     language: models.Language,
+    flags: models.SymbolFlags = .{},
     /// 0-based, inclusive.
     line_start: u32,
     line_end: u32,
@@ -150,6 +151,7 @@ pub fn build(allocator: std.mem.Allocator, exp: *explorer.Explorer) !Graph {
                 .name = sym.name,
                 .kind = sym.kind,
                 .language = outline.language,
+                .flags = sym.flags,
                 .line_start = @intCast(sym.line_start),
                 .line_end = @intCast(sym.line_end),
             });
