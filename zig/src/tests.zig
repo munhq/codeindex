@@ -36,6 +36,7 @@ const field_contention = @import("analysis/field_contention.zig");
 // here or its tests never run. `migration_parity` was absent, and four tests
 // covering the directory grouping compiled but never executed.
 const migration_parity = @import("analysis/migration_parity.zig");
+const structure = @import("parser/structure.zig");
 
 comptime {
     _ = manifest_compliance;
@@ -48,6 +49,7 @@ comptime {
     _ = unwrap_audit;
     _ = dead_code;
     _ = security_scan;
+    _ = structure;
 }
 
 // ── Test helpers ──────────────────────────────────────────────────────────────
@@ -2395,4 +2397,229 @@ test "ipc: a directory this user creates is accepted and left 0700" {
     defer io_mod.cwd().deleteTree(io_mod.io(), dir) catch {};
     try testing.expect(ipc_mod.private_usable_dir(dir));
     try testing.expect(ipc_mod.usable_dir(dir));
+}
+
+// ── Structure: visibility, flags, calls and loops from the syntax tree ───────
+
+fn parse_for_test(lang: models.Language, src: []const u8) !models.FileOutline {
+    var parser = try treesitter.Parser.init(testing.allocator);
+    defer parser.deinit();
+    return parser.parse_source("test_input", lang, src);
+}
+
+fn symbol_named(outline: models.FileOutline, name: []const u8) ?models.Symbol {
+    for (outline.symbols) |s| {
+        if (std.mem.eql(u8, s.name, name)) return s;
+    }
+    return null;
+}
+
+/// The calls on a 1-based line, by name, in source order.
+fn calls_on_line(outline: models.FileOutline, line_1: u32, buf: *[8][]const u8) [][]const u8 {
+    var n: usize = 0;
+    for (outline.calls) |c| {
+        if (c.line + 1 == line_1 and n < buf.len) {
+            buf[n] = c.name;
+            n += 1;
+        }
+    }
+    return buf[0..n];
+}
+
+fn loop_at(outline: models.FileOutline, line_1: u32) ?models.Loop {
+    for (outline.loops) |l| {
+        if (l.line_start + 1 == line_1) return l;
+    }
+    return null;
+}
+
+test "structure: rust visibility, trait impls, attributes, calls and loops" {
+    const src =
+        \\pub struct Store;
+        \\impl Store {
+        \\    pub fn load(&self, rows: &[Row]) {
+        \\        for row in rows {
+        \\            self.insert(row);
+        \\            sqlx::query("x");
+        \\        }
+        \\        loop { break; }
+        \\    }
+        \\    fn insert(&self, r: &Row) { helper(r); }
+        \\}
+        \\impl Display for Store {
+        \\    fn fmt(&self, f: &mut Formatter) -> fmt::Result { Ok(()) }
+        \\}
+        \\#[tokio::main]
+        \\async fn main() {}
+        \\// helper(in_a_comment) is not a call
+        \\fn helper(r: &Row) { let s = "insert(x)"; }
+        \\
+    ;
+    var o = try parse_for_test(.rust, src);
+    defer o.deinit(testing.allocator);
+
+    try testing.expectEqual(models.Visibility.public, symbol_named(o, "load").?.visibility);
+    try testing.expectEqual(models.Visibility.private, symbol_named(o, "insert").?.visibility);
+    try testing.expect(symbol_named(o, "fmt").?.flags.implements);
+    try testing.expect(!symbol_named(o, "load").?.flags.implements);
+    try testing.expect(symbol_named(o, "main").?.flags.registered);
+    try testing.expect(!symbol_named(o, "helper").?.flags.registered);
+
+    var buf: [8][]const u8 = undefined;
+    const l5 = calls_on_line(o, 5, &buf);
+    try testing.expectEqual(@as(usize, 1), l5.len);
+    try testing.expectEqualStrings("insert", l5[0]);
+    for (o.calls) |c| {
+        if (c.line + 1 == 5) {
+            try testing.expectEqual(models.CallKind.method, c.kind);
+            try testing.expect(c.self_receiver);
+        }
+        if (c.line + 1 == 6) try testing.expectEqual(models.CallKind.path, c.kind);
+    }
+    try testing.expectEqualStrings("helper", calls_on_line(o, 10, &buf)[0]);
+    // A comment and a string that spell a call are not calls.
+    try testing.expectEqual(@as(usize, 0), calls_on_line(o, 17, &buf).len);
+    try testing.expectEqual(@as(usize, 0), calls_on_line(o, 18, &buf).len);
+
+    const for_loop = loop_at(o, 4).?;
+    try testing.expectEqual(models.LoopKind.each, for_loop.kind);
+    try testing.expectEqual(@as(u32, 6), for_loop.line_end); // 0-based line 7 `}`
+    try testing.expectEqual(models.LoopKind.forever, loop_at(o, 8).?.kind);
+}
+
+test "structure: typescript callbacks, for-of and while true are loops" {
+    const src =
+        \\export function a(xs: number[]) {
+        \\  xs.forEach((x) => {
+        \\    b(x);
+        \\  });
+        \\  for (const x of xs) {}
+        \\  while (true) { break; }
+        \\  for (let i = 0; i < 3; i++) {}
+        \\}
+        \\function b(x: number) {}
+        \\
+    ;
+    var o = try parse_for_test(.typescript, src);
+    defer o.deinit(testing.allocator);
+    try testing.expectEqual(models.Visibility.public, symbol_named(o, "a").?.visibility);
+    try testing.expectEqual(models.Visibility.private, symbol_named(o, "b").?.visibility);
+    try testing.expectEqual(models.LoopKind.each, loop_at(o, 2).?.kind);
+    try testing.expectEqual(models.LoopKind.each, loop_at(o, 5).?.kind);
+    try testing.expectEqual(models.LoopKind.forever, loop_at(o, 6).?.kind);
+    try testing.expectEqual(models.LoopKind.conditional, loop_at(o, 7).?.kind);
+    var buf: [8][]const u8 = undefined;
+    try testing.expectEqualStrings("b", calls_on_line(o, 3, &buf)[0]);
+}
+
+test "structure: python dunders, decorators and comprehensions" {
+    const src =
+        \\def _private():
+        \\    pass
+        \\class A:
+        \\    def __init__(self):
+        \\        self.run()
+        \\    @app.route("/")
+        \\    def handler(self):
+        \\        return [x for x in rows]
+        \\    @staticmethod
+        \\    def plain():
+        \\        pass
+        \\
+    ;
+    var o = try parse_for_test(.python, src);
+    defer o.deinit(testing.allocator);
+    try testing.expectEqual(models.Visibility.private, symbol_named(o, "_private").?.visibility);
+    try testing.expect(symbol_named(o, "__init__").?.flags.implements);
+    try testing.expect(symbol_named(o, "handler").?.flags.registered);
+    try testing.expect(!symbol_named(o, "plain").?.flags.registered);
+    try testing.expectEqual(models.LoopKind.each, loop_at(o, 8).?.kind);
+    var buf: [8][]const u8 = undefined;
+    try testing.expectEqualStrings("run", calls_on_line(o, 5, &buf)[0]);
+}
+
+test "structure: go range, counted and bare for loops" {
+    const src =
+        \\package main
+        \\func Serve(rows []int) {
+        \\    for _, r := range rows { use(r) }
+        \\    for i := 0; i < 3; i++ {}
+        \\    for {}
+        \\}
+        \\func use(r int) {}
+        \\
+    ;
+    var o = try parse_for_test(.go, src);
+    defer o.deinit(testing.allocator);
+    try testing.expectEqual(models.Visibility.public, symbol_named(o, "Serve").?.visibility);
+    try testing.expectEqual(models.Visibility.private, symbol_named(o, "use").?.visibility);
+    try testing.expectEqual(models.LoopKind.each, loop_at(o, 3).?.kind);
+    try testing.expectEqual(models.LoopKind.conditional, loop_at(o, 4).?.kind);
+    try testing.expectEqual(models.LoopKind.forever, loop_at(o, 5).?.kind);
+}
+
+test "structure: zig calls and loops" {
+    const src =
+        \\pub fn a(self: *S, xs: []const u8) void {
+        \\    for (xs) |x| {
+        \\        b(x);
+        \\    }
+        \\    while (true) {}
+        \\    self.c();
+        \\}
+        \\fn b(x: u8) void {}
+        \\
+    ;
+    var o = try parse_for_test(.zig, src);
+    defer o.deinit(testing.allocator);
+    try testing.expectEqual(models.Visibility.public, symbol_named(o, "a").?.visibility);
+    try testing.expectEqual(models.Visibility.private, symbol_named(o, "b").?.visibility);
+    try testing.expectEqual(models.LoopKind.each, loop_at(o, 2).?.kind);
+    try testing.expectEqual(models.LoopKind.forever, loop_at(o, 5).?.kind);
+    var buf: [8][]const u8 = undefined;
+    try testing.expectEqualStrings("b", calls_on_line(o, 3, &buf)[0]);
+    for (o.calls) |c| {
+        if (c.line + 1 == 6) {
+            try testing.expectEqualStrings("c", c.name);
+            try testing.expect(c.self_receiver);
+        }
+    }
+}
+
+test "snapshot: calls, loops, visibility and flags survive a save and a load" {
+    const storage = @import("storage/snapshot.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const src = "pub fn a(xs: &[u8]) {\n    for x in xs { b(x); }\n}\nfn b(x: &u8) {}\n";
+    try tmp.dir.writeFile(io_mod.io(), .{ .sub_path = "a.rs", .data = src });
+    const dir_path = try tmp.dir.realPathFileAlloc(io_mod.io(), ".", testing.allocator);
+    io_mod.normalizeKey(dir_path);
+    defer testing.allocator.free(dir_path);
+    const snap_path = try io_mod.joinKey(testing.allocator, &.{ dir_path, ".codeindex.json" });
+    defer testing.allocator.free(snap_path);
+    const file_path = try io_mod.joinKey(testing.allocator, &.{ dir_path, "a.rs" });
+    defer testing.allocator.free(file_path);
+
+    {
+        var parser = try treesitter.Parser.init(testing.allocator);
+        defer parser.deinit();
+        const o = try parser.parse_source(file_path, .rust, src);
+        var exp = try explorer_mod.Explorer.init(testing.allocator);
+        defer exp.deinit();
+        _ = try exp.add_file(o, src);
+        try storage.Snapshot.save(&exp, snap_path, dir_path);
+    }
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
+    defer exp.deinit();
+    var stamps = storage.Stamps.init(testing.allocator);
+    defer stamps.deinit();
+    try storage.Snapshot.load_into(&exp, testing.allocator, snap_path, dir_path, &stamps);
+    const o = exp.get_outline("a.rs").?;
+    try testing.expectEqual(models.Visibility.public, symbol_named(o, "a").?.visibility);
+    try testing.expectEqual(models.Visibility.private, symbol_named(o, "b").?.visibility);
+    try testing.expectEqual(@as(usize, 1), o.calls.len);
+    try testing.expectEqualStrings("b", o.calls[0].name);
+    try testing.expectEqual(@as(u32, 1), o.calls[0].line);
+    try testing.expectEqual(@as(usize, 1), o.loops.len);
+    try testing.expectEqual(models.LoopKind.each, o.loops[0].kind);
 }

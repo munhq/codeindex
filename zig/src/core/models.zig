@@ -169,6 +169,33 @@ pub const SymbolKind = enum {
     }
 };
 
+/// Who can name a symbol from outside the unit that defines it, read from the
+/// definition itself: `pub`, `export`, `public`, a leading capital in Go, a
+/// leading underscore in Python.
+pub const Visibility = enum(u8) {
+    /// The language states nothing the parser reads.
+    unknown,
+    /// Any other module or package can name it.
+    public,
+    /// Visible inside its crate, package or assembly only: `pub(crate)`,
+    /// `internal`, a Java member with no modifier.
+    restricted,
+    private,
+};
+
+/// Facts about a definition that decide whether code with no reference to it
+/// can still reach it.
+pub const SymbolFlags = packed struct(u8) {
+    /// Satisfies an interface the language dispatches through: a method in
+    /// `impl Trait for T` or in a trait, `@Override`, `override`, a Python
+    /// dunder method. The caller names the interface, never this symbol.
+    implements: bool = false,
+    /// Carries an attribute or decorator that hands it to a framework:
+    /// `#[tokio::main]`, `@app.route`, `#[no_mangle]`. The framework calls it.
+    registered: bool = false,
+    _pad: u6 = 0,
+};
+
 /// A code symbol extracted from a file.
 ///
 /// `line_start` and `line_end` are 0-BASED, because tree-sitter reports node
@@ -186,6 +213,8 @@ pub const Symbol = struct {
     /// 0-based, inclusive. See the type-level note; use `end_1()` for output.
     line_end: usize,
     detail: ?[]const u8 = null,
+    visibility: Visibility = .unknown,
+    flags: SymbolFlags = .{},
 
     /// First line, 1-based — for output and for comparing against any line
     /// number that was counted from 1 (analysis scans, `write_lines`).
@@ -209,7 +238,54 @@ pub const Symbol = struct {
     }
 };
 
-/// Structural outline of a single file: symbols, imports, metadata.
+/// How a call names what it calls.
+pub const CallKind = enum(u8) {
+    /// `name(…)`
+    plain,
+    /// `receiver.name(…)` or `receiver->name(…)`
+    method,
+    /// `Type::name(…)`
+    path,
+};
+
+/// One call site, read from the syntax tree: strings and comments that spell a
+/// call are not calls.
+pub const Call = struct {
+    /// The called name: the last identifier before the argument list.
+    name: []const u8,
+    /// 0-based line of the argument list's opening parenthesis.
+    line: u32,
+    kind: CallKind,
+    /// The receiver or qualifier is `self`, `this`, `Self` or `cls`: the call
+    /// stays inside the type that makes it.
+    self_receiver: bool = false,
+};
+
+/// What a loop repeats over.
+pub const LoopKind = enum(u8) {
+    /// Once per element of something: `for x in xs`, `for … range`,
+    /// `xs.forEach(…)`, a comprehension.
+    each,
+    /// Until a condition fails: `while cond`, a C-style `for (;;cond;)`.
+    conditional,
+    /// With no exit in its header: `loop`, `while true`, Go `for {}`.
+    forever,
+};
+
+/// A loop region, read from the syntax tree.
+pub const Loop = struct {
+    /// 0-based, inclusive.
+    line_start: u32,
+    line_end: u32,
+    kind: LoopKind,
+
+    /// True when the 1-based `line` falls inside this loop.
+    pub fn contains_1(self: Loop, line: usize) bool {
+        return line >= @as(usize, self.line_start) + 1 and line <= @as(usize, self.line_end) + 1;
+    }
+};
+
+/// Structural outline of a single file: symbols, imports, calls, loops.
 pub const FileOutline = struct {
     path: []const u8,
     language: Language,
@@ -217,6 +293,11 @@ pub const FileOutline = struct {
     byte_size: u64,
     symbols: []Symbol,
     imports: [][]const u8,
+    /// Call sites in source order. Every `Call.name` is a slice of
+    /// `call_names`, so a file's calls cost one allocation for their names.
+    calls: []Call = &.{},
+    call_names: []u8 = &.{},
+    loops: []Loop = &.{},
 
     pub fn deinit(self: *FileOutline, allocator: std.mem.Allocator) void {
         allocator.free(self.path);
@@ -224,6 +305,9 @@ pub const FileOutline = struct {
         allocator.free(self.symbols);
         for (self.imports) |i| allocator.free(i);
         allocator.free(self.imports);
+        allocator.free(self.calls);
+        allocator.free(self.call_names);
+        allocator.free(self.loops);
     }
 };
 
