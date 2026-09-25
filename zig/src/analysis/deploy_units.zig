@@ -12,6 +12,10 @@
 //! a Dockerfile, or the only Dockerfile in the repository. A file belongs to the
 //! units whose build context holds it. A repository with one unit deploys every
 //! file with it.
+//!
+//! Index keys use `/` on every platform, so every path here goes through the
+//! POSIX path functions. `std.fs.path.join` joined with `\` on Windows, and no
+//! context held any file there.
 
 const std = @import("std");
 const explorer = @import("../index/explorer.zig");
@@ -309,6 +313,13 @@ fn is_workload(kind: []const u8) bool {
     return false;
 }
 
+/// Index keys use `/` on every platform, so paths are split the POSIX way.
+fn stem_posix(path: []const u8) []const u8 {
+    const base = std.fs.path.basenamePosix(path);
+    const dot = std.mem.lastIndexOfScalar(u8, base, '.') orelse return base;
+    return if (dot == 0) base else base[0..dot];
+}
+
 fn loc(path: []const u8, line: usize) Located {
     return .{ .file = path, .line = line };
 }
@@ -339,7 +350,7 @@ fn collect_kubernetes(a: std.mem.Allocator, path: []const u8, docs: []std.ArrayL
         const doc = doc_list.items;
         const kind = (find_value(doc, "kind") orelse continue).value;
         const name_line = find_value(doc, "metadata.name");
-        const name = if (name_line) |n| n.value else std.fs.path.stem(path);
+        const name = if (name_line) |n| n.value else stem_posix(path);
         const at = loc(path, if (name_line) |n| n.line else 1);
         if (is_workload(kind)) {
             var u = Unit{ .name = name, .kind = kind, .at = at };
@@ -373,7 +384,7 @@ fn is_compose_file(base: []const u8) bool {
 }
 
 fn collect_compose(a: std.mem.Allocator, path: []const u8, docs: []std.ArrayList(YamlLine), units: *Units) !void {
-    const dir = std.fs.path.dirname(path) orelse "";
+    const dir = std.fs.path.dirnamePosix(path) orelse "";
     for (docs) |doc_list| {
         const doc = doc_list.items;
         var names = std.ArrayList([]const u8).empty;
@@ -418,7 +429,7 @@ fn collect_compose(a: std.mem.Allocator, path: []const u8, docs: []std.ArrayList
 fn collect_helm(a: std.mem.Allocator, chart_dir: []const u8, values_path: []const u8, docs: []std.ArrayList(YamlLine), units: *Units) !void {
     if (docs.len == 0) return;
     const doc = docs[0].items;
-    var u = Unit{ .name = std.fs.path.basename(chart_dir), .kind = "helm chart", .at = loc(values_path, 1) };
+    var u = Unit{ .name = std.fs.path.basenamePosix(chart_dir), .kind = "helm chart", .at = loc(values_path, 1) };
     for (doc) |l| {
         if (std.mem.eql(u8, l.path, "replicaCount")) {
             if (parse_int(l.value)) |v| u.replicas = .{ .value = v, .at = loc(values_path, l.line) };
@@ -437,8 +448,8 @@ fn resolve_dir(a: std.mem.Allocator, base: []const u8, rel_in: []const u8) ![]co
     var rel = rel_in;
     while (std.mem.startsWith(u8, rel, "./")) rel = rel[2..];
     if (std.mem.eql(u8, rel, ".") or rel.len == 0) return a.dupe(u8, base);
-    if (std.fs.path.isAbsolute(rel)) return a.dupe(u8, rel);
-    const joined = try std.fs.path.join(a, &.{ base, rel });
+    if (std.fs.path.isAbsolutePosix(rel)) return a.dupe(u8, rel);
+    const joined = try std.fmt.allocPrint(a, "{s}/{s}", .{ base, rel });
     return std.fs.path.resolvePosix(a, &.{joined}) catch joined;
 }
 
@@ -479,7 +490,7 @@ fn parse_build_command(a: std.mem.Allocator, base_dir: []const u8, line: []const
             context = unquote(tok);
         } else if (tok[0] == '&' or tok[0] == '|' or tok[0] == ';') break;
     }
-    const ctx_rel = context orelse (if (dockerfile) |f| std.fs.path.dirname(f) orelse "." else return);
+    const ctx_rel = context orelse (if (dockerfile) |f| std.fs.path.dirnamePosix(f) orelse "." else return);
     // A context written with a variable names nothing in the tree.
     if (std.mem.indexOfAny(u8, ctx_rel, "$`{") != null) return;
     const ctx = try resolve_dir(a, base_dir, ctx_rel);
@@ -501,8 +512,8 @@ pub fn find(allocator: std.mem.Allocator, exp: *explorer.Explorer) !Units {
     while (it.next()) |entry| {
         if (exp.deleted_files.get(entry.key_ptr.*) != null) continue;
         const path = entry.value_ptr.path;
-        const base = std.fs.path.basename(path);
-        const dir = std.fs.path.dirname(path) orelse "";
+        const base = std.fs.path.basenamePosix(path);
+        const dir = std.fs.path.dirnamePosix(path) orelse "";
         if (std.mem.eql(u8, base, "Chart.yaml")) try chart_dirs.put(dir, {});
         if (std.mem.eql(u8, base, "Dockerfile") or std.mem.startsWith(u8, base, "Dockerfile.")) try dockerfile_dirs.append(a, dir);
     }
@@ -513,8 +524,8 @@ pub fn find(allocator: std.mem.Allocator, exp: *explorer.Explorer) !Units {
         if (exp.deleted_files.get(file_id) != null) continue;
         const outline = entry.value_ptr.*;
         const path = outline.path;
-        const base = std.fs.path.basename(path);
-        const dir = std.fs.path.dirname(path) orelse "";
+        const base = std.fs.path.basenamePosix(path);
+        const dir = std.fs.path.dirnamePosix(path) orelse "";
         const is_yaml = outline.language == .yaml;
         const content = exp.content_of(a, file_id) orelse continue;
 
@@ -576,7 +587,7 @@ pub fn find(allocator: std.mem.Allocator, exp: *explorer.Explorer) !Units {
             // `acme-piper-tts` built from `docker/piper-tts/`: the image
             // carries a project prefix the directory drops.
             for (dockerfile_dirs.items) |d| {
-                if (names_dir(repo, std.fs.path.basename(d))) {
+                if (names_dir(repo, std.fs.path.basenamePosix(d))) {
                     try add_context(a, u, d);
                     linked = true;
                 }
@@ -586,7 +597,7 @@ pub fn find(allocator: std.mem.Allocator, exp: *explorer.Explorer) !Units {
         // A unit named after a directory that holds a Dockerfile.
         if (u.contexts.items.len == 0) {
             for (dockerfile_dirs.items) |d| {
-                if (std.mem.eql(u8, std.fs.path.basename(d), u.name)) try add_context(a, u, d);
+                if (std.mem.eql(u8, std.fs.path.basenamePosix(d), u.name)) try add_context(a, u, d);
             }
         }
     }
@@ -615,7 +626,7 @@ fn names_dir(repo: []const u8, dir: []const u8) bool {
 fn exp_root(exp: *explorer.Explorer) []const u8 {
     var root: ?[]const u8 = null;
     for (exp.files.items) |f| {
-        const d = std.fs.path.dirname(f) orelse continue;
+        const d = std.fs.path.dirnamePosix(f) orelse continue;
         if (root == null) {
             root = d;
             continue;
