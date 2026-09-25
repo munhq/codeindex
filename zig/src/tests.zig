@@ -2892,3 +2892,33 @@ test "find_callers: a call in a string or a comment is not a caller, and each hi
     try testing.expectEqual(@as(u32, 3), hits[0].line_num);
     try testing.expectEqualStrings("save", hits[0].caller.?);
 }
+
+test "callgraph: a Kotlin method call resolves to the method, not to a free function" {
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
+    defer exp.deinit();
+    try index_sources(&exp, &.{
+        .{ "/ws/app/Store.kt",
+            \\fun save(x: Int) {}
+            \\class Store {
+            \\    fun save(x: Int) {}
+            \\}
+            \\fun run(s: Store) {
+            \\    s.save(1)
+            \\}
+            \\
+        },
+    });
+    var g = try callgraph.build(testing.allocator, &exp);
+    defer g.deinit();
+    const run = g.out(node_named_at(&g, "run", 4).?);
+    try testing.expectEqual(@as(usize, 1), run.len);
+    // The method inside `Store`, on 0-based line 2.
+    try testing.expectEqual(@as(u32, 2), g.nodes[run[0].to].line_start);
+}
+
+fn node_named_at(g: *const callgraph.Graph, name: []const u8, line0: u32) ?u32 {
+    for (g.nodes, 0..) |n, i| {
+        if (std.mem.eql(u8, n.name, name) and n.line_start == line0) return @intCast(i);
+    }
+    return null;
+}
