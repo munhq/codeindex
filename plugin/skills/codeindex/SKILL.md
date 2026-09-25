@@ -61,8 +61,9 @@ Ask what the question actually is, then pick:
   Read the outline first, then `read_symbol` the one you want.
 - **"Where is this string/identifier used?"** → `find_word` for an exact
   identifier, `search` for free text. Both beat `Grep` on token cost.
-- **"What calls X?"** → `find_callers` (`name`). Heuristic, with no full name
-  resolution — treat the result as a candidate list, not proof.
+- **"What calls X?"** → `find_callers` (`name`). Each hit names the calling
+  function. It matches by name, so a different definition with the same name
+  shows up too — treat the result as a candidate list, not proof.
 - **"What breaks if I change this file?"** → `get_change_impact` (`path`,
   optional `max_depth`) for the transitive blast radius, or `plan_change` for
   the whole picture in one call (definition, call sites, file role, literals,

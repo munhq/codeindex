@@ -72,8 +72,8 @@ Usage and callers:
 
 - `find_word` (word) — exact identifier occurrences.
 - `search` (query) — trigram-accelerated free-text search.
-- `find_callers` (name) — heuristic call sites, with no full name resolution;
-  treat the result as a candidate list, not proof.
+- `find_callers` (name) — call sites, each with the calling function. Matched
+  by name, so treat the result as a candidate list, not proof.
 
 Dependencies and impact:
 
