@@ -2684,7 +2684,7 @@ test "callgraph: calls resolve across an import, and a cost sums per call site" 
     defer testing.allocator.free(own);
     @memset(own, 0);
     own[insert] = 1;
-    const reach = try callgraph.transitive(testing.allocator, &g, own);
+    const reach = try callgraph.transitive(testing.allocator, &g, own, null);
     defer testing.allocator.free(reach);
     try testing.expectEqual(@as(u64, 2), reach[triple].total);
     try testing.expectEqual(@as(u64, 2), reach[run].total);
@@ -2817,4 +2817,50 @@ test "parser: a tsx file parses with the tsx grammar" {
     }
     try testing.expect(saw_format);
     try testing.expectEqual(models.LoopKind.each, loop_at(o, 2).?.kind);
+}
+
+test "callgraph: a module path resolves to the module, not to a same-named function beside the caller" {
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
+    defer exp.deinit();
+    try index_sources(&exp, &.{
+        .{ "/ws/src/daemon/mod.rs", "pub fn run() { tick(); }\nfn tick() { crate::agent::run(); }\n" },
+        .{ "/ws/src/agent/loop_.rs", "pub fn run() {}\n" },
+        .{ "/ws/cmd/main.go", "package main\nfunc Do() {}\nfunc main() { util.Do() }\n" },
+        .{ "/ws/util/util.go", "package util\nfunc Do() {}\n" },
+    });
+    var g = try callgraph.build(testing.allocator, &exp);
+    defer g.deinit();
+    const tick = node_named(&g, "tick").?;
+    try testing.expectEqual(@as(usize, 1), g.out(tick).len);
+    try testing.expectEqualStrings("/ws/src/agent/loop_.rs", g.nodes[g.out(tick)[0].to].path);
+    const main = node_named(&g, "main").?;
+    try testing.expectEqual(@as(usize, 1), g.out(main).len);
+    try testing.expectEqualStrings("/ws/util/util.go", g.nodes[g.out(main)[0].to].path);
+}
+
+test "callgraph: a closure parameter and another language's function are not the callee" {
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
+    defer exp.deinit();
+    try index_sources(&exp, &.{
+        .{ "/ws/src/health.rs",
+            \\fn upsert<F>(name: &str, update: F) where F: FnOnce(&mut E) {
+            \\    update(entry);
+            \\}
+            \\fn tick() {
+            \\    let flush = make();
+            \\    flush();
+            \\    report();
+            \\}
+            \\
+        },
+        .{ "/ws/web/api.ts", "export function update() {}\nexport function flush() {}\nexport function report() {}\n" },
+        .{ "/ws/src/report.rs", "pub fn report() {}\n" },
+    });
+    var g = try callgraph.build(testing.allocator, &exp);
+    defer g.deinit();
+    try testing.expectEqual(@as(usize, 0), g.out(node_named(&g, "upsert").?).len);
+    const tick = g.out(node_named(&g, "tick").?);
+    // `flush` is a local; `report` resolves to the Rust definition only.
+    try testing.expectEqual(@as(usize, 1), tick.len);
+    try testing.expectEqualStrings("/ws/src/report.rs", g.nodes[tick[0].to].path);
 }

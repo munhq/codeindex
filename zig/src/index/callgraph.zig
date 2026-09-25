@@ -18,6 +18,8 @@ pub const none: u32 = std.math.maxInt(u32);
 /// A function-like definition.
 pub const Node = struct {
     file_id: u32,
+    /// The defining file's path, borrowed from its outline.
+    path: []const u8,
     name: []const u8,
     kind: models.SymbolKind,
     language: models.Language,
@@ -30,6 +32,8 @@ pub const Edge = struct {
     to: u32,
     /// 0-based line of the call site in the caller's file.
     line: u32,
+    /// The call runs on an event. See `models.Call.deferred`.
+    deferred: bool = false,
 };
 
 pub const Stats = struct {
@@ -142,6 +146,7 @@ pub fn build(allocator: std.mem.Allocator, exp: *explorer.Explorer) !Graph {
             try scratch.append(allocator, @intCast(nodes.items.len));
             try nodes.append(allocator, .{
                 .file_id = file_id,
+                .path = outline.path,
                 .name = sym.name,
                 .kind = sym.kind,
                 .language = outline.language,
@@ -199,18 +204,37 @@ pub fn build(allocator: std.mem.Allocator, exp: *explorer.Explorer) !Graph {
         const t = try allocator.alloc(u32, outline.calls.len);
         @memset(t, none);
         try graph.targets.put(file_id, t);
+        var import_lines: ?[]const u8 = null;
+        defer if (import_lines) |il| allocator.free(il);
 
         for (outline.calls, 0..) |call, ci| {
             graph.stats.calls += 1;
             const cands = by_name.get(call.name) orelse continue;
-            const res = resolve(graph.nodes, cands.items, file_id, call, &near);
+            var res = resolve(graph.nodes, cands.items, file_id, outline.language, call, &near);
+            const from = graph.enclosing(file_id, call.line);
+            if (res == .found) {
+                const to = res.found;
+                // `use tokio::spawn;` then `spawn(…)` names the crate's
+                // function. A repository function of the same name is reached
+                // through the import rule or not at all.
+                if (res_is_global(graph.nodes, to, file_id, &near)) {
+                    if (import_lines == null) import_lines = try collect_import_lines(allocator, exp, file_id);
+                    if (names_word(import_lines.?, call.name)) res = .unresolved;
+                    // `update(entry)` where `update` is the caller's closure
+                    // parameter bound to a repository function named `update`.
+                    const content = exp.content_cache.get(file_id);
+                    if (content == null or (from != null and binds_locally(content.?, graph.nodes[from.?], call))) res = .unresolved;
+                }
+                // `other.run()` inside `run` is another receiver's method, not
+                // recursion. Recursion is spelled through `self` or by name.
+                if (from != null and from.? == to and call.kind == .method and !call.self_receiver) res = .unresolved;
+            }
             switch (res) {
                 .found => |to| {
                     graph.stats.resolved += 1;
                     t[ci] = to;
-                    const from = graph.enclosing(file_id, call.line) orelse continue;
                     // A recursive call is an edge too; the cost walk stops at it.
-                    try raw.append(allocator, .{ .from = from, .edge = .{ .to = to, .line = call.line } });
+                    try raw.append(allocator, .{ .from = from orelse continue, .edge = .{ .to = to, .line = call.line, .deferred = call.deferred } });
                 },
                 .ambiguous => graph.stats.ambiguous += 1,
                 .unresolved => {},
@@ -259,41 +283,187 @@ fn imported_files(exp: *explorer.Explorer, file_id: u32, out: *std.AutoHashMap(u
     }
 }
 
+/// Whether the caller binds `call.name` itself before the call: a parameter
+/// in its signature, or `let name`, `const name`, `var name`, `name :=`.
+fn binds_locally(content: []const u8, caller: Node, call: models.Call) bool {
+    var line_no: u32 = 0;
+    var it = std.mem.splitScalar(u8, content, '\n');
+    while (it.next()) |line| : (line_no += 1) {
+        if (line_no < caller.line_start) continue;
+        if (line_no > call.line) break;
+        var pos: usize = 0;
+        while (std.mem.indexOfPos(u8, line, pos, call.name)) |at| {
+            pos = at + call.name.len;
+            if (at > 0 and (std.ascii.isAlphanumeric(line[at - 1]) or line[at - 1] == '_')) continue;
+            if (pos < line.len and (std.ascii.isAlphanumeric(line[pos]) or line[pos] == '_')) continue;
+            const before = std.mem.trimEnd(u8, line[0..at], " \t");
+            const after = std.mem.trimStart(u8, line[pos..], " \t");
+            // A parameter or a typed binding: `update: F`, `(update)`, `, update`.
+            if (line_no == caller.line_start and after.len > 0 and (after[0] == ':' or after[0] == ',' or after[0] == ')')) return true;
+            if (std.mem.endsWith(u8, before, "let") or std.mem.endsWith(u8, before, "let mut") or
+                std.mem.endsWith(u8, before, "const") or std.mem.endsWith(u8, before, "var")) return true;
+            if (std.mem.startsWith(u8, after, ":=")) return true;
+        }
+    }
+    return false;
+}
+
+/// Languages that call each other's definitions by name.
+fn family(language: models.Language) u8 {
+    return switch (language) {
+        .typescript, .javascript => 1,
+        .c, .cpp => 2,
+        .java, .kotlin, .scala => 3,
+        else => 16 + @as(u8, @intFromEnum(language)),
+    };
+}
+
+/// Whether `to` was found by the whole-repository rule: it lives outside the
+/// caller's file and outside everything the caller imports.
+fn res_is_global(nodes: []const Node, to: u32, file_id: u32, near: *const std.AutoHashMap(u32, void)) bool {
+    const f = nodes[to].file_id;
+    return f != file_id and !near.contains(f);
+}
+
+/// The caller file's import statements, one per line. Group imports are
+/// stored as their root path (`use tokio::{spawn, select}` as `tokio`), so the
+/// names they bring in are read from the source.
+fn collect_import_lines(allocator: std.mem.Allocator, exp: *explorer.Explorer, file_id: u32) ![]const u8 {
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(allocator);
+    const content = exp.content_cache.get(file_id) orelse return out.toOwnedSlice(allocator);
+    var it = std.mem.splitScalar(u8, content, '\n');
+    var in_group = false;
+    while (it.next()) |raw| {
+        const t = std.mem.trim(u8, raw, " \t\r");
+        const starts = std.mem.startsWith(u8, t, "use ") or std.mem.startsWith(u8, t, "pub use ") or
+            std.mem.startsWith(u8, t, "import ") or std.mem.startsWith(u8, t, "from ") or
+            std.mem.indexOf(u8, t, "require(") != null or std.mem.indexOf(u8, t, "@import(") != null;
+        if (starts or in_group) {
+            try out.appendSlice(allocator, t);
+            try out.append(allocator, '\n');
+            // A group import that continues on the next lines.
+            if (starts and std.mem.indexOfScalar(u8, t, '{') != null and std.mem.indexOfScalar(u8, t, '}') == null) in_group = true;
+            if (in_group and std.mem.indexOfScalar(u8, t, '}') != null) in_group = false;
+        }
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+fn names_word(hay: []const u8, word: []const u8) bool {
+    var pos: usize = 0;
+    while (std.mem.indexOfPos(u8, hay, pos, word)) |at| {
+        pos = at + word.len;
+        const left_ok = at == 0 or !(std.ascii.isAlphanumeric(hay[at - 1]) or hay[at - 1] == '_');
+        const right_ok = pos >= hay.len or !(std.ascii.isAlphanumeric(hay[pos]) or hay[pos] == '_');
+        if (left_ok and right_ok) return true;
+    }
+    return false;
+}
+
 const Resolution = union(enum) {
     found: u32,
     ambiguous,
     unresolved,
 };
 
-fn resolve(nodes: []const Node, cands: []const u32, file_id: u32, call: models.Call, near: *const std.AutoHashMap(u32, void)) Resolution {
-    // The same file first: a helper beside its caller, a method beside `self`.
-    if (unique(nodes, cands, file_id, null, call)) |r| return r;
+fn resolve(nodes: []const Node, cands: []const u32, file_id: u32, language: models.Language, call: models.Call, near: *const std.AutoHashMap(u32, void)) Resolution {
+    const not_found: Resolution = if (cands.len > 0) .ambiguous else .unresolved;
+    if (call.self_receiver) {
+        if (unique(nodes, cands, language, file_id, null, call)) |r| return r;
+        if (unique(nodes, cands, language, null, near, call)) |r| return r;
+        return not_found;
+    }
+    // `crate::agent::run(…)` names the module. The caller's own file can hold
+    // another `run`, and the same-file rule bound the call to it.
+    if (call.qualifier.len > 0) {
+        if (qualifier_is_module(language, call)) {
+            if (unique_in_module(nodes, cands, language, call.qualifier)) |r| return r;
+            if (unique(nodes, cands, language, null, near, call)) |r| return r;
+            return not_found;
+        }
+        // `util.Do()`, `helpers.thing()`, `api.get()`: the qualifier can be a
+        // module or a variable, and a file named after it is the evidence.
+        if (call.kind == .method and qualifier_may_be_module(language)) {
+            if (unique_in_module(nodes, cands, language, call.qualifier)) |r| return r;
+        }
+    }
+    // `self.pending.write()` locks an `RwLock`. The name is the standard
+    // library's, and a repository method named `write` is not evidence. A file
+    // named after the qualifier, checked above, is.
+    if (call.kind == .method and is_std_method(call.name)) return .unresolved;
+    // The same file first: a helper beside its caller.
+    if (unique(nodes, cands, language, file_id, null, call)) |r| return r;
     // Then what the caller imports. A method on another file's type is found
     // here, through the import that names the type.
-    if (unique(nodes, cands, null, near, call)) |r| return r;
+    if (unique(nodes, cands, language, null, near, call)) |r| return r;
     // A plain call with a single definition anywhere: C, Python and Go call
     // across files that no import statement names.
-    if (call.kind == .plain and !call.self_receiver) {
-        return if (cands.len == 1) .{ .found = cands[0] } else .ambiguous;
+    if (call.kind == .plain) {
+        var found: ?u32 = null;
+        var count: usize = 0;
+        for (cands) |c| {
+            if (family(nodes[c].language) != family(language)) continue;
+            found = c;
+            count += 1;
+        }
+        if (count == 1) return .{ .found = found.? };
+        return if (count > 1) .ambiguous else .unresolved;
     }
-    return if (cands.len > 0) .ambiguous else .unresolved;
+    return not_found;
 }
 
-/// The one candidate in scope, `.ambiguous` when several are, null when none.
-fn unique(nodes: []const Node, cands: []const u32, file: ?u32, files: ?*const std.AutoHashMap(u32, void), call: models.Call) ?Resolution {
+/// Method names the standard collections, locks, channels, iterators, I/O
+/// and futures of the indexed languages define. A call to one on a receiver
+/// other than `self` names that library method as often as a repository one.
+const std_methods = [_][]const u8{
+    "get",            "get_mut", "set",       "insert",   "remove",       "push",     "pop",
+    "append",         "extend",  "clear",     "contains", "contains_key", "entry",    "or_insert",
+    "or_insert_with", "retain",  "drain",     "sort",     "len",          "is_empty", "iter",
+    "into_iter",      "map",     "filter",    "find",     "collect",      "first",    "last",
+    "next",           "take",    "skip",      "join",     "split",        "parse",    "to_string",
+    "clone",          "unwrap",  "expect",    "ok",       "err",          "and_then", "map_err",
+    "read",           "write",   "flush",     "close",    "open",         "lock",     "try_lock",
+    "send",           "recv",    "try_recv",  "load",     "store",        "wait",     "notify",
+    "spawn",          "poll",    "call",      "apply",    "run",          "start",    "stop",
+    "reset",          "update",  "add",       "delete",   "keys",         "values",   "has",
+    "forEach",        "then",    "catch",     "finally",  "resolve",      "reject",   "emit",
+    "on",             "off",     "subscribe", "publish",  "log",          "debug",    "info",
+    "warn",           "error",   "trace",     "json",     "text",         "fetch",    "build",
+    "finish",         "commit",  "rollback",  "begin",    "execute",      "query",    "bind",
+};
+
+fn is_std_method(name: []const u8) bool {
+    for (&std_methods) |m| {
+        if (std.mem.eql(u8, name, m)) return true;
+    }
+    return false;
+}
+
+/// A Rust path whose last segment before the name is a module: lowercase and
+/// not `self`, `super` or `crate`. `Store::open` names a type instead.
+fn qualifier_is_module(language: models.Language, call: models.Call) bool {
+    if (call.kind != .path or language != .rust) return false;
+    const q = call.qualifier;
+    if (!std.ascii.isLower(q[0])) return false;
+    return !std.mem.eql(u8, q, "super") and !std.mem.eql(u8, q, "crate");
+}
+
+fn qualifier_may_be_module(language: models.Language) bool {
+    return switch (language) {
+        .go, .python, .zig, .typescript, .javascript, .lua, .ruby => true,
+        else => false,
+    };
+}
+
+/// The one candidate whose file lives in a directory named `module` or is
+/// named `module`: `agent` matches `src/agent/loop_.rs` and `src/agent.rs`.
+fn unique_in_module(nodes: []const Node, cands: []const u32, language: models.Language, module: []const u8) ?Resolution {
     var found: ?u32 = null;
     var count: usize = 0;
     for (cands) |c| {
-        const n = nodes[c];
-        if (file) |f| {
-            if (n.file_id != f) continue;
-        }
-        if (files) |fs| {
-            if (!fs.contains(n.file_id)) continue;
-        }
-        // `receiver.name()` calls a method. Where the tags query marks
-        // methods, a free function of the same name is a different definition.
-        if (call.kind == .method and n.kind == .function and marks_methods(n.language)) continue;
+        if (family(nodes[c].language) != family(language)) continue;
+        if (!path_names_module(nodes[c].path, module)) continue;
         found = c;
         count += 1;
     }
@@ -302,12 +472,50 @@ fn unique(nodes: []const Node, cands: []const u32, file: ?u32, files: ?*const st
     return null;
 }
 
-/// Rust writes a method call with `.` and a module path with `::`, and its
-/// tags query marks methods, so a free function cannot be the target of
-/// `receiver.name()`. Go, Python and Zig spell `pkg.Func()` with the same dot as
-/// a method call, so the kind rules nothing out there.
+fn path_names_module(path: []const u8, module: []const u8) bool {
+    var it = std.mem.splitScalar(u8, path, '/');
+    while (it.next()) |seg| {
+        const stem = if (std.mem.lastIndexOfScalar(u8, seg, '.')) |dot| seg[0..dot] else seg;
+        if (std.mem.eql(u8, stem, module)) return true;
+    }
+    return false;
+}
+
+/// The one candidate in scope, `.ambiguous` when several are, null when none.
+fn unique(nodes: []const Node, cands: []const u32, language: models.Language, file: ?u32, files: ?*const std.AutoHashMap(u32, void), call: models.Call) ?Resolution {
+    var found: ?u32 = null;
+    var count: usize = 0;
+    for (cands) |c| {
+        const n = nodes[c];
+        if (family(n.language) != family(language)) continue;
+        if (file) |f| {
+            if (n.file_id != f) continue;
+        }
+        if (files) |fs| {
+            if (!fs.contains(n.file_id)) continue;
+        }
+        // `receiver.name()` calls a method. Where the tags query marks
+        // methods, a free function of the same name is a different definition:
+        // `approvals.get(id)` in a component is not the API module's `get`.
+        if (call.kind == .method and !call.self_receiver and n.kind != .method and marks_methods(n.language)) continue;
+        found = c;
+        count += 1;
+    }
+    if (count == 1) return .{ .found = found.? };
+    if (count > 1) return .ambiguous;
+    return null;
+}
+
+/// These languages' tags queries mark methods, and a module-qualified call is
+/// spelled apart from a method call (`::` in Rust, a named import in
+/// JavaScript), so a free function cannot be the target of `receiver.name()`.
+/// Go, Python and Zig spell `pkg.Func()` with the same dot as a method call,
+/// and there the kind rules nothing out.
 fn marks_methods(language: models.Language) bool {
-    return language == .rust;
+    return switch (language) {
+        .rust, .typescript, .javascript, .java, .kotlin, .c_sharp, .cpp => true,
+        else => false,
+    };
 }
 
 // ── Walks ────────────────────────────────────────────────────────────────────
@@ -325,7 +533,9 @@ pub const Reach = struct {
 /// function that calls a querying helper twice costs twice the helper. A call
 /// back into a function still on the walk (recursion) adds nothing: the
 /// static count of one pass is what the source states.
-pub fn transitive(allocator: std.mem.Allocator, g: *const Graph, own: []const u64) ![]Reach {
+///
+/// `skip`, when given, holds one flag per edge; a flagged edge adds nothing.
+pub fn transitive(allocator: std.mem.Allocator, g: *const Graph, own: []const u64, skip: ?[]const bool) ![]Reach {
     const n = g.nodes.len;
     const reach = try allocator.alloc(Reach, n);
     errdefer allocator.free(reach);
@@ -361,6 +571,9 @@ pub fn transitive(allocator: std.mem.Allocator, g: *const Graph, own: []const u6
             _ = stack.pop();
             var best: u64 = 0;
             for (g.out_start[node]..g.out_start[node + 1]) |ei| {
+                if (skip) |sk| {
+                    if (sk[ei]) continue;
+                }
                 const to = g.edges[ei].to;
                 if (state[to] != 2) continue; // on the stack: a cycle
                 const c = reach[to].total;
