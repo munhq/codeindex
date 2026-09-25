@@ -39,6 +39,7 @@ const migration_parity = @import("analysis/migration_parity.zig");
 const structure = @import("parser/structure.zig");
 const callgraph = @import("index/callgraph.zig");
 const call_cost = @import("analysis/call_cost.zig");
+const db_schema = @import("analysis/db_schema.zig");
 
 comptime {
     _ = manifest_compliance;
@@ -54,6 +55,7 @@ comptime {
     _ = structure;
     _ = callgraph;
     _ = call_cost;
+    _ = db_schema;
 }
 
 // ── Test helpers ──────────────────────────────────────────────────────────────

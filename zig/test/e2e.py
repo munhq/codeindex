@@ -256,6 +256,7 @@ def main():
     os.makedirs(f"{ws}/deploy", exist_ok=True)
     os.makedirs(f"{ws}/cfg/a", exist_ok=True)
     os.makedirs(f"{ws}/cfg/b", exist_ok=True)
+    os.makedirs(f"{ws}/migrations", exist_ok=True)
     # Multi-language project. Go's import yields a quote-containing symbol name.
     files = {
         "src/lib.rs":  "pub mod helper;\npub fn run(){}\n",
@@ -340,6 +341,11 @@ def main():
             "    }\n"
             "    Ok(())\n"
             "}\n",
+        # `CREATE TABLE IF NOT EXISTS` recorded the table `IF`, twice.
+        "migrations/0001_init.sql":
+            "CREATE TABLE IF NOT EXISTS nodes (id TEXT);\n"
+            "CREATE TABLE IF NOT EXISTS edges (id TEXT);\n"
+            "CREATE TABLE forgotten (id TEXT);\n",
         "Cargo.toml":
             "[package]\nname = \"e2e\"\nversion = \"0.1.0\"\n\n"
             "[dependencies]\nserde_json = \"1\"\nnever_used_crate = \"0.1\"\n",
@@ -387,6 +393,7 @@ def main():
         tool(25, "analyze", {"analysis": "health"}),
         tool(26, "analyze", {"analysis": "call_cost"}),
         tool(27, "analyze", {"analysis": "dead_code"}),
+        tool(28, "analyze", {"analysis": "db_schema"}),
     ]
     m = rpc(ws, calls)
 
@@ -449,7 +456,7 @@ def main():
     parsed = {}
     for i, name in ((20, "spawn_scan"), (21, "field_contention"), (22, "logic_shapes"),
                     (23, "leak_shapes"), (24, "deps"), (25, "health"), (26, "call_cost"),
-                    (27, "dead_code")):
+                    (27, "dead_code"), (28, "db_schema")):
         check(i in m, f"analyze({name}) answered")
         try:
             parsed[name] = json.loads(text(m[i]))
@@ -487,6 +494,11 @@ def main():
         d = parsed["dead_code"]
         check("unused_public_api" in d and "checked" in d,
               f"dead_code separates unused public API from dead code (got keys {sorted(d)})")
+
+    if "db_schema" in parsed:
+        issues = parsed["db_schema"].get("issue_details", [])
+        check([(i["issue_type"], i["table"]) for i in issues] == [("orphan_migration", "forgotten")],
+              f"db_schema reports the one table no code names, and no table called IF (got {issues})")
 
     if "leak_shapes" in parsed:
         f = parsed["leak_shapes"].get("findings", [])
