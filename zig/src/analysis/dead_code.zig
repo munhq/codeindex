@@ -62,7 +62,7 @@ fn is_test_symbol(name: []const u8, kind: models.SymbolKind, path: []const u8, l
     if (kind == .@"test") return true;
 
     // A file the test runner owns.
-    const basename = std.fs.path.basename(path);
+    const basename = std.fs.path.basenamePosix(path);
     if (std.mem.indexOf(u8, basename, "_test.") != null) return true;
     if (std.mem.indexOf(u8, basename, ".test.") != null) return true;
     if (std.mem.indexOf(u8, basename, ".spec.") != null) return true;
@@ -168,8 +168,8 @@ const Packages = struct {
             .zig => &self.zig,
             else => return false,
         };
-        var dir = std.fs.path.dirname(path);
-        while (dir) |d| : (dir = std.fs.path.dirname(d)) {
+        var dir = std.fs.path.dirnamePosix(path);
+        while (dir) |d| : (dir = std.fs.path.dirnamePosix(d)) {
             if (map.get(d)) |lib| return lib;
         }
         return false;
@@ -192,8 +192,8 @@ fn find_packages(allocator: std.mem.Allocator, exp: *explorer.Explorer) !Package
         const file_id = entry.key_ptr.*;
         if (exp.deleted_files.get(file_id) != null) continue;
         const path = entry.value_ptr.path;
-        const base = std.fs.path.basename(path);
-        const dir = std.fs.path.dirname(path) orelse continue;
+        const base = std.fs.path.basenamePosix(path);
+        const dir = std.fs.path.dirnamePosix(path) orelse continue;
         const content = exp.content_of(allocator, file_id) orelse continue;
         if (std.mem.eql(u8, base, "Cargo.toml")) {
             var buf: [1024]u8 = undefined;
