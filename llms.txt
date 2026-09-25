@@ -89,7 +89,8 @@ Orientation and audits:
 - `analyze` (kind) — 22 analyses: security, dead_code, cycles, architecture,
   unwrap_audit, clones, duplication, health and others. Production-cost
   analyses: spawn_scan (an interpreter on a timer), field_contention (one field,
-  two owners), logic_shapes (a fixed size against a declared limit), call_cost
+  two owners), logic_shapes (a fixed size against its deploy unit's limit, and replicas ×
+  pool size against a pooler), call_cost
   (round trips per loop element, counted through the call graph),
   leak_shapes (shapes, each with the runtime series that decides it), deps.
 
