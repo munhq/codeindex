@@ -366,6 +366,7 @@ def main():
         tool(13, "read_file", {"path": "settings.py"}),
         tool(14, "read_symbol", {"name": "long_fn"}),
         tool(15, "read_symbol", {"name": "long_fn", "max_lines": 0}),
+        tool(16, "find_callers", {"name": "insert_node"}),
         # Standard MCP methods this server does not implement. A client that
         # probes them on connect — Antigravity does — waited forever for a reply
         # that never came, because the dispatch chain fell off the end instead of
@@ -423,6 +424,11 @@ def main():
           f"read_symbol stops at its default window and says how to read on (got {len(body)} bytes)")
     body = text(m[15]) if 15 in m else ""
     check("v399 = 399" in body, "read_symbol with max_lines=0 returns the whole symbol")
+    # `insert_node` is called on lines 7 and 8 of src/triples.rs. The answer
+    # used to be one line late.
+    body = text(m[16]) if 16 in m else ""
+    check("triples.rs:7 [call] in import_triple" in body and "triples.rs:8 " in body,
+          f"find_callers names the call line and the calling function (got {body!r})")
 
     # Unknown methods: an error, the right code, and the method named back so the
     # client's log says which call it was.

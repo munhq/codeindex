@@ -538,11 +538,13 @@ pub const Server = struct {
                     try w.writeAll("No callers found.");
                 } else {
                     for (results) |r| {
-                        // line_num is 0-based (it indexes word postings); every
-                        // line number leaving this server is 1-based.
-                        try w.print("{s}:{d} [{s}] {s}\n", .{
-                            r.path, r.line_num + 1, r.context, r.line_text,
-                        });
+                        // `line_num` is already 1-based. The handler added one
+                        // more, and every caller was reported a line late.
+                        if (r.caller) |c| {
+                            try w.print("{s}:{d} [{s}] in {s}: {s}\n", .{ r.path, r.line_num, r.context, c, r.line_text });
+                        } else {
+                            try w.print("{s}:{d} [{s}] {s}\n", .{ r.path, r.line_num, r.context, r.line_text });
+                        }
                     }
                 }
             }
@@ -1576,7 +1578,7 @@ pub const Server = struct {
             // get_imported_by
             "{\"name\":\"get_imported_by\",\"description\":\"Get which files import/depend on the given file (reverse dependencies)\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"File path relative to workspace root\"}},\"required\":[\"path\"]},\"annotations\":{\"readOnlyHint\":true,\"openWorldHint\":false,\"destructiveHint\":false}}",
             // find_callers
-            "{\"name\":\"find_callers\",\"description\":\"Approximate callers of a symbol. Finds word-index hits with call/method/path context, excluding the defining body. Heuristic — no full name resolution, may include shadowed names.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\",\"description\":\"Symbol name\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max results (default 100)\"}},\"required\":[\"name\"]},\"annotations\":{\"readOnlyHint\":true,\"openWorldHint\":false,\"destructiveHint\":false}}",
+            "{\"name\":\"find_callers\",\"description\":\"Callers of a symbol: call sites the parser recorded, plus path, import and re-export references, each with the function that holds it. Excludes the defining body and names spelled in strings or comments. Matches by name, so a different definition with the same name is included.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\",\"description\":\"Symbol name\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max results (default 100)\"}},\"required\":[\"name\"]},\"annotations\":{\"readOnlyHint\":true,\"openWorldHint\":false,\"destructiveHint\":false}}",
             // plan_change
             "{\"name\":\"plan_change\",\"description\":\"Given a symbol name or file path, produce a full edit plan: definition(s), callers, file role (god/stable-core/driver/island), hardcoded-literal heads-up, and transitive blast radius. Use before refactors.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"symbol\":{\"type\":\"string\",\"description\":\"Symbol name to plan around\"},\"file\":{\"type\":\"string\",\"description\":\"Or a file path to plan around\"}}},\"annotations\":{\"readOnlyHint\":true,\"openWorldHint\":false,\"destructiveHint\":false}}",
             // get_hot_files

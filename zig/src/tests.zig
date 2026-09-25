@@ -2866,3 +2866,27 @@ test "callgraph: a closure parameter and another language's function are not the
     try testing.expectEqual(@as(usize, 1), tick.len);
     try testing.expectEqualStrings("/ws/src/report.rs", g.nodes[tick[0].to].path);
 }
+
+test "find_callers: a call in a string or a comment is not a caller, and each hit names its function" {
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
+    defer exp.deinit();
+    try index_sources(&exp, &.{
+        .{ "/ws/src/a.rs",
+            \\pub fn flush() {}
+            \\fn save() {
+            \\    flush();
+            \\    let msg = "then flush() again";
+            \\    // flush() here too
+            \\}
+            \\
+        },
+    });
+    const hits = try exp.find_callers("flush", 10);
+    defer {
+        for (hits) |h| testing.allocator.free(h.line_text);
+        testing.allocator.free(hits);
+    }
+    try testing.expectEqual(@as(usize, 1), hits.len);
+    try testing.expectEqual(@as(u32, 3), hits[0].line_num);
+    try testing.expectEqualStrings("save", hits[0].caller.?);
+}
