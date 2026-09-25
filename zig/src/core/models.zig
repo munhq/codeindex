@@ -253,12 +253,22 @@ pub const CallKind = enum(u8) {
 pub const Call = struct {
     /// The called name: the last identifier before the argument list.
     name: []const u8,
-    /// 0-based line of the argument list's opening parenthesis.
+    /// 0-based line and column of the argument list's opening parenthesis.
     line: u32,
+    col: u32 = 0,
     kind: CallKind,
     /// The receiver or qualifier is `self`, `this`, `Self` or `cls`: the call
     /// stays inside the type that makes it.
     self_receiver: bool = false,
+    /// The identifier just before the `.` or `::`: `agent` in
+    /// `crate::agent::run(…)`, `util` in `util.Do()`. Empty for a plain call.
+    /// A slice of `FileOutline.call_names`, like `name`.
+    qualifier: []const u8 = "",
+    /// The call sits in a function that runs on an event, not when the code
+    /// around it runs: an `onClick={() => save()}` attribute, a `setTimeout`
+    /// or `addEventListener` callback. A loop that renders a button per row
+    /// does not call the button's handler per row.
+    deferred: bool = false,
 };
 
 /// What a loop repeats over.
@@ -278,10 +288,22 @@ pub const Loop = struct {
     line_start: u32,
     line_end: u32,
     kind: LoopKind,
+    /// 0-based position where the repeated part begins. The header before it
+    /// runs once: `for x in load_all().await? {` calls `load_all` once.
+    body_line: u32 = 0,
+    body_col: u32 = 0,
 
     /// True when the 1-based `line` falls inside this loop.
     pub fn contains_1(self: Loop, line: usize) bool {
         return line >= @as(usize, self.line_start) + 1 and line <= @as(usize, self.line_end) + 1;
+    }
+
+    /// True when a position at the 0-based `line` and `col` runs once per
+    /// iteration.
+    pub fn repeats(self: Loop, line: u32, col: u32) bool {
+        if (line < self.line_start or line > self.line_end) return false;
+        if (line > self.body_line) return true;
+        return line == self.body_line and col >= self.body_col;
     }
 };
 

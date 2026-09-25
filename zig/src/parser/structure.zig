@@ -334,7 +334,7 @@ pub fn extract(allocator: std.mem.Allocator, language: models.Language, content:
     defer calls.deinit(allocator);
     // Name offsets into `names`, resolved into slices once the buffer stops
     // growing.
-    var name_spans = std.ArrayList([2]u32).empty;
+    var name_spans = std.ArrayList([3]u32).empty;
     defer name_spans.deinit(allocator);
     var names = std.ArrayList(u8).empty;
     defer names.deinit(allocator);
@@ -369,7 +369,10 @@ pub fn extract(allocator: std.mem.Allocator, language: models.Language, content:
     const owned_names = try names.toOwnedSlice(allocator);
     errdefer allocator.free(owned_names);
     const owned_calls = try calls.toOwnedSlice(allocator);
-    for (owned_calls, name_spans.items) |*c, span| c.name = owned_names[span[0] .. span[0] + span[1]];
+    for (owned_calls, name_spans.items) |*c, span| {
+        c.name = owned_names[span[0] .. span[0] + span[1]];
+        c.qualifier = owned_names[span[0] + span[1] .. span[0] + span[1] + span[2]];
+    }
     errdefer allocator.free(owned_calls);
     return .{
         .calls = owned_calls,
@@ -386,35 +389,45 @@ fn visit(
     node: ts.TSNode,
     loops: *std.ArrayList(models.Loop),
     calls: *std.ArrayList(models.Call),
-    name_spans: *std.ArrayList([2]u32),
+    name_spans: *std.ArrayList([3]u32),
     names: *std.ArrayList(u8),
 ) !void {
     const t = std.mem.span(ts.ts_node_type(node));
     if (loop_kind(language, t, node, content)) |kind| {
+        const body = loop_body_start(node);
         try loops.append(allocator, .{
             .line_start = ts.ts_node_start_point(node).row,
             .line_end = ts.ts_node_end_point(node).row,
             .kind = kind,
+            .body_line = body.row,
+            .body_col = body.column,
         });
     }
 
     const args = arguments_of(language, t, node) orelse return;
     const callee = callee_before(content, ts.ts_node_start_byte(args)) orelse return;
+    // The qualifier follows the name in the buffer.
     const off: u32 = @intCast(names.items.len);
     try names.appendSlice(allocator, callee.name);
-    try name_spans.append(allocator, .{ off, @intCast(callee.name.len) });
+    try names.appendSlice(allocator, callee.qualifier);
+    try name_spans.append(allocator, .{ off, @intCast(callee.name.len), @intCast(callee.qualifier.len) });
     try calls.append(allocator, .{
         .name = &.{},
         .line = ts.ts_node_start_point(args).row,
+        .col = ts.ts_node_start_point(args).column,
         .kind = callee.kind,
         .self_receiver = callee.self_receiver,
+        .deferred = event_driven(language, content, node),
     });
     // `xs.forEach(x => …)`: the callback is the loop body.
     if (callback_loop(language, callee.name) and has_function_argument(args)) {
+        const start = ts.ts_node_start_point(args);
         try loops.append(allocator, .{
-            .line_start = ts.ts_node_start_point(args).row,
+            .line_start = start.row,
             .line_end = ts.ts_node_end_point(args).row,
             .kind = .each,
+            .body_line = start.row,
+            .body_col = start.column,
         });
     }
 }
@@ -465,6 +478,7 @@ pub const Callee = struct {
     name: []const u8,
     kind: models.CallKind,
     self_receiver: bool,
+    qualifier: []const u8 = "",
 };
 
 fn ident_char(c: u8) bool {
@@ -513,16 +527,47 @@ pub fn callee_before(content: []const u8, open: usize) ?Callee {
         qual_end = i - 2;
     }
     var self_receiver = false;
+    var qual: []const u8 = "";
     if (kind != .plain) {
         var q = qual_end;
         while (q > 0 and ident_char(content[q - 1])) q -= 1;
-        const qual = content[q..qual_end];
+        qual = content[q..qual_end];
         const selves = [_][]const u8{ "self", "this", "Self", "cls" };
         for (&selves) |s| {
             if (std.mem.eql(u8, qual, s)) self_receiver = true;
         }
     }
-    return .{ .name = name, .kind = kind, .self_receiver = self_receiver };
+    return .{ .name = name, .kind = kind, .self_receiver = self_receiver, .qualifier = qual };
+}
+
+/// Calls whose function argument runs on an event, a timer or a render hook.
+const event_calls = [_][]const u8{
+    "addEventListener", "on",          "once",    "subscribe", "setTimeout", "setInterval",
+    "requestAnimationFrame", "useEffect", "useCallback", "useMemo", "useLayoutEffect",
+};
+
+/// Whether the call at `node` sits in a JavaScript function literal that
+/// runs on an event: a JSX attribute value, or the callback of one of
+/// `event_calls`. The walk stops at the nearest named function.
+fn event_driven(language: models.Language, content: []const u8, node: ts.TSNode) bool {
+    if (language != .typescript and language != .javascript) return false;
+    var n = ts.ts_node_parent(node);
+    while (!ts.ts_node_is_null(n)) : (n = ts.ts_node_parent(n)) {
+        const t = std.mem.span(ts.ts_node_type(n));
+        if (std.mem.eql(u8, t, "function_declaration") or std.mem.eql(u8, t, "method_definition") or
+            std.mem.eql(u8, t, "program") or std.mem.eql(u8, t, "class_body")) return false;
+        if (std.mem.eql(u8, t, "jsx_attribute")) return true;
+        const literal = std.mem.eql(u8, t, "arrow_function") or std.mem.eql(u8, t, "function_expression") or
+            std.mem.eql(u8, t, "function");
+        if (!literal) continue;
+        const p = ts.ts_node_parent(n);
+        if (ts.ts_node_is_null(p) or !std.mem.eql(u8, std.mem.span(ts.ts_node_type(p)), "arguments")) continue;
+        const callee = callee_before(content, ts.ts_node_start_byte(p)) orelse continue;
+        for (&event_calls) |e| {
+            if (std.mem.eql(u8, callee.name, e)) return true;
+        }
+    }
+    return false;
 }
 
 /// Calls that run their function argument once per element.
@@ -591,6 +636,23 @@ fn loop_kind(language: models.Language, t: []const u8, node: ts.TSNode, content:
     return null;
 }
 
+/// Where a loop's repeated part begins: its `body` field, or the last named
+/// child for grammars that name no field (Zig puts the block last). A
+/// comprehension has no header that runs once apart from its iterable, and the
+/// whole node counts.
+fn loop_body_start(node: ts.TSNode) ts.TSPoint {
+    const field = "body";
+    const body = ts.ts_node_child_by_field_name(node, field.ptr, field.len);
+    if (!ts.ts_node_is_null(body)) return ts.ts_node_start_point(body);
+    const t = std.mem.span(ts.ts_node_type(node));
+    if (std.mem.indexOf(u8, t, "comprehension") != null or std.mem.eql(u8, t, "generator_expression")) {
+        return ts.ts_node_start_point(node);
+    }
+    const n = ts.ts_node_named_child_count(node);
+    if (n == 0) return ts.ts_node_start_point(node);
+    return ts.ts_node_start_point(ts.ts_node_named_child(node, n - 1));
+}
+
 /// `while true`, `while (true)`, `while True:`, `for (;;)`, `while (1)`.
 fn header_is_forever(content: []const u8, node: ts.TSNode) bool {
     const start: usize = ts.ts_node_start_byte(node);
@@ -634,6 +696,8 @@ test "structure: the callee is the last identifier before the arguments" {
         try testing.expectEqual(c.kind, got.kind);
         try testing.expectEqual(c.self_recv, got.self_receiver);
     }
+    try testing.expectEqualStrings("agent", callee_before("crate::agent::run(", 17).?.qualifier);
+    try testing.expectEqualStrings("db", callee_before("self.db.insert(", 14).?.qualifier);
     // `(f)(x)` and `foo()(x)` name nothing before their second parenthesis.
     try testing.expect(callee_before("foo()(", 5) == null);
 }
