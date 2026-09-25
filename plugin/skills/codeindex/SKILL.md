@@ -70,15 +70,16 @@ Ask what the question actually is, then pick:
 
 Dependency questions: `get_imports` (`path`) for what a file needs, and
 `get_imported_by` (`path`) for what needs it. Orientation: `get_tree`,
-`get_hot_files`, `status`. Audits: `analyze` with one of 21 analyses
+`get_hot_files`, `status`. Audits: `analyze` with one of 22 analyses
 (`security`, `dead_code`, `cycles`, `architecture`, `unwrap_audit`, `clones`,
 `duplication`, `health`, …).
 
 Production-cost questions have their own analyses. Ask `spawn_scan` what starts
 an interpreter on a timer, `field_contention` which declared-state field two
 owners write, `logic_shapes` which fixed byte constant ignores the declared
-memory limit, `leak_shapes` which container only grows, and `deps` what the
-dependency tree holds. A `leak_shapes` finding is a SHAPE: it names the runtime
+memory limit, `call_cost` which loop makes the most round trips per element,
+`leak_shapes` which container only grows, and `deps` what the dependency tree
+holds. A `leak_shapes` finding is a SHAPE: it names the runtime
 series that decides it, so pair it with that series before acting.
 
 Every file-scoped tool above takes **`path`**, relative to the workspace root.

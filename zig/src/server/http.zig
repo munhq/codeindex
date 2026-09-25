@@ -22,6 +22,7 @@ const spawn_scan = @import("../analysis/spawn_scan.zig");
 const dep_inventory = @import("../analysis/dep_inventory.zig");
 const leak_shapes = @import("../analysis/leak_shapes.zig");
 const logic_shapes = @import("../analysis/logic_shapes.zig");
+const call_cost = @import("../analysis/call_cost.zig");
 const field_contention = @import("../analysis/field_contention.zig");
 
 const treesitter = @import("../parser/treesitter.zig");
@@ -1259,6 +1260,39 @@ pub const Server = struct {
                     try w.writeAll("}");
                 }
                 try w.print("],\"truncated\":{s}}}", .{if (findings.len > cap) "true" else "false"});
+            } else if (std.mem.eql(u8, analysis_type, "call_cost")) {
+                var report = try call_cost.analyze(aa, self.exp);
+                defer report.deinit(aa);
+                try w.print("{{\"total\":{d},\"functions_with_round_trips\":{d},\"calls\":{d},\"resolved_calls\":{d},\"ambiguous_calls\":{d},\"findings\":[", .{
+                    report.findings.len, report.functions_with_round_trips, report.graph.calls, report.graph.resolved, report.graph.ambiguous,
+                });
+                const cap: usize = 200;
+                const site_cap: usize = 5;
+                for (report.findings[0..@min(report.findings.len, cap)], 0..) |f, i| {
+                    if (i > 0) try w.writeAll(",");
+                    try w.writeAll("{\"file\":");
+                    try write_json_string(w, f.file);
+                    try w.print(",\"line\":{d},\"round_trips\":{d},\"header\":", .{ f.line, f.round_trips });
+                    try write_json_string(w, f.header);
+                    try w.writeAll(",\"sites\":[");
+                    for (f.sites[0..@min(f.sites.len, site_cap)], 0..) |site, si| {
+                        if (si > 0) try w.writeAll(",");
+                        try w.print("{{\"line\":{d},\"round_trips\":{d},\"callee\":", .{ site.line, site.round_trips });
+                        try write_json_string(w, site.callee);
+                        if (site.callee_file.len > 0) {
+                            try w.writeAll(",\"callee_file\":");
+                            try write_json_string(w, site.callee_file);
+                            try w.print(",\"callee_line\":{d}", .{site.callee_line});
+                        }
+                        try w.writeAll(",\"via\":");
+                        try write_json_string(w, site.via);
+                        try w.writeAll("}");
+                    }
+                    try w.print("],\"more_sites\":{d}}}", .{f.sites.len -| site_cap});
+                }
+                try w.print("],\"truncated\":{s},\"runtime_check\":", .{if (report.findings.len > cap) "true" else "false"});
+                try write_json_string(w, "the size of the collection the loop walks: round_trips is per element");
+                try w.writeAll("}");
             } else if (std.mem.eql(u8, analysis_type, "logic_shapes")) {
                 var report = try logic_shapes.analyze(aa, self.exp);
                 defer report.deinit(aa);
@@ -1327,7 +1361,7 @@ pub const Server = struct {
                 }
                 try w.writeAll("]}");
             } else {
-                try w.print("Unknown analysis: {s}. Available: security, dead_code, unwrap_audit, test_coverage, architecture, crossref, type_drift, db_schema, migration_parity, manifest_compliance, literal_scan, coupling, cycles, duplication, clones, spawn_scan, deps, leak_shapes, logic_shapes, field_contention, health", .{analysis_type});
+                try w.print("Unknown analysis: {s}. Available: security, dead_code, unwrap_audit, test_coverage, architecture, crossref, type_drift, db_schema, migration_parity, manifest_compliance, literal_scan, coupling, cycles, duplication, clones, spawn_scan, deps, leak_shapes, logic_shapes, call_cost, field_contention, health", .{analysis_type});
             }
         } else if (std.mem.eql(u8, tool, "read_file")) {
             const path = get_string_arg(args, "path") orelse "";
@@ -1535,7 +1569,7 @@ pub const Server = struct {
             // index_workspace
             "{\"name\":\"index_workspace\",\"description\":\"Index or re-index a workspace directory\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Directory path to index\"}},\"required\":[\"path\"]},\"annotations\":{\"readOnlyHint\":false,\"openWorldHint\":false,\"destructiveHint\":false}}",
             // analyze
-            "{\"name\":\"analyze\",\"description\":\"Run code analysis. Types: security, dead_code, unwrap_audit, test_coverage, architecture, crossref, type_drift, db_schema, migration_parity, manifest_compliance, literal_scan, coupling, cycles, duplication, clones, spawn_scan, deps, leak_shapes, logic_shapes, field_contention, health\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"analysis\":{\"type\":\"string\",\"description\":\"Analysis type: security, dead_code, unwrap_audit, test_coverage, architecture, crossref, type_drift, db_schema, migration_parity, manifest_compliance, literal_scan, coupling, cycles, duplication, clones, spawn_scan, deps, leak_shapes, logic_shapes, field_contention, health\"}},\"required\":[\"analysis\"]},\"annotations\":{\"readOnlyHint\":true,\"openWorldHint\":false,\"destructiveHint\":false}}",
+            "{\"name\":\"analyze\",\"description\":\"Run code analysis. Types: security, dead_code, unwrap_audit, test_coverage, architecture, crossref, type_drift, db_schema, migration_parity, manifest_compliance, literal_scan, coupling, cycles, duplication, clones, spawn_scan, deps, leak_shapes, logic_shapes, call_cost, field_contention, health\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"analysis\":{\"type\":\"string\",\"description\":\"Analysis type: security, dead_code, unwrap_audit, test_coverage, architecture, crossref, type_drift, db_schema, migration_parity, manifest_compliance, literal_scan, coupling, cycles, duplication, clones, spawn_scan, deps, leak_shapes, logic_shapes, call_cost, field_contention, health\"}},\"required\":[\"analysis\"]},\"annotations\":{\"readOnlyHint\":true,\"openWorldHint\":false,\"destructiveHint\":false}}",
             // read_file
             "{\"name\":\"read_file\",\"description\":\"Read file contents with optional line range. Returns content with line numbers.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"File path relative to workspace root\"},\"start_line\":{\"type\":\"integer\",\"description\":\"Start line (1-based, default 1)\"},\"end_line\":{\"type\":\"integer\",\"description\":\"End line (inclusive, default: end of file)\"}},\"required\":[\"path\"]},\"annotations\":{\"readOnlyHint\":true,\"openWorldHint\":false,\"destructiveHint\":false}}",
             // read_symbol

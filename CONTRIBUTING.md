@@ -39,7 +39,7 @@ zig/
     resolver/                   # Import path resolution (TS path aliases, Go, Rust, Python…)
     storage/                    # Snapshot save/load
     server/                     # MCP JSON-RPC server over stdio
-    analysis/                   # 13 code analyses (security, dead_code, coupling, cycles, plan_change…)
+    analysis/                   # 22 code analyses (security, dead_code, call_cost, cycles, plan_change…)
     watcher.zig                 # Filesystem watcher (poll-based, cross-platform)
     tests.zig                   # Unit tests
 ```
