@@ -18,6 +18,11 @@ import sys
 import tempfile
 import time
 
+# The checks print what the server said, and the server speaks UTF-8. A Windows
+# console encodes with its code page, and printing a `→` raised
+# UnicodeEncodeError and ended the run.
+sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
+
 # Absolute: the workspace-recovery tests launch the server from a directory of
 # their own, and the build passes this path relative to zig/.
 BIN = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "zig-out/bin/codeindex")
