@@ -331,8 +331,11 @@ pub const ScopedSearchResult = struct {
 
 pub const CallerHit = struct {
     path: []const u8,
+    /// 1-based.
     line_num: u32,
     line_text: []const u8,
+    /// The function whose body holds the hit, borrowed from its outline.
+    caller: ?[]const u8 = null,
     /// Context kind inferred from the surrounding characters:
     /// - "call": looks like foo(
     /// - "method": looks like .foo( or ->foo(
@@ -948,6 +951,24 @@ pub const Explorer = struct {
         return self.outlines.get(file_id);
     }
 
+    fn has_call(o: models.FileOutline, line0: u32, name: []const u8) bool {
+        for (o.calls) |c| {
+            if (c.line == line0 and std.mem.eql(u8, c.name, name)) return true;
+        }
+        return false;
+    }
+
+    /// The innermost function or method holding the 0-based line.
+    fn enclosing_function(o: models.FileOutline, line0: u32) ?[]const u8 {
+        var best: ?models.Symbol = null;
+        for (o.symbols) |sym| {
+            if (sym.kind != .function and sym.kind != .method and sym.kind != .@"test") continue;
+            if (line0 < sym.line_start or line0 > sym.line_end) continue;
+            if (best == null or sym.line_start >= best.?.line_start) best = sym;
+        }
+        return if (best) |b| b.name else null;
+    }
+
     /// Find symbol definitions by name (substring match).
     pub fn find_symbol(self: *Explorer, name: []const u8, limit: usize) ![]SymbolResult {
         self.outline_lock.lockShared();
@@ -1170,12 +1191,21 @@ pub const Explorer = struct {
                 }
 
                 if (picked) |ctx| {
+                    const outline = self.outlines.get(file_id);
+                    // A call shape in a string or a comment is not a call. The
+                    // parser recorded the real ones, so a line that holds no
+                    // call of this name is dropped.
+                    if (outline) |o| {
+                        const call_shaped = std.mem.eql(u8, ctx, "call") or std.mem.eql(u8, ctx, "method");
+                        if (call_shaped and o.calls.len > 0 and !has_call(o, line_num_0, name)) continue :scan;
+                    }
                     const trimmed = std.mem.trim(u8, line_text, " \t\r");
                     try results.append(self.allocator, .{
                         .path = self.files.items[file_id],
                         .line_num = line_num_0 + 1, // report 1-based for user-facing display
                         .line_text = try self.allocator.dupe(u8, trimmed),
                         .context = ctx,
+                        .caller = if (outline) |o| enclosing_function(o, line_num_0) else null,
                     });
                     if (results.items.len >= limit) break :outer;
                 }
