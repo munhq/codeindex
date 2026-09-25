@@ -872,8 +872,8 @@ test "dead code finds unreferenced symbols" {
     defer exp.deinit();
 
     const o_a = try make_outline(testing.allocator, "a.rs", .rust, &.{
-        .{ .name = "used_func", .kind = .function, .line_start = 0, .line_end = 3 },
-        .{ .name = "lonely_func", .kind = .function, .line_start = 4, .line_end = 7 },
+        .{ .name = "used_func", .kind = .function, .line_start = 0, .line_end = 0 },
+        .{ .name = "lonely_func", .kind = .function, .line_start = 1, .line_end = 1 },
     }, &.{});
     const o_b = try make_outline(testing.allocator, "b.rs", .rust, &.{}, &.{});
 
@@ -881,10 +881,10 @@ test "dead code finds unreferenced symbols" {
     _ = try exp.add_file(o_b, "// b references used_func\n");
     exp.mark_indexing_complete();
 
-    const dead = try dead_code.find_dead_code(testing.allocator, &exp);
-    defer testing.allocator.free(dead);
+    var report = try dead_code.find_dead_code(testing.allocator, &exp);
+    defer report.deinit(testing.allocator);
     var found_lonely = false;
-    for (dead) |d| {
+    for (report.dead) |d| {
         if (std.mem.eql(u8, d.name, "lonely_func")) found_lonely = true;
     }
     try testing.expect(found_lonely);
@@ -902,10 +902,10 @@ test "dead code skips short names and test symbols" {
     _ = try exp.add_file(o, "fn ab() {}\n#[test] fn test_thing() {}\n");
     exp.mark_indexing_complete();
 
-    const dead = try dead_code.find_dead_code(testing.allocator, &exp);
-    defer testing.allocator.free(dead);
+    var report = try dead_code.find_dead_code(testing.allocator, &exp);
+    defer report.deinit(testing.allocator);
     // Both should be skipped (short name + test kind)
-    for (dead) |d| {
+    for (report.dead) |d| {
         try testing.expect(!std.mem.eql(u8, d.name, "ab"));
         try testing.expect(!std.mem.eql(u8, d.name, "test_thing"));
     }
@@ -2746,6 +2746,50 @@ test "structure: a method of a subclass may override, so it implements" {
     try testing.expect(symbol_named(t, "render").?.flags.implements);
     try testing.expect(!symbol_named(t, "helper").?.flags.implements);
     try testing.expectEqual(models.Language.typescript, models.Language.from_path("scripts/import.mts"));
+}
+
+test "dead_code: a private method its own file calls is used, and a manifest speaks for its own language" {
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
+    defer exp.deinit();
+    try index_sources(&exp, &.{
+        .{ "/ws/Cargo.toml", "[package]\nname = \"x\"\n" },
+        .{ "/ws/src/lib.rs",
+            \\pub struct Store;
+            \\impl Store {
+            \\    pub fn save(&self) { self.flush(); }
+            \\    fn flush(&self) {}
+            \\    fn never_called(&self) {}
+            \\    pub fn unused_api(&self) {}
+            \\}
+            \\impl std::fmt::Display for Store {
+            \\    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { Ok(()) }
+            \\}
+            \\
+        },
+        .{ "/ws/scripts/tool.py", "def orphan():\n    pass\n" },
+        .{ "/ws/src/main.rs", "fn main() { x::Store.save(); }\n" },
+    });
+    var report = try dead_code.find_dead_code(testing.allocator, &exp);
+    defer report.deinit(testing.allocator);
+
+    var dead_names = std.ArrayList([]const u8).empty;
+    defer dead_names.deinit(testing.allocator);
+    for (report.dead) |d| try dead_names.append(testing.allocator, d.name);
+    // `flush` is called on line 3 of its own file: 2310 such methods were
+    // reported on one repository.
+    for (dead_names.items) |n| try testing.expect(!std.mem.eql(u8, n, "flush"));
+    // A trait method is called through the trait.
+    for (dead_names.items) |n| try testing.expect(!std.mem.eql(u8, n, "fmt"));
+    try testing.expect(for (dead_names.items) |n| {
+        if (std.mem.eql(u8, n, "never_called")) break true;
+    } else false);
+    // The Python script is not part of the Rust library beside it.
+    try testing.expect(for (dead_names.items) |n| {
+        if (std.mem.eql(u8, n, "orphan")) break true;
+    } else false);
+    // A public item of a library crate that nothing here uses is its API.
+    try testing.expectEqual(@as(usize, 1), report.unused_public_api.len);
+    try testing.expectEqualStrings("unused_api", report.unused_public_api[0].name);
 }
 
 test "parser: a tsx file parses with the tsx grammar" {

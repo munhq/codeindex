@@ -810,21 +810,18 @@ pub const Server = struct {
                 }
                 try w.writeAll("]}");
             } else if (std.mem.eql(u8, analysis_type, "dead_code")) {
-                const symbols = try dead_code.find_dead_code(aa, self.exp);
-                defer aa.free(symbols);
-                try w.print("{{\"dead_count\":{d},\"symbols\":[", .{symbols.len});
-                for (symbols, 0..) |s, si| {
-                    if (si > 0) try w.writeAll(",");
-                    try w.writeAll("{\"name\":");
-                    try write_json_string(w, s.name);
-                    try w.print(",\"kind\":\"{s}\",", .{s.kind.as_str()});
-                    try w.writeAll("\"file\":");
-                    try write_json_string(w, s.file);
-                    try w.print(",\"line\":{d},\"reason\":", .{s.line});
-                    try write_json_string(w, s.reason);
-                    try w.writeAll("}");
-                }
-                try w.writeAll("]}");
+                var report = try dead_code.find_dead_code(aa, self.exp);
+                defer report.deinit(aa);
+                const cap: usize = 500;
+                try w.print("{{\"checked\":{d},\"dead_count\":{d},\"unused_public_api_count\":{d},\"symbols\":", .{
+                    report.checked, report.dead.len, report.unused_public_api.len,
+                });
+                try write_dead_symbols(w, report.dead[0..@min(report.dead.len, cap)]);
+                try w.writeAll(",\"unused_public_api\":");
+                try write_dead_symbols(w, report.unused_public_api[0..@min(report.unused_public_api.len, cap)]);
+                try w.print(",\"truncated\":{s}}}", .{
+                    if (report.dead.len > cap or report.unused_public_api.len > cap) "true" else "false",
+                });
             } else if (std.mem.eql(u8, analysis_type, "unwrap_audit")) {
                 const findings = try unwrap_audit.audit(aa, self.exp);
                 defer aa.free(findings);
@@ -1109,8 +1106,8 @@ pub const Server = struct {
                 try w.print("],\"truncated\":{s}}}", .{if (report.groups.len > top) "true" else "false"});
             } else if (std.mem.eql(u8, analysis_type, "health")) {
                 // One-call repo health: structure + risk + waste, with a verdict.
-                const dead = try dead_code.find_dead_code(aa, self.exp);
-                defer aa.free(dead);
+                var dead = try dead_code.find_dead_code(aa, self.exp);
+                defer dead.deinit(aa);
                 const unwraps = try unwrap_audit.audit(aa, self.exp);
                 defer aa.free(unwraps);
                 const sec_findings = try security_scan.scan(aa, self.exp);
@@ -1131,7 +1128,7 @@ pub const Server = struct {
                     "\"duplicate_names\":{d},\"clone_groups\":{d},\"cloned_functions\":{d},", .{
                     self.exp.file_count(), self.exp.symbol_count(), coup.total_edges,
                     sec.critical,          sec.total,               unwraps.len,
-                    cyc.cycles.len,        coup.god_modules.len,    dead.len,
+                    cyc.cycles.len,        coup.god_modules.len,    dead.dead.len,
                     dup.total_clusters,    cln.total_groups,        cln.total_cloned_fns,
                 });
                 // Top reinvented/duplicated definitions — the "are we reusing?" answer.
@@ -1819,6 +1816,19 @@ pub fn uri_to_path(allocator: std.mem.Allocator, uri: []const u8) ?[]u8 {
         return null;
     }
     return allocator.realloc(out, n) catch out[0..n];
+}
+
+fn write_dead_symbols(w: anytype, symbols: []const dead_code.DeadSymbol) !void {
+    try w.writeAll("[");
+    for (symbols, 0..) |s, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{\"name\":");
+        try write_json_string(w, s.name);
+        try w.print(",\"kind\":\"{s}\",\"visibility\":\"{s}\",\"file\":", .{ s.kind.as_str(), @tagName(s.visibility) });
+        try write_json_string(w, s.file);
+        try w.print(",\"line\":{d}}}", .{s.line});
+    }
+    try w.writeAll("]");
 }
 
 /// Lines `read_symbol` returns when the caller does not say.
