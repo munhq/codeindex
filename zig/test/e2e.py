@@ -80,9 +80,12 @@ def daemon_logs():
 
 def rpc(ws, calls):
     """Send a batch of JSON-RPC lines, return {id: parsed_message}."""
+    # MCP speaks UTF-8. Without the encoding, Python on Windows decodes with
+    # the locale's code page, and a `→` in a call path compared unequal.
     p = subprocess.Popen([BIN, "--mcp", "--workspace", ws],
                          stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                         stderr=subprocess.PIPE, text=True, env=server_env())
+                         stderr=subprocess.PIPE, text=True, encoding="utf-8",
+                         env=server_env())
     try:
         out, err = p.communicate("".join(json.dumps(c) + "\n" for c in calls), timeout=60)
     except subprocess.TimeoutExpired:
@@ -138,7 +141,7 @@ def dialogue(cwd, roots, calls, env_extra=None, settle=4.0):
     env.update(env_extra or {})
     p = subprocess.Popen([BIN, "--mcp"], cwd=cwd, env=env,
                          stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                         stderr=subprocess.DEVNULL, text=True, bufsize=1)
+                         stderr=subprocess.DEVNULL, text=True, encoding="utf-8", bufsize=1)
     msgs, asked, lock = {}, [], threading.Lock()
 
     def send(obj):
