@@ -601,7 +601,8 @@ test "call_cost: a statement that spans lines counts once" {
     var exp = try explorer.Explorer.init(testing.allocator);
     defer exp.deinit();
     try index(&exp, &.{
-        .{ "/ws/src/plan.rs",
+        .{
+            "/ws/src/plan.rs",
             \\pub async fn plan(tasks: Vec<Task>, txn: &mut Tx) -> Result<()> {
             \\    for task in tasks {
             \\        let dup: Option<String> = sqlx::query_scalar(
@@ -698,7 +699,8 @@ test "call_cost: a handler a loop renders is not called per element" {
     defer exp.deinit();
     try index(&exp, &.{
         .{ "/ws/web/api.ts", "export function request(path: string) {\n  return fetch(path);\n}\nexport function save(id: string) {\n  return request(`/save/${id}`);\n}\n" },
-        .{ "/ws/web/List.tsx",
+        .{
+            "/ws/web/List.tsx",
             \\import { save, request } from "./api";
             \\export function List({ rows }: Props) {
             \\  return <ul>{rows.map((r) => <li onClick={() => save(r.id)}>{r.name}</li>)}</ul>;
@@ -725,7 +727,8 @@ test "call_cost: a call in the loop header runs once" {
     var exp = try explorer.Explorer.init(testing.allocator);
     defer exp.deinit();
     try index(&exp, &.{
-        .{ "/ws/src/jobs.rs",
+        .{
+            "/ws/src/jobs.rs",
             \\async fn busy_jobs(db: &Db) -> Result<Vec<Job>> { sqlx::query_as("SELECT 1").fetch_all(db).await }
             \\pub async fn plan(db: &Db) -> Result<()> {
             \\    for job in busy_jobs(db).await? {

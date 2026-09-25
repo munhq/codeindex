@@ -542,8 +542,8 @@ pub fn callee_before(content: []const u8, open: usize) ?Callee {
 
 /// Calls whose function argument runs on an event, a timer or a render hook.
 const event_calls = [_][]const u8{
-    "addEventListener", "on",          "once",    "subscribe", "setTimeout", "setInterval",
-    "requestAnimationFrame", "useEffect", "useCallback", "useMemo", "useLayoutEffect",
+    "addEventListener",      "on",        "once",        "subscribe", "setTimeout",      "setInterval",
+    "requestAnimationFrame", "useEffect", "useCallback", "useMemo",   "useLayoutEffect",
 };
 
 /// Whether the call at `node` sits in a JavaScript function literal that
