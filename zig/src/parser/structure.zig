@@ -45,9 +45,14 @@ pub fn classify(
         },
         .python => {
             if (is_dunder(name)) flags.implements = true;
+            if (in_subclass(def_node)) flags.implements = true;
         },
         .java, .kotlin, .c_sharp, .typescript, .javascript, .scala, .swift, .dart => {
             if (has_token(prefix, "override")) flags.implements = true;
+            if (in_subclass(def_node)) flags.implements = true;
+            // A default export goes to whoever imports the module, and a
+            // framework's file-based router is the usual importer.
+            if (has_token(prefix, "export") and has_token(prefix, "default")) flags.registered = true;
         },
         else => {},
     }
@@ -158,6 +163,40 @@ fn in_trait_impl(def_node: ts.TSNode) bool {
             const trait_node = ts.ts_node_child_by_field_name(node, field.ptr, field.len);
             return !ts.ts_node_is_null(trait_node);
         }
+        node = ts.ts_node_parent(node);
+    }
+    return false;
+}
+
+/// A method of a class that names a base class or an interface. The base can
+/// call it by name: `BaseHTTPRequestHandler` dispatches to `do_GET`, React to
+/// `render`, and neither call is in the repository. `override` is optional in
+/// these languages, so the class header is the evidence.
+fn in_subclass(def_node: ts.TSNode) bool {
+    var node = ts.ts_node_parent(def_node);
+    var hops: usize = 0;
+    while (!ts.ts_node_is_null(node) and hops < 4) : (hops += 1) {
+        const t = std.mem.span(ts.ts_node_type(node));
+        const is_class = std.mem.eql(u8, t, "class_definition") or std.mem.eql(u8, t, "class_declaration") or
+            std.mem.eql(u8, t, "class") or std.mem.eql(u8, t, "abstract_class_declaration") or
+            std.mem.eql(u8, t, "object_declaration");
+        if (is_class) {
+            const field = "superclasses";
+            const supers = ts.ts_node_child_by_field_name(node, field.ptr, field.len);
+            if (!ts.ts_node_is_null(supers) and ts.ts_node_named_child_count(supers) > 0) return true;
+            const n = ts.ts_node_named_child_count(node);
+            var i: u32 = 0;
+            while (i < n) : (i += 1) {
+                const ct = std.mem.span(ts.ts_node_type(ts.ts_node_named_child(node, i)));
+                const heritage = [_][]const u8{ "class_heritage", "superclass", "super_interfaces", "base_list", "delegation_specifier", "delegation_specifiers", "extends_clause", "implements_clause" };
+                for (&heritage) |h| {
+                    if (std.mem.eql(u8, ct, h)) return true;
+                }
+            }
+            return false;
+        }
+        // A nested function is not a method of the class around it.
+        if (std.mem.indexOf(u8, t, "function") != null and hops > 0) return false;
         node = ts.ts_node_parent(node);
     }
     return false;
