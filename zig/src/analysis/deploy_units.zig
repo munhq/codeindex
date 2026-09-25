@@ -81,12 +81,20 @@ pub const Units = struct {
         self.arena.deinit();
     }
 
-    /// Indices of the units that run the file at `path`.
+    /// Indices of the units that run the file at `path`. A context nested in
+    /// another is its own build: `docker/tts/` inside a root context belongs
+    /// to the unit that builds `docker/tts/`, so the deepest context wins.
     pub fn units_for(self: *const Units, path: []const u8, out: *std.ArrayList(usize), allocator: std.mem.Allocator) !void {
         out.clearRetainingCapacity();
+        var deepest: usize = 0;
+        for (self.units.items) |u| {
+            for (u.contexts.items) |ctx| {
+                if (within(path, ctx) and ctx.len > deepest) deepest = ctx.len;
+            }
+        }
         for (self.units.items, 0..) |u, i| {
             for (u.contexts.items) |ctx| {
-                if (within(path, ctx)) {
+                if (within(path, ctx) and ctx.len == deepest) {
                     try out.append(allocator, i);
                     break;
                 }
@@ -143,6 +151,7 @@ const YamlLine = struct {
     value: []const u8,
     line: usize,
     item: usize,
+    anchor: ?[]const u8 = null,
 };
 
 const Frame = struct { indent: usize, key: []const u8 };
@@ -209,14 +218,45 @@ fn read_yaml(a: std.mem.Allocator, content: []const u8) ![]std.ArrayList(YamlLin
             continue;
         };
         const key = unquote(body[0..colon]);
-        const value = unquote(strip_comment(std.mem.trim(u8, body[colon + 1 ..], " \t")));
+        var value = unquote(strip_comment(std.mem.trim(u8, body[colon + 1 ..], " \t")));
         const path = try join_path(a, stack.items, key);
-        try docs.items[docs.items.len - 1].append(a, .{ .path = path, .key = key, .value = value, .line = line_no, .item = item });
+        // `x-build: &build` names the mapping below it for a later `<<: *build`.
+        var anchor: ?[]const u8 = null;
+        if (value.len > 1 and value[0] == '&') {
+            anchor = value[1..];
+            value = "";
+        }
+        try docs.items[docs.items.len - 1].append(a, .{ .path = path, .key = key, .value = value, .line = line_no, .item = item, .anchor = anchor });
         if (value.len == 0 or std.mem.eql(u8, value, "|") or std.mem.eql(u8, value, ">") or std.mem.eql(u8, value, "|-")) {
             try stack.append(a, .{ .indent = indent, .key = key });
         }
     }
+    for (docs.items) |*d| try merge_anchors(a, d);
     return docs.toOwnedSlice(a);
+}
+
+/// Resolve `<<: *name` merge keys: the anchored mapping's lines are copied
+/// under the mapping that merges them. Compose files share a build block
+/// between services this way.
+fn merge_anchors(a: std.mem.Allocator, doc: *std.ArrayList(YamlLine)) !void {
+    var added = std.ArrayList(YamlLine).empty;
+    for (doc.items) |m| {
+        if (!std.mem.eql(u8, m.key, "<<") or m.value.len < 2 or m.value[0] != '*') continue;
+        const name = m.value[1..];
+        const parent = if (std.mem.lastIndexOfScalar(u8, m.path, '.')) |dot| m.path[0..dot] else "";
+        for (doc.items) |anch| {
+            const an = anch.anchor orelse continue;
+            if (!std.mem.eql(u8, an, name)) continue;
+            const prefix = try std.fmt.allocPrint(a, "{s}.", .{anch.path});
+            for (doc.items) |l| {
+                if (!std.mem.startsWith(u8, l.path, prefix)) continue;
+                const sub = l.path[prefix.len..];
+                const path = if (parent.len == 0) sub else try std.fmt.allocPrint(a, "{s}.{s}", .{ parent, sub });
+                try added.append(a, .{ .path = path, .key = l.key, .value = l.value, .line = l.line, .item = m.item });
+            }
+        }
+    }
+    try doc.appendSlice(a, added.items);
 }
 
 /// The colon that ends a mapping key, outside quotes and not in a URL.
@@ -352,9 +392,9 @@ fn collect_compose(a: std.mem.Allocator, path: []const u8, docs: []std.ArrayList
                 if (std.mem.eql(u8, sub, "image")) {
                     try u.images.append(a, l.value);
                 } else if (std.mem.eql(u8, sub, "build") and l.value.len > 0) {
-                    try u.contexts.append(a, try resolve_dir(a, dir, l.value));
+                    try add_context(a, &u, try resolve_dir(a, dir, l.value));
                 } else if (std.mem.eql(u8, sub, "build.context")) {
-                    try u.contexts.append(a, try resolve_dir(a, dir, l.value));
+                    try add_context(a, &u, try resolve_dir(a, dir, l.value));
                 } else if (std.mem.eql(u8, sub, "mem_limit") or std.mem.eql(u8, sub, "deploy.resources.limits.memory")) {
                     if (parse_quantity(l.value)) |b| try u.memory_limits.append(a, .{ .bytes = b, .text = l.value, .at = loc(path, l.line) });
                 } else if (std.mem.eql(u8, sub, "deploy.replicas")) {
@@ -528,21 +568,47 @@ pub fn find(allocator: std.mem.Allocator, exp: *explorer.Explorer) !Units {
             var linked = false;
             for (builds.items) |b| {
                 if (std.mem.eql(u8, b.repo, repo)) {
-                    try u.contexts.append(a, b.context);
+                    try add_context(a, u, b.context);
                     linked = true;
                 }
             }
             if (linked) continue;
+            // `acme-piper-tts` built from `docker/piper-tts/`: the image
+            // carries a project prefix the directory drops.
             for (dockerfile_dirs.items) |d| {
-                if (std.mem.eql(u8, std.fs.path.basename(d), repo)) {
-                    try u.contexts.append(a, d);
+                if (names_dir(repo, std.fs.path.basename(d))) {
+                    try add_context(a, u, d);
                     linked = true;
                 }
             }
-            if (!linked and dockerfile_dirs.items.len == 1) try u.contexts.append(a, dockerfile_dirs.items[0]);
+            if (!linked and dockerfile_dirs.items.len == 1) try add_context(a, u, dockerfile_dirs.items[0]);
+        }
+        // A unit named after a directory that holds a Dockerfile.
+        if (u.contexts.items.len == 0) {
+            for (dockerfile_dirs.items) |d| {
+                if (std.mem.eql(u8, std.fs.path.basename(d), u.name)) try add_context(a, u, d);
+            }
         }
     }
     return units;
+}
+
+fn add_context(a: std.mem.Allocator, u: *Unit, dir: []const u8) !void {
+    for (u.contexts.items) |c| {
+        if (std.mem.eql(u8, c, dir)) return;
+    }
+    try u.contexts.append(a, dir);
+}
+
+/// `api` names `api`; `acme-api` and `acme_api` name `api` too.
+fn names_dir(repo: []const u8, dir: []const u8) bool {
+    if (dir.len == 0) return false;
+    if (std.mem.eql(u8, repo, dir)) return true;
+    if (repo.len > dir.len + 1 and std.mem.endsWith(u8, repo, dir)) {
+        const sep = repo[repo.len - dir.len - 1];
+        return sep == '-' or sep == '_';
+    }
+    return false;
 }
 
 /// The directory every indexed path shares: the workspace root.
@@ -672,6 +738,49 @@ test "deploy_units: each service's manifest reaches the code its image builds" {
     try units.units_for("/ws/services/worker/src/main.rs", &idx, testing.allocator);
     try testing.expectEqual(@as(usize, 1), idx.items.len);
     try testing.expectEqualStrings("worker", units.units.items[idx.items[0]].name);
+}
+
+test "deploy_units: a merge key brings an anchored build, and a prefixed image finds its directory" {
+    var exp = try explorer.Explorer.init(testing.allocator);
+    defer exp.deinit();
+    try add_file(&exp, "/ws/docker-compose.yml", .yaml,
+        \\x-app-build: &app-build
+        \\  context: .
+        \\  dockerfile: Dockerfile
+        \\services:
+        \\  app:
+        \\    build:
+        \\      <<: *app-build
+        \\      target: release
+        \\
+    );
+    try add_file(&exp, "/ws/deploy/tts/deployment.yaml", .yaml,
+        \\kind: Deployment
+        \\metadata:
+        \\  name: tts
+        \\spec:
+        \\  template:
+        \\    spec:
+        \\      containers:
+        \\        - image: ghcr.io/acme/acme-piper-tts:main
+        \\
+    );
+    try add_file(&exp, "/ws/docker/piper-tts/Dockerfile", .dockerfile, "FROM scratch\n");
+    try add_file(&exp, "/ws/app/Dockerfile", .dockerfile, "FROM scratch\n");
+    exp.mark_indexing_complete();
+    var units = try find(testing.allocator, &exp);
+    defer units.deinit();
+    try testing.expectEqual(@as(usize, 2), units.units.items.len);
+    var idx = std.ArrayList(usize).empty;
+    defer idx.deinit(testing.allocator);
+    try units.units_for("/ws/docker/piper-tts/server.py", &idx, testing.allocator);
+    try testing.expectEqual(@as(usize, 1), idx.items.len);
+    try testing.expectEqualStrings("tts", units.units.items[idx.items[0]].name);
+    for (units.units.items) |u| {
+        try testing.expectEqual(@as(usize, 1), u.contexts.items.len);
+        if (std.mem.eql(u8, u.name, "app")) try testing.expectEqualStrings("/ws", u.contexts.items[0]);
+        if (std.mem.eql(u8, u.name, "tts")) try testing.expectEqualStrings("/ws/docker/piper-tts", u.contexts.items[0]);
+    }
 }
 
 test "deploy_units: a Compose service builds its context, and a pooler states its capacity" {
