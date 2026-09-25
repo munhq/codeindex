@@ -496,50 +496,44 @@ fn collect_field_decls(
     const lang = outline.language;
     const first = out.items.len;
 
-    var depth: isize = 0;
+    // Scopes come from the syntax tree: a container ends where its symbol or
+    // the block its header opens ends, and a `#[cfg(test)]` item where the
+    // item after the attribute ends. Brace and indentation counting found the
+    // same ends from the raw lines.
     var owner: ?[]const u8 = null;
-    var owner_depth: isize = 0;
-    var owner_indent: usize = 0;
-    var cfg_test_depth: ?isize = null;
+    var owner_end: u32 = 0;
+    var skip_until: ?u32 = null;
     var pending_cfg_test = false;
 
-    var line_no: usize = 0;
+    var line0: u32 = 0;
     var it = std.mem.splitScalar(u8, content, '\n');
-    while (it.next()) |raw| {
-        line_no += 1;
+    while (it.next()) |raw| : (line0 += 1) {
         const t = trimmed_line(raw);
-        const delta = if (lang == .python) 0 else brace_delta(raw);
-        defer depth += delta;
+        if (skip_until) |e| {
+            if (line0 <= e) continue;
+            skip_until = null;
+        }
         if (t.len == 0 or is_comment(t, lang)) continue;
 
-        // A `#[cfg(test)]` module ends where its brace does.
-        if (cfg_test_depth) |opened| {
-            if (depth <= opened) cfg_test_depth = null;
-        }
         if (std.mem.indexOf(u8, t, "#[cfg(test)]") != null) {
             pending_cfg_test = true;
             continue;
         }
         if (pending_cfg_test) {
             pending_cfg_test = false;
-            if (cfg_test_depth == null) cfg_test_depth = depth;
+            skip_until = item_end(outline, line0) orelse line0;
+            continue;
         }
-        if (cfg_test_depth != null) continue;
 
         // Close the container this line left.
-        if (owner != null) {
-            const left = if (lang == .python)
-                (t.len > 0 and indent_of(raw) <= owner_indent)
-            else
-                depth <= owner_depth;
-            if (left) owner = null;
-        }
+        if (owner != null and line0 > owner_end) owner = null;
 
         if (owner == null) {
             if (struct_header(t, lang)) |name| {
-                owner = name;
-                owner_depth = depth;
-                owner_indent = indent_of(raw);
+                if (item_end(outline, line0)) |end| {
+                    owner = name;
+                    owner_end = end;
+                }
             }
             continue;
         }
@@ -555,7 +549,7 @@ fn collect_field_decls(
                 .lang = lang,
                 .owner = owner.?,
                 .name = n,
-                .line = line_no,
+                .line = @as(usize, line0) + 1,
                 .decl = t,
             });
         }
@@ -573,6 +567,18 @@ fn collect_field_decls(
             out.items[j].ambiguous = true;
         }
     }
+}
+
+/// The last 0-based line of the item that starts on the 0-based line: the
+/// longest symbol that starts there, or the block that opens there.
+fn item_end(outline: models.FileOutline, line0: u32) ?u32 {
+    var best: ?u32 = outline.block_opened_at(line0);
+    for (outline.symbols) |sym| {
+        if (sym.line_start != line0) continue;
+        const e: u32 = @intCast(sym.line_end);
+        if (best == null or e > best.?) best = e;
+    }
+    return best;
 }
 
 /// What a file does to one field.
@@ -767,7 +773,8 @@ fn chain_head(line: []const u8, at: usize) ?[]const u8 {
 /// A local bound to a field, live until its block closes.
 const Alias = struct {
     name: []const u8,
-    depth: isize,
+    /// 0-based last line of the block the guard lives in.
+    end_line: u32,
 };
 
 /// `let mut cache = self.cached_codes.lock();` → `cache`.
@@ -838,20 +845,18 @@ fn classify_use(t: []const u8, after: []const u8) enum { none, grow, shrink } {
 }
 
 /// What one file does to one field, following lock guards.
-fn scan_field_uses(content: []const u8, field: []const u8, lang: models.Language, allocator: std.mem.Allocator) !FieldUse {
+fn scan_field_uses(outline: models.FileOutline, content: []const u8, field: []const u8, lang: models.Language, allocator: std.mem.Allocator) !FieldUse {
     var use = FieldUse{};
     var aliases = std.ArrayList(Alias).empty;
     defer aliases.deinit(allocator);
 
-    var depth: isize = 0;
     var line_no: usize = 0;
     var scope = MethodScope{};
     var it = std.mem.splitScalar(u8, content, '\n');
     while (it.next()) |raw| {
         line_no += 1;
+        const line0: u32 = @intCast(line_no - 1);
         const t = trimmed_line(raw);
-        const delta = if (lang == .python) 0 else brace_delta(raw);
-        defer depth += delta;
         if (t.len == 0 or is_comment(t, lang)) continue;
 
         // Track which function this line sits in.
@@ -869,8 +874,11 @@ fn scan_field_uses(content: []const u8, field: []const u8, lang: models.Language
         const may_grow = if (ts_like) !scope.is_constructor else scope.counts();
 
         // Drop the guards whose block has closed.
-        while (aliases.items.len > 0 and depth < aliases.items[aliases.items.len - 1].depth) {
-            _ = aliases.pop();
+        var ai: usize = 0;
+        while (ai < aliases.items.len) {
+            if (aliases.items[ai].end_line < line0) {
+                _ = aliases.orderedRemove(ai);
+            } else ai += 1;
         }
 
         if (field_reference(t, field)) |after| {
@@ -904,7 +912,10 @@ fn scan_field_uses(content: []const u8, field: []const u8, lang: models.Language
         }
 
         if (alias_binding(t, field)) |name| {
-            try aliases.append(allocator, .{ .name = name, .depth = depth + delta });
+            // The guard lives to the end of the innermost block that holds
+            // its binding, which is the block the line opens when it opens one.
+            const end: u32 = if (outline.block_at(line0)) |blk| blk.line_end else std.math.maxInt(u32);
+            try aliases.append(allocator, .{ .name = name, .end_line = end });
         }
     }
     return use;
@@ -996,32 +1007,6 @@ const spawn_calls = [_][]const u8{
     "tokio::spawn(", "thread::spawn(", "task::spawn(", "rayon::spawn(",
 };
 
-fn brace_delta(line: []const u8) isize {
-    var d: isize = 0;
-    var in_single = false;
-    var in_double = false;
-    var i: usize = 0;
-    while (i < line.len) : (i += 1) {
-        const c = line[i];
-        if (c == '\\') {
-            i += 1;
-            continue;
-        }
-        if (c == '\'' and !in_double) in_single = !in_single;
-        if (c == '"' and !in_single) in_double = !in_double;
-        if (in_single or in_double) continue;
-        if (c == '{') d += 1;
-        if (c == '}') d -= 1;
-    }
-    return d;
-}
-
-fn indent_of(line: []const u8) usize {
-    var n: usize = 0;
-    while (n < line.len and (line[n] == ' ' or line[n] == '\t')) n += 1;
-    return n;
-}
-
 /// A spawn whose handle nobody keeps: the statement is not bound to a name and
 /// nothing awaits or joins it on the same line.
 fn is_detached_spawn(t: []const u8) bool {
@@ -1080,7 +1065,7 @@ fn scan_struct_fields(
             const outline = exp.outlines.get(sid) orelse continue;
             const content = exp.content_of(allocator, sid) orelse continue;
             if (container_is_bounded(content, field.name, field.decl)) bounded = true;
-            const use = try scan_field_uses(content, field.name, field.lang, allocator);
+            const use = try scan_field_uses(outline, content, field.name, field.lang, allocator);
             if (use.shrinks) shrinks = true;
             if (use.grow_line) |l| {
                 if (grow_line == null) {
@@ -1230,14 +1215,10 @@ fn repeated(loops: []const models.Loop, line: u32, raw: []const u8) bool {
 const testing = std.testing;
 
 fn one_file(allocator: std.mem.Allocator, path: []const u8, lang: models.Language, src: []const u8) !models.FileOutline {
-    return .{
-        .path = try allocator.dupe(u8, path),
-        .language = lang,
-        .line_count = std.mem.count(u8, src, "\n") + 1,
-        .byte_size = src.len,
-        .symbols = &[_]models.Symbol{},
-        .imports = &[_][]const u8{},
-    };
+    const treesitter = @import("../parser/treesitter.zig");
+    var parser = try treesitter.Parser.init(allocator);
+    defer parser.deinit();
+    return parser.parse_source(path, lang, src);
 }
 
 test "leak_shapes: a static map that grows and never shrinks" {
@@ -1714,4 +1695,33 @@ test "leak_shapes: a Rust receiver is read in every spelling" {
     // No receiver at all.
     try testing.expectEqual(@as(?@TypeOf(rust_receiver("").?), null), rust_receiver("pub fn from_config(custom: &[RoleConfig]) -> Result<Self> {"));
     try testing.expectEqual(@as(?@TypeOf(rust_receiver("").?), null), rust_receiver("fn helper(selfish: u32) -> u32 {"));
+}
+
+test "leak_shapes: a Python class ends where its body ends" {
+    const allocator = testing.allocator;
+    const src =
+        \\class Registry:
+        \\    def __init__(self):
+        \\        self.sessions = {}
+        \\
+        \\    def add(self, k, v):
+        \\        self.sessions[k] = v
+        \\
+        \\class Other:
+        \\    def __init__(self):
+        \\        self.seen = []
+        \\
+        \\    def drop(self):
+        \\        self.seen.clear()
+        \\
+    ;
+    var exp = try explorer.Explorer.init(allocator);
+    defer exp.deinit();
+    _ = try exp.add_file(try one_file(allocator, "app/registry.py", .python, src), src);
+    exp.mark_indexing_complete();
+
+    const findings = try scan(allocator, &exp);
+    defer free_findings(allocator, findings);
+    try testing.expectEqual(@as(usize, 1), findings.len);
+    try testing.expectEqualStrings("Registry.sessions", findings[0].subject.?);
 }

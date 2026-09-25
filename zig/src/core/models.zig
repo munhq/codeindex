@@ -307,6 +307,15 @@ pub const Loop = struct {
     }
 };
 
+/// A block of statements or members, read from the syntax tree: a function
+/// body, a `{ … }` in Rust or TypeScript, an indented suite in Python. A value
+/// bound inside it lives until its last line.
+pub const Block = struct {
+    /// 0-based, inclusive.
+    line_start: u32,
+    line_end: u32,
+};
+
 /// Structural outline of a single file: symbols, imports, calls, loops.
 pub const FileOutline = struct {
     path: []const u8,
@@ -320,6 +329,28 @@ pub const FileOutline = struct {
     calls: []Call = &.{},
     call_names: []u8 = &.{},
     loops: []Loop = &.{},
+    blocks: []Block = &.{},
+
+    /// The innermost block that holds the 0-based line.
+    pub fn block_at(self: FileOutline, line: u32) ?Block {
+        var best: ?Block = null;
+        for (self.blocks) |b| {
+            if (line < b.line_start or line > b.line_end) continue;
+            if (best == null or b.line_start >= best.?.line_start) best = b;
+        }
+        return best;
+    }
+
+    /// The last 0-based line of the block that opens on the 0-based line,
+    /// the largest when several do.
+    pub fn block_opened_at(self: FileOutline, line: u32) ?u32 {
+        var best: ?u32 = null;
+        for (self.blocks) |b| {
+            if (b.line_start != line) continue;
+            if (best == null or b.line_end > best.?) best = b.line_end;
+        }
+        return best;
+    }
 
     pub fn deinit(self: *FileOutline, allocator: std.mem.Allocator) void {
         allocator.free(self.path);
@@ -330,6 +361,7 @@ pub const FileOutline = struct {
         allocator.free(self.calls);
         allocator.free(self.call_names);
         allocator.free(self.loops);
+        allocator.free(self.blocks);
     }
 };
 

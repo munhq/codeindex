@@ -268,6 +268,7 @@ pub const Parser = struct {
         outline.calls = extracted.calls;
         outline.call_names = extracted.call_names;
         outline.loops = extracted.loops;
+        outline.blocks = extracted.blocks;
         return outline;
     }
 

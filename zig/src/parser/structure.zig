@@ -326,7 +326,23 @@ pub const Extracted = struct {
     calls: []models.Call,
     call_names: []u8,
     loops: []models.Loop,
+    blocks: []models.Block,
 };
+
+/// Node types that hold a block of statements or members.
+const block_types = [_][]const u8{
+    "block",                  "statement_block", "compound_statement", "declaration_list",
+    "field_declaration_list", "class_body",      "Block",              "ContainerDecl",
+    "body_statement",         "do_block",        "interface_body",     "enum_body",
+    "object_type",            "struct_type",     "switch_block",       "match_block",
+};
+
+fn is_block(t: []const u8) bool {
+    for (&block_types) |b| {
+        if (std.mem.eql(u8, t, b)) return true;
+    }
+    return false;
+}
 
 /// Walk the tree once and collect every call site and loop region.
 pub fn extract(allocator: std.mem.Allocator, language: models.Language, content: []const u8, root: ts.TSNode) !Extracted {
@@ -340,9 +356,11 @@ pub fn extract(allocator: std.mem.Allocator, language: models.Language, content:
     defer names.deinit(allocator);
     var loops = std.ArrayList(models.Loop).empty;
     defer loops.deinit(allocator);
+    var blocks = std.ArrayList(models.Block).empty;
+    defer blocks.deinit(allocator);
 
     if (!walks_calls(language)) {
-        return .{ .calls = &.{}, .call_names = &.{}, .loops = &.{} };
+        return .{ .calls = &.{}, .call_names = &.{}, .loops = &.{}, .blocks = &.{} };
     }
 
     var cursor = ts.ts_tree_cursor_new(root);
@@ -354,7 +372,14 @@ pub fn extract(allocator: std.mem.Allocator, language: models.Language, content:
             const node = ts.ts_tree_cursor_current_node(&cursor);
             // Keyword tokens are nodes too: Rust's `for` keyword has the type
             // `for`, which is Ruby's name for a whole loop.
-            if (ts.ts_node_is_named(node)) try visit(allocator, language, content, node, &loops, &calls, &name_spans, &names);
+            if (ts.ts_node_is_named(node)) {
+                try visit(allocator, language, content, node, &loops, &calls, &name_spans, &names);
+                if (is_block(std.mem.span(ts.ts_node_type(node)))) {
+                    const a = ts.ts_node_start_point(node).row;
+                    const b = ts.ts_node_end_point(node).row;
+                    if (b > a) try blocks.append(allocator, .{ .line_start = a, .line_end = b });
+                }
+            }
 
             if (ts.ts_tree_cursor_goto_first_child(&cursor)) continue;
         }
@@ -374,10 +399,13 @@ pub fn extract(allocator: std.mem.Allocator, language: models.Language, content:
         c.qualifier = owned_names[span[0] + span[1] .. span[0] + span[1] + span[2]];
     }
     errdefer allocator.free(owned_calls);
+    const owned_loops = try loops.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_loops);
     return .{
         .calls = owned_calls,
         .call_names = owned_names,
-        .loops = try loops.toOwnedSlice(allocator),
+        .loops = owned_loops,
+        .blocks = try blocks.toOwnedSlice(allocator),
     };
 }
 
