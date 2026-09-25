@@ -104,7 +104,8 @@ const proto_tags = @embedFile("queries/proto_tags.scm");
 /// src/parser/queries/, `map_kind`, `drop_local_bindings`, or what
 /// `structure.zig` records.
 ///
-/// 3: symbols carry visibility and flags; outlines carry calls and loops.
+/// 3: symbols carry visibility and flags; outlines carry calls and loops;
+///    `.tsx` and JavaScript parse with the TSX grammar.
 pub const EXTRACTION_VERSION: u32 = 3;
 
 pub const Parser = struct {
@@ -132,7 +133,7 @@ pub const Parser = struct {
     /// Parse already-loaded source. Split out from parse_file so it can be
     /// tested directly with literal source (no temp files).
     pub fn parse_source(self: *Parser, path: []const u8, language: models.Language, content: []const u8) !models.FileOutline {
-        const lang = try self.get_ts_language(language);
+        const lang = try self.get_ts_language(language, path);
         if (!ts.ts_parser_set_language(self.parser, @ptrCast(lang))) {
             return error.TSLanguageSetFailed;
         }
@@ -351,13 +352,22 @@ pub const Parser = struct {
         };
     }
 
-    fn get_ts_language(self: *Parser, language: models.Language) !*const anyopaque {
+    fn get_ts_language(self: *Parser, language: models.Language, path: []const u8) !*const anyopaque {
         _ = self;
+        // JSX is not TypeScript syntax: the TypeScript grammar parsed every
+        // `.tsx` file into error nodes, and a component after the first JSX
+        // expression lost its range. JavaScript has no `<T>x` cast for the TSX
+        // grammar to misread, so all of it takes the TSX grammar.
+        if (language == .javascript) return tree_sitter_tsx();
+        if (language == .typescript) {
+            const ext = std.fs.path.extension(path);
+            if (std.ascii.eqlIgnoreCase(ext, ".tsx")) return tree_sitter_tsx();
+            return tree_sitter_typescript();
+        }
         return switch (language) {
             .rust => tree_sitter_rust(),
             .python => tree_sitter_python(),
             .go => tree_sitter_go(),
-            .typescript, .javascript => tree_sitter_typescript(),
             .zig => tree_sitter_zig(),
             .c => tree_sitter_c(),
             .cpp => tree_sitter_cpp(),

@@ -75,7 +75,7 @@ pub const Language = enum {
 
         if (std.mem.eql(u8, ext, "rs")) return .rust;
         if (std.mem.eql(u8, ext, "py") or std.mem.eql(u8, ext, "pyi")) return .python;
-        if (std.mem.eql(u8, ext, "ts") or std.mem.eql(u8, ext, "tsx")) return .typescript;
+        if (std.mem.eql(u8, ext, "ts") or std.mem.eql(u8, ext, "tsx") or std.mem.eql(u8, ext, "mts") or std.mem.eql(u8, ext, "cts")) return .typescript;
         if (std.mem.eql(u8, ext, "js") or std.mem.eql(u8, ext, "jsx") or std.mem.eql(u8, ext, "mjs") or std.mem.eql(u8, ext, "cjs")) return .javascript;
         if (std.mem.eql(u8, ext, "go")) return .go;
         if (std.mem.eql(u8, ext, "sh") or std.mem.eql(u8, ext, "bash")) return .bash;

@@ -2714,3 +2714,63 @@ test "callgraph: a name several files define, called with no import, resolves to
     try testing.expectEqual(@as(usize, 1), uses.len);
     try testing.expectEqual(node_named(&g, "only_here").?, uses[0].to);
 }
+
+test "structure: a method of a subclass may override, so it implements" {
+    const py =
+        \\class Handler(BaseHTTPRequestHandler):
+        \\    def do_GET(self):
+        \\        def inner():
+        \\            pass
+        \\class Plain:
+        \\    def lonely(self):
+        \\        pass
+        \\
+    ;
+    var o = try parse_for_test(.python, py);
+    defer o.deinit(testing.allocator);
+    try testing.expect(symbol_named(o, "do_GET").?.flags.implements);
+    try testing.expect(!symbol_named(o, "inner").?.flags.implements);
+    try testing.expect(!symbol_named(o, "lonely").?.flags.implements);
+
+    const tsx =
+        \\export class View extends Component {
+        \\  render() { return null; }
+        \\}
+        \\class Solo {
+        \\  helper() {}
+        \\}
+        \\
+    ;
+    var t = try parse_for_test(.typescript, tsx);
+    defer t.deinit(testing.allocator);
+    try testing.expect(symbol_named(t, "render").?.flags.implements);
+    try testing.expect(!symbol_named(t, "helper").?.flags.implements);
+    try testing.expectEqual(models.Language.typescript, models.Language.from_path("scripts/import.mts"));
+}
+
+test "parser: a tsx file parses with the tsx grammar" {
+    const src =
+        \\export function Card({ items }: Props) {
+        \\  return <div className="card">{items.map((i) => <Row key={i.id} value={format(i)} />)}</div>;
+        \\}
+        \\export function Footer() {
+        \\  return <footer />;
+        \\}
+        \\
+    ;
+    var parser = try treesitter.Parser.init(testing.allocator);
+    defer parser.deinit();
+    var o = try parser.parse_source("src/Card.tsx", .typescript, src);
+    defer o.deinit(testing.allocator);
+    const footer = symbol_named(o, "Footer") orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 3), footer.line_start);
+    try testing.expectEqual(@as(usize, 5), footer.line_end);
+    var buf: [8][]const u8 = undefined;
+    const l2 = calls_on_line(o, 2, &buf);
+    var saw_format = false;
+    for (l2) |n| {
+        if (std.mem.eql(u8, n, "format")) saw_format = true;
+    }
+    try testing.expect(saw_format);
+    try testing.expectEqual(models.LoopKind.each, loop_at(o, 2).?.kind);
+}
