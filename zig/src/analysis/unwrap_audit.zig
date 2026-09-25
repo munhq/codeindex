@@ -101,7 +101,7 @@ pub fn audit(allocator: std.mem.Allocator, exp: *explorer.Explorer) ![]Finding {
         // Only scan Rust files
         if (outline.language != .rust) continue;
 
-        const content = exp.content_cache.get(file_id) orelse continue;
+        const content = exp.content_of(allocator, file_id) orelse continue;
         const is_test_file = path_is_test(outline.path);
         const is_main = std.mem.endsWith(u8, outline.path, "main.rs");
 

@@ -786,10 +786,16 @@ pub const Server = struct {
                 });
             }
         } else if (std.mem.eql(u8, tool, "analyze")) {
+            // An analysis reads a file the content cache evicted from disk, and
+            // its findings keep slices of that content. Everything the call
+            // allocates lives in this arena until the answer is written.
+            var analysis_arena = std.heap.ArenaAllocator.init(self.allocator);
+            defer analysis_arena.deinit();
+            const aa = analysis_arena.allocator();
             const analysis_type = get_string_arg(args, "analysis") orelse "";
             if (std.mem.eql(u8, analysis_type, "security")) {
-                const findings = try security_scan.scan(self.allocator, self.exp);
-                defer security_scan.free_findings(self.allocator, findings);
+                const findings = try security_scan.scan(aa, self.exp);
+                defer security_scan.free_findings(aa, findings);
                 const summary = security_scan.summarize(findings);
                 try w.print("{{\"total\":{d},\"critical\":{d},\"high\":{d},\"medium\":{d},\"low\":{d},\"findings\":[", .{
                     summary.total, summary.critical, summary.high, summary.medium, summary.low,
@@ -804,8 +810,8 @@ pub const Server = struct {
                 }
                 try w.writeAll("]}");
             } else if (std.mem.eql(u8, analysis_type, "dead_code")) {
-                const symbols = try dead_code.find_dead_code(self.allocator, self.exp);
-                defer self.allocator.free(symbols);
+                const symbols = try dead_code.find_dead_code(aa, self.exp);
+                defer aa.free(symbols);
                 try w.print("{{\"dead_count\":{d},\"symbols\":[", .{symbols.len});
                 for (symbols, 0..) |s, si| {
                     if (si > 0) try w.writeAll(",");
@@ -820,8 +826,8 @@ pub const Server = struct {
                 }
                 try w.writeAll("]}");
             } else if (std.mem.eql(u8, analysis_type, "unwrap_audit")) {
-                const findings = try unwrap_audit.audit(self.allocator, self.exp);
-                defer self.allocator.free(findings);
+                const findings = try unwrap_audit.audit(aa, self.exp);
+                defer aa.free(findings);
                 try w.print("{{\"total\":{d},\"findings\":[", .{findings.len});
                 for (findings, 0..) |f, fi| {
                     if (fi > 0) try w.writeAll(",");
@@ -835,8 +841,8 @@ pub const Server = struct {
                 }
                 try w.writeAll("]}");
             } else if (std.mem.eql(u8, analysis_type, "test_coverage")) {
-                const modules = try test_coverage.analyze(self.allocator, self.exp);
-                defer self.allocator.free(modules);
+                const modules = try test_coverage.analyze(aa, self.exp);
+                defer aa.free(modules);
                 try w.print("{{\"modules\":[", .{});
                 for (modules, 0..) |m, mi| {
                     if (mi > 0) try w.writeAll(",");
@@ -846,8 +852,8 @@ pub const Server = struct {
                 }
                 try w.writeAll("]}");
             } else if (std.mem.eql(u8, analysis_type, "architecture")) {
-                const violations = try architecture.analyze(self.allocator, self.exp);
-                defer self.allocator.free(violations);
+                const violations = try architecture.analyze(aa, self.exp);
+                defer aa.free(violations);
                 try w.print("{{\"violations\":{d},\"details\":[", .{violations.len});
                 for (violations, 0..) |v, vi| {
                     if (vi > 0) try w.writeAll(",");
@@ -859,10 +865,10 @@ pub const Server = struct {
                 }
                 try w.writeAll("]}");
             } else if (std.mem.eql(u8, analysis_type, "crossref")) {
-                const report = try crossref.analyze(self.allocator, self.exp);
-                defer self.allocator.free(report.wired);
-                defer self.allocator.free(report.backend_only);
-                defer self.allocator.free(report.frontend_only);
+                const report = try crossref.analyze(aa, self.exp);
+                defer aa.free(report.wired);
+                defer aa.free(report.backend_only);
+                defer aa.free(report.frontend_only);
                 try w.print("{{\"wired\":{d},\"backend_only\":{d},\"frontend_only\":{d},\"backend_only_routes\":[", .{
                     report.wired_count, report.backend_only_count, report.frontend_only_count,
                 });
@@ -888,9 +894,9 @@ pub const Server = struct {
                 }
                 try w.writeAll("]}");
             } else if (std.mem.eql(u8, analysis_type, "type_drift")) {
-                const report = try type_drift.analyze(self.allocator, self.exp);
-                defer self.allocator.free(report.mismatches);
-                defer self.allocator.free(report.missing_fields);
+                const report = try type_drift.analyze(aa, self.exp);
+                defer aa.free(report.mismatches);
+                defer aa.free(report.missing_fields);
                 try w.print("{{\"types_found\":{d},\"mismatches\":{d},\"missing_fields\":{d},\"mismatch_details\":[", .{
                     report.types_found, report.mismatches.len, report.missing_fields.len,
                 });
@@ -928,8 +934,8 @@ pub const Server = struct {
                 }
                 try w.writeAll("]}");
             } else if (std.mem.eql(u8, analysis_type, "db_schema")) {
-                const report = try db_schema.analyze(self.allocator, self.exp);
-                defer self.allocator.free(report.issues);
+                const report = try db_schema.analyze(aa, self.exp);
+                defer aa.free(report.issues);
                 try w.print("{{\"tables_in_migrations\":{d},\"tables_in_code\":{d},\"issues\":{d},\"issue_details\":[", .{
                     report.tables_in_migrations, report.tables_in_code, report.issues.len,
                 });
@@ -947,8 +953,8 @@ pub const Server = struct {
                 }
                 try w.writeAll("]}");
             } else if (std.mem.eql(u8, analysis_type, "migration_parity")) {
-                const report = try migration_parity.analyze(self.allocator, self.exp);
-                defer self.allocator.free(report.issues);
+                const report = try migration_parity.analyze(aa, self.exp);
+                defer aa.free(report.issues);
                 try w.print("{{\"total_migrations\":{d},\"issues\":{d},\"issue_details\":[", .{
                     report.total_migrations, report.issues.len,
                 });
@@ -964,8 +970,8 @@ pub const Server = struct {
                 }
                 try w.writeAll("]}");
             } else if (std.mem.eql(u8, analysis_type, "manifest_compliance")) {
-                const report = try manifest_compliance.analyze(self.allocator, self.exp);
-                defer self.allocator.free(report.violations);
+                const report = try manifest_compliance.analyze(aa, self.exp);
+                defer aa.free(report.violations);
                 try w.print("{{\"manifests_checked\":{d},\"violations\":{d},\"violation_details\":[", .{
                     report.manifests_checked, report.violations.len,
                 });
@@ -981,8 +987,8 @@ pub const Server = struct {
                 }
                 try w.writeAll("]}");
             } else if (std.mem.eql(u8, analysis_type, "literal_scan")) {
-                const findings = try literal_scan.scan(self.allocator, self.exp);
-                defer literal_scan.free_findings(self.allocator, findings);
+                const findings = try literal_scan.scan(aa, self.exp);
+                defer literal_scan.free_findings(aa, findings);
                 const s = literal_scan.summarize(findings);
                 try w.print("{{\"total\":{d},\"urls\":{d},\"ips\":{d},\"localhosts\":{d},\"abs_paths\":{d},\"secrets\":{d},\"magic_ports\":{d},\"todos\":{d},\"findings\":[", .{
                     s.total, s.urls, s.ips, s.localhosts, s.paths, s.secrets, s.ports, s.todos,
@@ -997,8 +1003,8 @@ pub const Server = struct {
                 }
                 try w.print("],\"truncated\":{s}}}", .{if (findings.len > max_emit) "true" else "false"});
             } else if (std.mem.eql(u8, analysis_type, "coupling")) {
-                var report = try coupling.analyze(self.allocator, self.exp);
-                defer coupling.free_report(self.allocator, &report);
+                var report = try coupling.analyze(aa, self.exp);
+                defer coupling.free_report(aa, &report);
                 try w.print("{{\"total_files\":{d},\"total_edges\":{d},\"god_modules\":[", .{
                     report.total_files, report.total_edges,
                 });
@@ -1036,8 +1042,8 @@ pub const Server = struct {
                 }
                 try w.writeAll("]}");
             } else if (std.mem.eql(u8, analysis_type, "cycles")) {
-                var report = try cycles.analyze(self.allocator, self.exp);
-                defer cycles.free_report(self.allocator, &report);
+                var report = try cycles.analyze(aa, self.exp);
+                defer cycles.free_report(aa, &report);
                 try w.print("{{\"total_nodes\":{d},\"total_edges\":{d},\"cycle_count\":{d},\"cycles\":[", .{
                     report.total_nodes, report.total_edges, report.cycles.len,
                 });
@@ -1054,8 +1060,8 @@ pub const Server = struct {
                 }
                 try w.print("],\"truncated\":{s}}}", .{if (report.cycles.len > max_emit) "true" else "false"});
             } else if (std.mem.eql(u8, analysis_type, "duplication")) {
-                var report = try duplication.analyze(self.allocator, self.exp);
-                defer report.deinit(self.allocator);
+                var report = try duplication.analyze(aa, self.exp);
+                defer report.deinit(aa);
                 try w.print("{{\"duplicate_names\":{d},\"clusters\":[", .{report.total_clusters});
                 const top: usize = 50;
                 const n = @min(report.clusters.len, top);
@@ -1076,8 +1082,8 @@ pub const Server = struct {
                 }
                 try w.print("],\"truncated\":{s}}}", .{if (report.clusters.len > top) "true" else "false"});
             } else if (std.mem.eql(u8, analysis_type, "clones")) {
-                var report = try clones.analyze(self.allocator, self.exp);
-                defer report.deinit(self.allocator);
+                var report = try clones.analyze(aa, self.exp);
+                defer report.deinit(aa);
                 try w.print("{{\"clone_groups\":{d},\"cloned_functions\":{d},\"groups\":[", .{
                     report.total_groups, report.total_cloned_fns,
                 });
@@ -1103,21 +1109,21 @@ pub const Server = struct {
                 try w.print("],\"truncated\":{s}}}", .{if (report.groups.len > top) "true" else "false"});
             } else if (std.mem.eql(u8, analysis_type, "health")) {
                 // One-call repo health: structure + risk + waste, with a verdict.
-                const dead = try dead_code.find_dead_code(self.allocator, self.exp);
-                defer self.allocator.free(dead);
-                const unwraps = try unwrap_audit.audit(self.allocator, self.exp);
-                defer self.allocator.free(unwraps);
-                const sec_findings = try security_scan.scan(self.allocator, self.exp);
-                defer security_scan.free_findings(self.allocator, sec_findings);
+                const dead = try dead_code.find_dead_code(aa, self.exp);
+                defer aa.free(dead);
+                const unwraps = try unwrap_audit.audit(aa, self.exp);
+                defer aa.free(unwraps);
+                const sec_findings = try security_scan.scan(aa, self.exp);
+                defer security_scan.free_findings(aa, sec_findings);
                 const sec = security_scan.summarize(sec_findings);
-                var cyc = try cycles.analyze(self.allocator, self.exp);
-                defer cycles.free_report(self.allocator, &cyc);
-                var coup = try coupling.analyze(self.allocator, self.exp);
-                defer coupling.free_report(self.allocator, &coup);
-                var dup = try duplication.analyze(self.allocator, self.exp);
-                defer dup.deinit(self.allocator);
-                var cln = try clones.analyze(self.allocator, self.exp);
-                defer cln.deinit(self.allocator);
+                var cyc = try cycles.analyze(aa, self.exp);
+                defer cycles.free_report(aa, &cyc);
+                var coup = try coupling.analyze(aa, self.exp);
+                defer coupling.free_report(aa, &coup);
+                var dup = try duplication.analyze(aa, self.exp);
+                defer dup.deinit(aa);
+                var cln = try clones.analyze(aa, self.exp);
+                defer cln.deinit(aa);
 
                 try w.print("{{\"files\":{d},\"symbols\":{d},\"dependency_edges\":{d}," ++
                     "\"security_critical\":{d},\"security_total\":{d},\"panic_sites\":{d}," ++
@@ -1157,8 +1163,8 @@ pub const Server = struct {
                 }
                 try w.writeAll("]}");
             } else if (std.mem.eql(u8, analysis_type, "spawn_scan")) {
-                const findings = try spawn_scan.scan(self.allocator, self.exp);
-                defer spawn_scan.free_findings(self.allocator, findings);
+                const findings = try spawn_scan.scan(aa, self.exp);
+                defer spawn_scan.free_findings(aa, findings);
                 const s = spawn_scan.summarize(findings);
                 try w.print("{{\"total\":{d},\"with_known_rate\":{d},\"with_long_lived_peer\":{d},\"findings\":[", .{
                     s.total, s.with_known_rate, s.with_long_lived_peer,
@@ -1185,8 +1191,8 @@ pub const Server = struct {
                 }
                 try w.print("],\"truncated\":{s}}}", .{if (findings.len > cap) "true" else "false"});
             } else if (std.mem.eql(u8, analysis_type, "deps")) {
-                var report = try dep_inventory.analyze(self.allocator, self.exp);
-                defer report.deinit(self.allocator);
+                var report = try dep_inventory.analyze(aa, self.exp);
+                defer report.deinit(aa);
                 try w.print("{{\"manifests\":{d},\"direct_dependencies\":{d},\"locked_packages\":{d}," ++
                     "\"duplicate_count\":{d},\"unreferenced_count\":{d},\"single_reference_count\":{d},", .{
                     report.manifests,      report.direct_dependencies, report.locked_packages,
@@ -1232,8 +1238,8 @@ pub const Server = struct {
                 try write_json_string(w, report.confirm_unused_with);
                 try w.writeAll(",\"not_measured\":\"release binary size and resident text size are build and runtime facts, not source facts\"}");
             } else if (std.mem.eql(u8, analysis_type, "leak_shapes")) {
-                const findings = try leak_shapes.scan(self.allocator, self.exp);
-                defer leak_shapes.free_findings(self.allocator, findings);
+                const findings = try leak_shapes.scan(aa, self.exp);
+                defer leak_shapes.free_findings(aa, findings);
                 const s = leak_shapes.summarize(findings);
                 try w.print("{{\"total\":{d},\"leaked_allocation\":{d},\"growing_container\":{d}," ++
                     "\"unbounded_cache\":{d},\"unbounded_channel\":{d},\"detached_spawn_in_loop\":{d}," ++
@@ -1257,8 +1263,8 @@ pub const Server = struct {
                 }
                 try w.print("],\"truncated\":{s}}}", .{if (findings.len > cap) "true" else "false"});
             } else if (std.mem.eql(u8, analysis_type, "logic_shapes")) {
-                var report = try logic_shapes.analyze(self.allocator, self.exp);
-                defer report.deinit(self.allocator);
+                var report = try logic_shapes.analyze(aa, self.exp);
+                defer report.deinit(aa);
                 try w.print("{{\"total\":{d},\"declared_limits\":{d},\"limits\":[", .{
                     report.findings.len, report.limits.len,
                 });
@@ -1298,8 +1304,8 @@ pub const Server = struct {
                 }
                 try w.print("],\"truncated\":{s}}}", .{if (report.findings.len > cap) "true" else "false"});
             } else if (std.mem.eql(u8, analysis_type, "field_contention")) {
-                var report = try field_contention.analyze(self.allocator, self.exp);
-                defer report.deinit(self.allocator);
+                var report = try field_contention.analyze(aa, self.exp);
+                defer report.deinit(aa);
                 try w.print("{{\"total_writers\":{d},\"contended_fields\":{d},\"contended\":[", .{
                     report.total_writers, report.contended.len,
                 });

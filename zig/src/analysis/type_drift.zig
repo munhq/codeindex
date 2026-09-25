@@ -48,7 +48,7 @@ fn extract_types(allocator: std.mem.Allocator, exp: *explorer.Explorer) ![]TypeI
         const file_id = entry.key_ptr.*;
         if (exp.deleted_files.get(file_id) != null) continue;
         const outline = entry.value_ptr.*;
-        const content = exp.content_cache.get(file_id) orelse continue;
+        const content = exp.content_of(allocator, file_id) orelse continue;
 
         // Only look at languages that define types
         if (outline.language != .rust and outline.language != .typescript and
