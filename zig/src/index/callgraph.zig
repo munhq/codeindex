@@ -24,6 +24,10 @@ pub const Node = struct {
     kind: models.SymbolKind,
     language: models.Language,
     flags: models.SymbolFlags = .{},
+    /// A class, struct, trait, interface or impl encloses it. Kotlin tags
+    /// every function `function`, and C++ tags an in-class method `function`
+    /// too, so the kind alone does not say which definitions are methods.
+    in_type: bool = false,
     /// 0-based, inclusive.
     line_start: u32,
     line_end: u32,
@@ -119,6 +123,22 @@ fn binds_function(content: []const u8, sym: models.Symbol) bool {
     return false;
 }
 
+fn enclosed_by_type(outline: models.FileOutline, sym: models.Symbol) bool {
+    for (outline.symbols) |t| {
+        switch (t.kind) {
+            .class, .@"struct", .trait, .interface, .impl, .@"enum" => {},
+            else => continue,
+        }
+        if (t.line_start < sym.line_start and sym.line_end <= t.line_end) return true;
+        if (t.line_start == sym.line_start and t.line_end > sym.line_end) return true;
+    }
+    return false;
+}
+
+fn is_method(n: Node) bool {
+    return n.kind == .method or n.in_type;
+}
+
 pub fn build(allocator: std.mem.Allocator, exp: *explorer.Explorer) !Graph {
     var nodes = std.ArrayList(Node).empty;
     errdefer nodes.deinit(allocator);
@@ -152,6 +172,7 @@ pub fn build(allocator: std.mem.Allocator, exp: *explorer.Explorer) !Graph {
                 .kind = sym.kind,
                 .language = outline.language,
                 .flags = sym.flags,
+                .in_type = enclosed_by_type(outline, sym),
                 .line_start = @intCast(sym.line_start),
                 .line_end = @intCast(sym.line_end),
             });
@@ -499,7 +520,7 @@ fn unique(nodes: []const Node, cands: []const u32, language: models.Language, fi
         // `receiver.name()` calls a method. Where the tags query marks
         // methods, a free function of the same name is a different definition:
         // `approvals.get(id)` in a component is not the API module's `get`.
-        if (call.kind == .method and !call.self_receiver and n.kind != .method and marks_methods(n.language)) continue;
+        if (call.kind == .method and !call.self_receiver and !is_method(n) and marks_methods(n.language)) continue;
         found = c;
         count += 1;
     }
