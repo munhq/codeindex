@@ -2655,7 +2655,8 @@ test "callgraph: calls resolve across an import, and a cost sums per call site" 
     var exp = try explorer_mod.Explorer.init(testing.allocator);
     defer exp.deinit();
     try index_sources(&exp, &.{
-        .{ "/ws/src/db.rs",
+        .{
+            "/ws/src/db.rs",
             \\pub fn insert_node(p: &Pool) { sqlx::query("insert"); }
             \\pub fn import_triple(p: &Pool) {
             \\    insert_node(p);
@@ -2663,7 +2664,8 @@ test "callgraph: calls resolve across an import, and a cost sums per call site" 
             \\}
             \\
         },
-        .{ "/ws/src/main.rs",
+        .{
+            "/ws/src/main.rs",
             \\mod db;
             \\use crate::db::import_triple;
             \\fn run(rows: &[Row], p: &Pool) {
@@ -2757,7 +2759,8 @@ test "dead_code: a private method its own file calls is used, and a manifest spe
     defer exp.deinit();
     try index_sources(&exp, &.{
         .{ "/ws/Cargo.toml", "[package]\nname = \"x\"\n" },
-        .{ "/ws/src/lib.rs",
+        .{
+            "/ws/src/lib.rs",
             \\pub struct Store;
             \\impl Store {
             \\    pub fn save(&self) { self.flush(); }
@@ -2846,7 +2849,8 @@ test "callgraph: a closure parameter and another language's function are not the
     var exp = try explorer_mod.Explorer.init(testing.allocator);
     defer exp.deinit();
     try index_sources(&exp, &.{
-        .{ "/ws/src/health.rs",
+        .{
+            "/ws/src/health.rs",
             \\fn upsert<F>(name: &str, update: F) where F: FnOnce(&mut E) {
             \\    update(entry);
             \\}
@@ -2873,7 +2877,8 @@ test "find_callers: a call in a string or a comment is not a caller, and each hi
     var exp = try explorer_mod.Explorer.init(testing.allocator);
     defer exp.deinit();
     try index_sources(&exp, &.{
-        .{ "/ws/src/a.rs",
+        .{
+            "/ws/src/a.rs",
             \\pub fn flush() {}
             \\fn save() {
             \\    flush();
@@ -2897,7 +2902,8 @@ test "callgraph: a Kotlin method call resolves to the method, not to a free func
     var exp = try explorer_mod.Explorer.init(testing.allocator);
     defer exp.deinit();
     try index_sources(&exp, &.{
-        .{ "/ws/app/Store.kt",
+        .{
+            "/ws/app/Store.kt",
             \\fun save(x: Int) {}
             \\class Store {
             \\    fun save(x: Int) {}
