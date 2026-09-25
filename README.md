@@ -118,14 +118,14 @@ The next time your agent starts, codeindex indexes your project in the backgroun
 | `read_file` | Read file contents with optional line range |
 | `read_symbol` | Read just a symbol's source code (with optional context lines) |
 | `index_workspace` | Index or re-index a workspace directory |
-| `analyze` | Run one of 21 code analyses (see below) |
+| `analyze` | Run one of 22 code analyses (see below) |
 
 ### Analyses (`analyze` tool)
 
 | Analysis | What it finds |
 |----------|--------------|
 | `security` | Hardcoded secrets, SQL injection patterns, unsafe blocks, eval usage |
-| `dead_code` | Unreferenced files and symbols |
+| `dead_code` | Symbols nothing names outside their own definition, split from the unused public API of a library package |
 | `unwrap_audit` | `.unwrap()` / panic-prone error handling (Rust) |
 | `test_coverage` | Files without test coverage |
 | `architecture` | Architectural smells — god modules, circular deps, islands |
@@ -142,7 +142,8 @@ The next time your agent starts, codeindex indexes your project in the backgroun
 | `spawn_scan` | An interpreter started on a loop or a timer, ranked by startup cost times spawn rate |
 | `deps` | Dependency inventory — duplicate versions, unreferenced crates, single-use crates |
 | `leak_shapes` | Shapes a leak has, each paired with the runtime series that decides it |
-| `logic_shapes` | A fixed byte constant against a declared memory limit, and a round trip per row |
+| `logic_shapes` | A fixed byte constant against a declared memory limit |
+| `call_cost` | Loops over rows ranked by the database and HTTP round trips each element costs, counted through the call graph |
 | `field_contention` | One declared-state field written by two or more owners |
 | `health` | Roll-up of the analyses above into one index-health report |
 

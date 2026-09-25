@@ -1,4 +1,4 @@
-//! Two logic shapes that cost production money.
+//! A logic shape that costs production money.
 //!
 //! `sized_constant` — a fixed byte constant that should have come from a limit.
 //! The fault: a SQLite `mmap_size` pinned at a flat 256 MiB with no relation to
@@ -8,41 +8,32 @@
 //! fixed constant in a repository that declares a memory limit the constant
 //! never reads, and the number that makes it actionable is the ratio.
 //!
-//! `call_in_loop` — a database query or an HTTP call inside a loop over rows.
-//! The N+1 shape: one round trip per row where one round trip would do.
+//! The N+1 shape that lived here as `call_in_loop` is `call_cost.zig`: it
+//! counts round trips through the call graph.
 
 const std = @import("std");
 const explorer = @import("../index/explorer.zig");
 const models = @import("../core/models.zig");
+const txt = @import("text.zig");
 
 pub const Kind = enum {
     sized_constant,
-    call_in_loop,
 
     pub fn as_str(self: Kind) []const u8 {
-        return switch (self) {
-            .sized_constant => "sized_constant",
-            .call_in_loop => "call_in_loop",
-        };
+        return @tagName(self);
     }
 
     /// `sized_constant` is decidable: the constant either fits inside the
     /// declared limit or it does not, and both numbers are in the repository.
-    /// `call_in_loop` is not: a loop over three configuration rows makes three
-    /// round trips and costs nothing.
     pub fn confidence(self: Kind) []const u8 {
-        return switch (self) {
-            .sized_constant => "finding",
-            .call_in_loop => "shape",
-        };
+        _ = self;
+        return "finding";
     }
 
     /// Empty when the kind is decidable from the source alone.
     pub fn runtime_check(self: Kind) []const u8 {
-        return switch (self) {
-            .sized_constant => "",
-            .call_in_loop => "the size of the collection the loop walks; a loop over three rows is not an N+1",
-        };
+        _ = self;
+        return "";
     }
 };
 
@@ -90,44 +81,10 @@ pub const Report = struct {
     }
 };
 
-// ── Scope ────────────────────────────────────────────────────────────────────
-
-fn is_excluded_path(path: []const u8) bool {
-    const dirs = [_][]const u8{
-        "test",         "tests",  "spec",   "benches",  "bench",    "examples", "example",
-        "node_modules", "vendor", "target", "testdata", "fixtures", "docs",
-    };
-    var it = std.mem.splitScalar(u8, path, '/');
-    while (it.next()) |component| {
-        for (&dirs) |d| {
-            if (std.mem.eql(u8, component, d)) return true;
-        }
-    }
-    const basename = std.fs.path.basename(path);
-    if (std.mem.indexOf(u8, basename, "_test.") != null) return true;
-    if (std.mem.indexOf(u8, basename, ".test.") != null) return true;
-    if (std.mem.indexOf(u8, basename, ".spec.") != null) return true;
-    if (std.mem.startsWith(u8, basename, "test_")) return true;
-    return false;
-}
-
-fn ident_char(c: u8) bool {
-    return std.ascii.isAlphanumeric(c) or c == '_';
-}
-
-fn contains_any_ci(hay: []const u8, needles: []const []const u8) bool {
-    for (needles) |n| {
-        if (std.ascii.indexOfIgnoreCase(hay, n) != null) return true;
-    }
-    return false;
-}
-
-fn contains_any(hay: []const u8, needles: []const []const u8) bool {
-    for (needles) |n| {
-        if (std.mem.indexOf(u8, hay, n) != null) return true;
-    }
-    return false;
-}
+const is_excluded_path = txt.is_excluded_path;
+const ident_char = txt.ident_char;
+const contains_any = txt.contains_any;
+const contains_any_ci = txt.contains_any_ci;
 
 // ── Declared memory limits ───────────────────────────────────────────────────
 
@@ -285,121 +242,6 @@ fn sizing_constant(line: []const u8) ?u64 {
     return best;
 }
 
-// ── Shape: a call inside a loop over rows ────────────────────────────────────
-
-/// Markers that execute a statement against a database.
-///
-/// A bare `.execute(` matched `tool.execute(call.arguments)` and every other
-/// execute-shaped method, and it fired a second time on the `.execute(&pool)`
-/// continuation of a `sqlx::query(…)` already reported. The markers below name
-/// the query itself.
-const query_calls = [_][]const u8{
-    "sqlx::query",      ".fetch_one(",     ".fetch_all(",    ".fetch_optional(",
-    ".query_row(",      "cursor.execute(", "session.query(", "db.query(",
-    ".find_one(",       ".findOne(",       ".findMany(",     ".findUnique(",
-    "QueryRowContext(", "QueryContext(",
-};
-
-/// Markers that put a request on the wire. `reqwest::` alone is a module path:
-/// `reqwest::header::HeaderName::from_bytes` builds a header and sends nothing.
-const http_calls = [_][]const u8{
-    ".send().await", ".send()?",       "reqwest::get(", "reqwest::Client::new()",
-    "requests.get(", "requests.post(", "requests.put(", "requests.delete(",
-    "axios.get(",    "axios.post(",    "axios.put(",    "axios.delete(",
-    "http.Get(",     "http.Post(",     "urlopen(",      "await fetch(",
-};
-
-/// A loop that walks a collection. `for i in 0..n` is a counted loop and often
-/// has nothing to do with rows; `for row in rows` is the N+1 shape.
-fn loop_over_collection(t: []const u8, lang: models.Language) bool {
-    switch (lang) {
-        .rust => {
-            if (!std.mem.startsWith(u8, t, "for ")) return false;
-            if (std.mem.indexOf(u8, t, "..") != null) return false;
-            if (std.mem.indexOf(u8, t, " in ") == null) return false;
-            return !iterates_a_fixed_list(t, " in ");
-        },
-        .python => {
-            if (!std.mem.startsWith(u8, t, "for ")) return false;
-            if (std.mem.indexOf(u8, t, "range(") != null) return false;
-            if (std.mem.indexOf(u8, t, " in ") == null) return false;
-            return !iterates_a_fixed_list(t, " in ");
-        },
-        .typescript, .javascript => {
-            if (std.mem.startsWith(u8, t, "for ") and std.mem.indexOf(u8, t, " of ") != null) {
-                return !iterates_a_fixed_list(t, " of ");
-            }
-            return std.mem.indexOf(u8, t, ".forEach(") != null or
-                std.mem.indexOf(u8, t, ".map(async") != null;
-        },
-        .go => {
-            if (!std.mem.startsWith(u8, t, "for ") or std.mem.indexOf(u8, t, " range ") == null) return false;
-            return !iterates_a_fixed_list(t, " range ");
-        },
-        else => return false,
-    }
-}
-
-/// Whether the loop walks something whose length the source fixes: an array
-/// literal, or a constant named in the screaming case a constant uses.
-///
-/// `for table in ["tasks", "goals"]` runs twice. `for pdef in PROVIDERS` runs
-/// once per declared provider. Neither is an N+1, and five of the forty-two
-/// findings on one repository were exactly this.
-fn iterates_a_fixed_list(t: []const u8, keyword: []const u8) bool {
-    const kw = std.mem.indexOf(u8, t, keyword) orelse return false;
-    var it = std.mem.trimStart(u8, t[kw + keyword.len ..], " \t&*");
-    if (it.len == 0) return false;
-    // An inline array literal, on this line or opened at the end of it.
-    if (it[0] == '[') return true;
-
-    var end: usize = 0;
-    while (end < it.len and (ident_char(it[end]) or it[end] == ':')) end += 1;
-    const name = it[0..end];
-    if (name.len == 0) return false;
-    // A constant: no lowercase letter, and at least one letter.
-    var has_letter = false;
-    for (name) |c| {
-        if (std.ascii.isLower(c)) return false;
-        if (std.ascii.isAlphabetic(c)) has_letter = true;
-    }
-    return has_letter;
-}
-
-fn brace_delta(line: []const u8) isize {
-    var d: isize = 0;
-    var in_single = false;
-    var in_double = false;
-    var i: usize = 0;
-    while (i < line.len) : (i += 1) {
-        const c = line[i];
-        if (c == '\\') {
-            i += 1;
-            continue;
-        }
-        if (c == '\'' and !in_double) in_single = !in_single;
-        if (c == '"' and !in_single) in_double = !in_double;
-        if (in_single or in_double) continue;
-        if (c == '{') d += 1;
-        if (c == '}') d -= 1;
-    }
-    return d;
-}
-
-fn indent_of(line: []const u8) usize {
-    var n: usize = 0;
-    while (n < line.len and (line[n] == ' ' or line[n] == '\t')) n += 1;
-    return n;
-}
-
-fn is_comment(t: []const u8, lang: models.Language) bool {
-    if (std.mem.startsWith(u8, t, "//")) return true;
-    if (std.mem.startsWith(u8, t, "/*")) return true;
-    if (std.mem.startsWith(u8, t, "*")) return true;
-    if ((lang == .python or lang == .yaml or lang == .bash) and std.mem.startsWith(u8, t, "#")) return true;
-    return false;
-}
-
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 pub fn analyze(allocator: std.mem.Allocator, exp: *explorer.Explorer) !Report {
@@ -452,87 +294,33 @@ pub fn analyze(allocator: std.mem.Allocator, exp: *explorer.Explorer) !Report {
         const lang = outline.language;
         const content = exp.content_of(allocator, file_id) orelse continue;
         const file_reads_limit = contains_any(content, &derives_from_limit);
+        if (smallest == null or file_reads_limit) continue;
 
         var line_no: usize = 0;
-        var depth: isize = 0;
-        var loop_depth: isize = 0;
-        var loop_indent: usize = 0;
-        var loop_line: usize = 0;
-        var in_loop = false;
-        var loop_reported = false;
         var line_it = std.mem.splitScalar(u8, content, '\n');
         while (line_it.next()) |raw| {
             line_no += 1;
             const t = std.mem.trim(u8, raw, " \t\r");
-            if (t.len == 0 or is_comment(t, lang)) {
-                if (lang != .python) depth += brace_delta(raw);
-                continue;
-            }
-
+            if (t.len == 0 or txt.is_comment(t, lang)) continue;
+            if (!contains_any_ci(t, &sizing_keys)) continue;
+            const bytes = sizing_constant(t) orelse continue;
             // A fixed byte constant against a declared limit.
-            if (smallest != null and contains_any_ci(t, &sizing_keys)) {
-                if (sizing_constant(t)) |bytes| {
-                    if (!file_reads_limit) {
-                        const pct: u32 = @intCast(@min(@as(u64, 100_000), bytes * 100 / smallest.?));
-                        const tightest = limits.items[smallest_at.?];
-                        try findings.append(allocator, .{
-                            .file = outline.path,
-                            .line = line_no,
-                            .kind = .sized_constant,
-                            .subject = try allocator.dupe(u8, sizing_key_in(t) orelse "size"),
-                            .detail = try std.fmt.allocPrint(
-                                allocator,
-                                "{d} bytes is fixed. The tightest memory limit this repository declares is {s} at {s}:{d}, so the constant is {d}% of it. Nothing links them.",
-                                .{ bytes, tightest.text, tightest.file, tightest.line, pct },
-                            ),
-                            .evidence = try allocator.dupe(u8, t),
-                            .constant_bytes = bytes,
-                            .percent_of_limit = pct,
-                        });
-                    }
-                }
-            }
-
-            // Close a loop this line left.
-            if (in_loop) {
-                if (lang == .python) {
-                    if (indent_of(raw) <= loop_indent) in_loop = false;
-                } else if (depth < loop_depth) {
-                    in_loop = false;
-                }
-            }
-
-            // A round trip per row. One finding per LOOP, not per line: the
-            // fault is the loop, and a `sqlx::query(…)` spread over its
-            // `.fetch_one(&pool)` continuation is one round trip, not two.
-            if (in_loop and !loop_reported) {
-                const is_query = contains_any(t, &query_calls);
-                const is_http = !is_query and contains_any(t, &http_calls);
-                if (is_query or is_http) {
-                    loop_reported = true;
-                    try findings.append(allocator, .{
-                        .file = outline.path,
-                        .line = line_no,
-                        .kind = .call_in_loop,
-                        .subject = try allocator.dupe(u8, if (is_query) "query" else "http call"),
-                        .detail = try std.fmt.allocPrint(
-                            allocator,
-                            "the loop at line {d} walks a collection and makes one round trip per element",
-                            .{loop_line},
-                        ),
-                        .evidence = try allocator.dupe(u8, t),
-                    });
-                }
-            }
-
-            if (!in_loop and loop_over_collection(t, lang)) {
-                in_loop = true;
-                loop_reported = false;
-                loop_line = line_no;
-                loop_indent = indent_of(raw);
-                loop_depth = depth + brace_delta(raw);
-            }
-            if (lang != .python) depth += brace_delta(raw);
+            const pct: u32 = @intCast(@min(@as(u64, 100_000), bytes * 100 / smallest.?));
+            const tightest = limits.items[smallest_at.?];
+            try findings.append(allocator, .{
+                .file = outline.path,
+                .line = line_no,
+                .kind = .sized_constant,
+                .subject = try allocator.dupe(u8, sizing_key_in(t) orelse "size"),
+                .detail = try std.fmt.allocPrint(
+                    allocator,
+                    "{d} bytes is fixed. The tightest memory limit this repository declares is {s} at {s}:{d}, so the constant is {d}% of it. Nothing links them.",
+                    .{ bytes, tightest.text, tightest.file, tightest.line, pct },
+                ),
+                .evidence = try allocator.dupe(u8, t),
+                .constant_bytes = bytes,
+                .percent_of_limit = pct,
+            });
         }
     }
 
@@ -652,52 +440,6 @@ test "logic_shapes: with no declared limit there is nothing to derive from" {
     try testing.expectEqual(@as(usize, 0), report.findings.len);
 }
 
-test "logic_shapes: a query inside a loop over rows" {
-    const allocator = testing.allocator;
-    const code =
-        \\pub async fn load(ids: Vec<i64>) -> Vec<Row> {
-        \\    let mut out = Vec::new();
-        \\    for id in ids {
-        \\        let row = sqlx::query_as("SELECT * FROM t WHERE id = ?").bind(id).fetch_one(&pool).await?;
-        \\        out.push(row);
-        \\    }
-        \\    out
-        \\}
-        \\
-    ;
-    var exp = try explorer.Explorer.init(allocator);
-    defer exp.deinit();
-    _ = try exp.add_file(try one_file(allocator, "src/load.rs", .rust, code), code);
-    exp.mark_indexing_complete();
-
-    var report = try analyze(allocator, &exp);
-    defer report.deinit(allocator);
-    try testing.expectEqual(@as(usize, 1), report.findings.len);
-    try testing.expectEqual(Kind.call_in_loop, report.findings[0].kind);
-    try testing.expectEqual(@as(usize, 4), report.findings[0].line);
-    try testing.expectEqualStrings("query", report.findings[0].subject);
-}
-
-test "logic_shapes: a counted loop is not a loop over rows" {
-    const allocator = testing.allocator;
-    const code =
-        \\pub async fn warm() {
-        \\    for i in 0..8 {
-        \\        pool.execute("PRAGMA optimize").await?;
-        \\    }
-        \\}
-        \\
-    ;
-    var exp = try explorer.Explorer.init(allocator);
-    defer exp.deinit();
-    _ = try exp.add_file(try one_file(allocator, "src/warm.rs", .rust, code), code);
-    exp.mark_indexing_complete();
-
-    var report = try analyze(allocator, &exp);
-    defer report.deinit(allocator);
-    try testing.expectEqual(@as(usize, 0), report.findings.len);
-}
-
 test "logic_shapes: quantities parse to bytes" {
     try testing.expectEqual(@as(?u64, 512 * 1024 * 1024), parse_quantity("512Mi"));
     try testing.expectEqual(@as(?u64, 1024 * 1024 * 1024), parse_quantity("\"1Gi\""));
@@ -710,39 +452,4 @@ test "logic_shapes: a product folds into one constant" {
     try testing.expectEqual(@as(?u64, 268435456), sizing_constant(".pragma(\"mmap_size\", \"268435456\")"));
     // Below a mebibyte is not a memory region worth reporting.
     try testing.expectEqual(@as(?u64, null), sizing_constant("let buffer_size = 4096;"));
-}
-
-test "logic_shapes: a loop over a fixed list is not an N+1" {
-    const allocator = testing.allocator;
-    // `for table in ["tasks", "goals"]` runs twice; `for p in PROVIDERS` runs
-    // once per declared provider. Five findings on one repository were these.
-    const code =
-        \\pub async fn counts(pool: &Pool) -> Result<()> {
-        \\    for table in ["tasks", "goals"] {
-        \\        let n = sqlx::query_scalar("SELECT count(*) FROM x").fetch_one(pool).await?;
-        \\    }
-        \\    for pdef in PROVIDERS {
-        \\        let r = sqlx::query("SELECT 1").fetch_optional(pool).await?;
-        \\    }
-        \\    Ok(())
-        \\}
-        \\
-    ;
-    var exp = try explorer.Explorer.init(allocator);
-    defer exp.deinit();
-    _ = try exp.add_file(try one_file(allocator, "src/counts.rs", .rust, code), code);
-    exp.mark_indexing_complete();
-
-    var report = try analyze(allocator, &exp);
-    defer report.deinit(allocator);
-    try testing.expectEqual(@as(usize, 0), report.findings.len);
-}
-
-test "logic_shapes: a fixed list is told apart from a real collection" {
-    try testing.expect(iterates_a_fixed_list("for table in [\"tasks\", \"goals\"] {", " in "));
-    try testing.expect(iterates_a_fixed_list("for pdef in PROVIDERS {", " in "));
-    try testing.expect(iterates_a_fixed_list("for (id, status) in [", " in "));
-    try testing.expect(!iterates_a_fixed_list("for row in rows {", " in "));
-    try testing.expect(!iterates_a_fixed_list("for r in &expired {", " in "));
-    try testing.expect(!iterates_a_fixed_list("for scored in &merged {", " in "));
 }

@@ -318,6 +318,28 @@ def main():
             "        self.sessions.lock().unwrap().insert(k, v);\n"
             "    }\n"
             "}\n",
+        # A loop over rows two calls from its queries: `import_all` calls
+        # `import_triple`, which calls `insert_node` twice, which makes two
+        # round trips. No query is written on the loop's own lines.
+        "src/triples.rs":
+            "pub async fn insert_node(p: &Pool, id: &str) -> Result<()> {\n"
+            "    sqlx::query(\"INSERT INTO nodes VALUES ($1)\").bind(id).execute(p).await?;\n"
+            "    sqlx::query(\"INSERT INTO edges VALUES ($1)\").bind(id).execute(p).await?;\n"
+            "    Ok(())\n"
+            "}\n"
+            "pub async fn import_triple(p: &Pool, t: &Triple) -> Result<()> {\n"
+            "    insert_node(p, &t.subject).await?;\n"
+            "    insert_node(p, &t.object).await?;\n"
+            "    Ok(())\n"
+            "}\n",
+        "src/import.rs":
+            "use crate::triples::import_triple;\n"
+            "pub async fn import_all(p: &Pool, rows: Vec<Triple>) -> Result<()> {\n"
+            "    for row in rows {\n"
+            "        import_triple(p, &row).await?;\n"
+            "    }\n"
+            "    Ok(())\n"
+            "}\n",
         "Cargo.toml":
             "[package]\nname = \"e2e\"\nversion = \"0.1.0\"\n\n"
             "[dependencies]\nserde_json = \"1\"\nnever_used_crate = \"0.1\"\n",
@@ -362,6 +384,8 @@ def main():
         tool(23, "analyze", {"analysis": "leak_shapes"}),
         tool(24, "analyze", {"analysis": "deps"}),
         tool(25, "analyze", {"analysis": "health"}),
+        tool(26, "analyze", {"analysis": "call_cost"}),
+        tool(27, "analyze", {"analysis": "dead_code"}),
     ]
     m = rpc(ws, calls)
 
@@ -418,7 +442,8 @@ def main():
     # fault its fixture holds.
     parsed = {}
     for i, name in ((20, "spawn_scan"), (21, "field_contention"), (22, "logic_shapes"),
-                    (23, "leak_shapes"), (24, "deps"), (25, "health")):
+                    (23, "leak_shapes"), (24, "deps"), (25, "health"), (26, "call_cost"),
+                    (27, "dead_code")):
         check(i in m, f"analyze({name}) answered")
         try:
             parsed[name] = json.loads(text(m[i]))
@@ -444,6 +469,18 @@ def main():
         check(any(x["kind"] == "sized_constant" and x["constant_bytes"] == 268435456
                   and x["percent_of_limit"] == 50 for x in f),
               f"logic_shapes finds mmap_size at 50% of the declared 512Mi (got {f})")
+
+    if "call_cost" in parsed:
+        f = parsed["call_cost"].get("findings", [])
+        hit = [x for x in f if x["file"].endswith("import.rs")]
+        check(len(hit) == 1 and hit[0]["round_trips"] == 4
+              and hit[0]["sites"][0]["via"] == "import_triple → insert_node",
+              f"call_cost counts 4 round trips per row, two calls from the loop (got {f})")
+
+    if "dead_code" in parsed:
+        d = parsed["dead_code"]
+        check("unused_public_api" in d and "checked" in d,
+              f"dead_code separates unused public API from dead code (got keys {sorted(d)})")
 
     if "leak_shapes" in parsed:
         f = parsed["leak_shapes"].get("findings", [])
