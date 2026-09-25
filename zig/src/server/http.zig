@@ -513,8 +513,8 @@ pub const Server = struct {
                 } else {
                     try render_symbol_plan(w, &plan);
                 }
-            } else {
-                var plan = try plan_change.plan_file(self.allocator, self.exp, file.?);
+            } else if (try self.resolve_stored_path(w, file.?)) |stored| {
+                var plan = try plan_change.plan_file(self.allocator, self.exp, stored);
                 defer plan_change.free_file_plan(self.allocator, &plan);
                 if (want_json) {
                     try render_file_plan_json(w, &plan);
@@ -564,7 +564,10 @@ pub const Server = struct {
             }
         } else if (std.mem.eql(u8, tool, "get_outline")) {
             const path = get_string_arg(args, "path") orelse "";
-            if (self.exp.get_outline(path)) |outline| {
+            const stored = try self.resolve_stored_path(w, path);
+            if (stored == null) {
+                // resolve_path wrote the reason.
+            } else if (self.exp.get_outline(stored.?)) |outline| {
                 try w.writeAll("{\"path\":");
                 try write_json_string(w, outline.path);
                 try w.print(",\"language\":\"{s}\",\"line_count\":{d},\"byte_size\":{d},\"symbols\":[", .{
@@ -609,8 +612,11 @@ pub const Server = struct {
             try w.writeAll("]");
         } else if (std.mem.eql(u8, tool, "get_imports")) {
             const path = get_string_arg(args, "path") orelse "";
-            const ids = self.exp.get_imports(path);
-            if (ids.len == 0) {
+            const stored = try self.resolve_stored_path(w, path);
+            const ids = if (stored) |sp| self.exp.get_imports(sp) else &[_]u32{};
+            if (stored == null) {
+                // resolve_path wrote the reason.
+            } else if (ids.len == 0) {
                 try w.writeAll("No imports found.");
             } else {
                 for (ids) |fid| {
@@ -621,8 +627,11 @@ pub const Server = struct {
             }
         } else if (std.mem.eql(u8, tool, "get_imported_by")) {
             const path = get_string_arg(args, "path") orelse "";
-            const ids = self.exp.get_imported_by(path);
-            if (ids.len == 0) {
+            const stored = try self.resolve_stored_path(w, path);
+            const ids = if (stored) |sp| self.exp.get_imported_by(sp) else &[_]u32{};
+            if (stored == null) {
+                // resolve_path wrote the reason.
+            } else if (ids.len == 0) {
                 try w.writeAll("No reverse dependencies found.");
             } else {
                 for (ids) |fid| {
@@ -632,11 +641,9 @@ pub const Server = struct {
                 }
             }
         } else if (std.mem.eql(u8, tool, "get_change_impact")) {
-            const path = get_string_arg(args, "path") orelse "";
+            const path_arg = get_string_arg(args, "path") orelse "";
             const max_depth = @as(usize, @intCast(get_int_arg(args, "max_depth") orelse 10));
-            if (path.len == 0) {
-                try w.writeAll("No path provided.");
-            } else {
+            if (try self.resolve_stored_path(w, path_arg)) |path| {
                 const impact = try self.exp.get_change_impact(path, max_depth);
                 defer {
                     self.allocator.free(impact.direct);
@@ -1321,73 +1328,78 @@ pub const Server = struct {
             }
         } else if (std.mem.eql(u8, tool, "read_file")) {
             const path = get_string_arg(args, "path") orelse "";
-            if (path.len == 0) {
-                try w.writeAll("No path provided.");
-            } else {
-                const file_id = self.exp.file_map.get(path);
-                if (file_id == null) {
-                    // Try matching with ./ prefix
-                    var prefixed: [1024]u8 = undefined;
-                    const plen = std.fmt.count("./{s}", .{path});
-                    const alt = if (plen <= prefixed.len) std.fmt.bufPrint(&prefixed, "./{s}", .{path}) catch null else null;
-                    const fid = if (alt) |a| self.exp.file_map.get(a) else null;
-                    if (fid) |resolved_id| {
-                        try self.write_file_content(w, resolved_id, args);
-                    } else {
-                        try w.print("File not found in index: {s}", .{path});
-                    }
-                } else {
-                    try self.write_file_content(w, file_id.?, args);
-                }
-            }
+            if (try self.resolve_path(w, path)) |file_id| try self.write_file_content(w, file_id, args);
         } else if (std.mem.eql(u8, tool, "read_symbol")) {
             const name = get_string_arg(args, "name") orelse "";
             const path_filter = get_string_arg(args, "path");
             const context_lines = get_int_arg(args, "context") orelse 0;
+            const max_lines = get_int_arg(args, "max_lines") orelse default_symbol_lines;
             if (name.len == 0) {
                 try w.writeAll("No symbol name provided.");
             } else {
-                const results = try self.exp.find_symbol(name, 10);
-                defer self.allocator.free(results);
+                // Exact names first. The substring search stops at its limit, so
+                // an exact definition past the first ten partial matches was
+                // never considered and a longer name was read in its place.
+                const exact = try self.exp.find_symbol_exact(name);
+                defer self.allocator.free(exact);
+                const partial = if (exact.len == 0) try self.exp.find_symbol(name, 50) else &[_]explorer.SymbolResult{};
+                defer if (exact.len == 0) self.allocator.free(partial);
+                const results = if (exact.len > 0) exact else partial;
+
+                var best: ?usize = null;
+                var matching: usize = 0;
+                for (results, 0..) |r, i| {
+                    if (path_filter) |pf| {
+                        if (std.mem.indexOf(u8, r.path, pf) == null) continue;
+                    }
+                    matching += 1;
+                    if (best == null or symbol_read_rank(r.symbol.kind) < symbol_read_rank(results[best.?].symbol.kind)) best = i;
+                }
                 if (results.len == 0) {
                     try w.print("Symbol not found: {s}", .{name});
-                } else {
-                    // Find best match — prefer exact name match, then filter by path
-                    var best: ?usize = null;
-                    for (results, 0..) |r, i| {
-                        if (path_filter) |pf| {
-                            if (std.mem.indexOf(u8, r.path, pf) == null) continue;
+                } else if (best) |idx| {
+                    const r = results[idx];
+                    const fid = self.exp.file_map.get(r.path);
+                    const cached = if (fid) |f| self.exp.content_cache.get(f) else null;
+                    const content = cached orelse (if (fid) |f| self.exp.content_of(self.allocator, f) else null);
+                    defer if (cached == null) if (content) |c| self.allocator.free(c);
+                    if (content) |c| {
+                        // write_lines counts from 1, so convert the symbol's
+                        // 0-based range before widening it; feeding it the raw
+                        // range returned a window one line early, which cut the
+                        // closing brace.
+                        const first = r.symbol.start_1();
+                        const start = if (first > context_lines) first - context_lines else 1;
+                        const end = r.symbol.end_1() + context_lines;
+                        // A 1,035-line function came back whole as 66 KB. The
+                        // limit keeps one call inside a normal tool result, and
+                        // the footer names the call that reads the rest.
+                        const shown_end = if (max_lines > 0 and end - start + 1 > max_lines) start + max_lines - 1 else end;
+                        try w.print("# {s} ({s}) in {s}\n", .{ r.symbol.name, r.symbol.kind.as_str(), r.path });
+                        try self.write_lines(w, c, start, shown_end);
+                        if (shown_end < end) {
+                            try w.print("... {d} more lines to line {d}. Pass max_lines=0 for the whole symbol, or call read_file with start_line={d}.\n", .{
+                                end - shown_end, end, shown_end + 1,
+                            });
                         }
-                        if (std.mem.eql(u8, r.symbol.name, name)) {
-                            best = i;
-                            break;
-                        }
-                        if (best == null) best = i;
-                    }
-                    if (best) |idx| {
-                        const r = results[idx];
-                        const file_id = self.exp.file_map.get(r.path);
-                        if (file_id) |fid| {
-                            const content = self.exp.content_cache.get(fid);
-                            if (content) |c| {
-                                // write_lines counts from 1, so convert the
-                                // symbol's 0-based range before widening it;
-                                // feeding it the raw range returned a window
-                                // one line early, which cut the closing brace.
-                                const first = r.symbol.start_1();
-                                const start = if (first > context_lines) first - context_lines else 1;
-                                const end = r.symbol.end_1() + context_lines;
-                                try w.print("# {s} ({s}) in {s}\n", .{ r.symbol.name, r.symbol.kind.as_str(), r.path });
-                                try self.write_lines(w, c, start, end);
-                            } else {
-                                try w.print("Content not cached for: {s}", .{r.path});
+                        if (matching > 1) {
+                            try w.print("\n{d} other definitions match. Pass `path` to choose one:\n", .{matching - 1});
+                            var listed: usize = 0;
+                            for (results, 0..) |o, i| {
+                                if (i == idx) continue;
+                                if (path_filter) |pf| {
+                                    if (std.mem.indexOf(u8, o.path, pf) == null) continue;
+                                }
+                                if (listed == 8) break;
+                                try w.print("  {s}:{d} ({s} {s})\n", .{ o.path, o.symbol.start_1(), o.symbol.kind.as_str(), o.symbol.name });
+                                listed += 1;
                             }
-                        } else {
-                            try w.print("File ID not found for: {s}", .{r.path});
                         }
                     } else {
-                        try w.print("Symbol '{s}' found but not in path '{s}'", .{ name, path_filter orelse "" });
+                        try w.print("The file could not be read: {s}", .{r.path});
                     }
+                } else {
+                    try w.print("Symbol '{s}' found but not in path '{s}'", .{ name, path_filter orelse "" });
                 }
             }
         } else {
@@ -1397,11 +1409,41 @@ pub const Server = struct {
         try self.write_tool_result(writer, id, out.written(), false);
     }
 
+    /// The file a tool's `path` argument names, or null after writing why it
+    /// names none. Every file-scoped tool resolves through here: `read_file`
+    /// used an exact lookup of its own, so the workspace-relative path that
+    /// `get_outline` accepted came back from `read_file` as "File not found".
+    fn resolve_path(self: *Server, w: anytype, path: []const u8) !?u32 {
+        if (path.len == 0) {
+            try w.writeAll("No path provided.");
+            return null;
+        }
+        switch (self.exp.lookup_file(path)) {
+            .found => |id| return id,
+            .ambiguous => |n| {
+                try w.print("{d} indexed files end with {s}. Pass more of the path to name one of them.", .{ n, path });
+                return null;
+            },
+            .missing => {
+                try w.print("File not found in index: {s}", .{path});
+                return null;
+            },
+        }
+    }
+
+    /// `resolve_path`, answered with the stored path of the file.
+    fn resolve_stored_path(self: *Server, w: anytype, path: []const u8) !?[]const u8 {
+        const id = (try self.resolve_path(w, path)) orelse return null;
+        return self.exp.file_path(id);
+    }
+
     fn write_file_content(self: *Server, w: anytype, file_id: u32, args: ?std.json.Value) !void {
-        const content = self.exp.content_cache.get(file_id) orelse {
-            try w.writeAll("Content not cached for this file.");
+        const cached = self.exp.content_cache.get(file_id);
+        const content = cached orelse (self.exp.content_of(self.allocator, file_id) orelse {
+            try w.writeAll("The file could not be read.");
             return;
-        };
+        });
+        defer if (cached == null) self.allocator.free(content);
         const start_line = @as(usize, @intCast(get_int_arg(args, "start_line") orelse 1));
         const end_line_arg = get_int_arg(args, "end_line");
         const end_line: usize = if (end_line_arg) |e| @intCast(e) else std.math.maxInt(usize);
@@ -1494,7 +1536,7 @@ pub const Server = struct {
             // read_file
             "{\"name\":\"read_file\",\"description\":\"Read file contents with optional line range. Returns content with line numbers.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"File path relative to workspace root\"},\"start_line\":{\"type\":\"integer\",\"description\":\"Start line (1-based, default 1)\"},\"end_line\":{\"type\":\"integer\",\"description\":\"End line (inclusive, default: end of file)\"}},\"required\":[\"path\"]},\"annotations\":{\"readOnlyHint\":true,\"openWorldHint\":false,\"destructiveHint\":false}}",
             // read_symbol
-            "{\"name\":\"read_symbol\",\"description\":\"Read the source code of a specific symbol (function, struct, etc). Returns the symbol's code with line numbers.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\",\"description\":\"Symbol name to read\"},\"path\":{\"type\":\"string\",\"description\":\"File path to disambiguate (optional)\"},\"context\":{\"type\":\"integer\",\"description\":\"Extra context lines before/after (default 0)\"}},\"required\":[\"name\"]},\"annotations\":{\"readOnlyHint\":true,\"openWorldHint\":false,\"destructiveHint\":false}}",
+            "{\"name\":\"read_symbol\",\"description\":\"Read the source code of a specific symbol (function, struct, etc). Returns the symbol's code with line numbers.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\",\"description\":\"Symbol name to read\"},\"path\":{\"type\":\"string\",\"description\":\"File path to disambiguate (optional)\"},\"context\":{\"type\":\"integer\",\"description\":\"Extra context lines before/after (default 0)\"},\"max_lines\":{\"type\":\"integer\",\"description\":\"Most lines to return (default 300, 0 for the whole symbol)\"}},\"required\":[\"name\"]},\"annotations\":{\"readOnlyHint\":true,\"openWorldHint\":false,\"destructiveHint\":false}}",
             // get_change_impact
             "{\"name\":\"get_change_impact\",\"description\":\"Show what breaks if a file changes. Follows the full reverse dependency chain transitively.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"File path to analyze impact for\"},\"max_depth\":{\"type\":\"integer\",\"description\":\"Max traversal depth (default 10)\"}},\"required\":[\"path\"]},\"annotations\":{\"readOnlyHint\":true,\"openWorldHint\":false,\"destructiveHint\":false}}",
         };
@@ -1771,6 +1813,21 @@ pub fn uri_to_path(allocator: std.mem.Allocator, uri: []const u8) ?[]u8 {
         return null;
     }
     return allocator.realloc(out, n) catch out[0..n];
+}
+
+/// Lines `read_symbol` returns when the caller does not say.
+const default_symbol_lines: usize = 300;
+
+/// Which definition `read_symbol` reads when several share a name: the one
+/// that holds code. A struct field named `snippet` was read in place of the
+/// function `snippet` in the same file.
+fn symbol_read_rank(kind: models.SymbolKind) u8 {
+    return switch (kind) {
+        .function, .method, .@"struct", .class, .@"enum", .@"union", .trait, .interface, .impl, .type_alias, .macro, .module, .@"test" => 0,
+        .constant => 1,
+        .variable => 2,
+        else => 3,
+    };
 }
 
 fn get_string_arg(args: ?std.json.Value, key: []const u8) ?[]const u8 {

@@ -254,6 +254,8 @@ def main():
     os.makedirs(f"{ws}/src", exist_ok=True)
     os.makedirs(f"{ws}/util", exist_ok=True)
     os.makedirs(f"{ws}/deploy", exist_ok=True)
+    os.makedirs(f"{ws}/cfg/a", exist_ok=True)
+    os.makedirs(f"{ws}/cfg/b", exist_ok=True)
     # Multi-language project. Go's import yields a quote-containing symbol name.
     files = {
         "src/lib.rs":  "pub mod helper;\npub fn run(){}\n",
@@ -265,6 +267,11 @@ def main():
         "a.ts":        "import { b } from './b';\nexport function aa(){return b;}\n",
         "b.ts":        "export const b = 1;\n",
         "conf.toml":   "title = \"x\"\n[server]\nhost = \"h\"\n",
+        # Two files that share a suffix, and one function longer than the
+        # default read_symbol window.
+        "cfg/a/settings.py": "LEVEL = 1\n",
+        "cfg/b/settings.py": "LEVEL = 2\n",
+        "long.py": "def long_fn():\n" + "".join(f"    v{i} = {i}\n" for i in range(400)),
         # Fixtures for the production-cost analyses. Each one is the shape of a
         # fault measured in a real repository, reduced to the smallest source
         # that still triggers it.
@@ -332,6 +339,11 @@ def main():
         tool(7, "get_imports", {"path": "app.py"}),
         tool(8, "get_outline", {"path": "a.ts"}),
         tool(9, "get_tree", {}),
+        # File tools take the workspace-relative path the outline tools take.
+        tool(12, "read_file", {"path": "src/lib.rs"}),
+        tool(13, "read_file", {"path": "settings.py"}),
+        tool(14, "read_symbol", {"name": "long_fn"}),
+        tool(15, "read_symbol", {"name": "long_fn", "max_lines": 0}),
         # Standard MCP methods this server does not implement. A client that
         # probes them on connect — Antigravity does — waited forever for a reply
         # that never came, because the dispatch chain fell off the end instead of
@@ -377,6 +389,16 @@ def main():
     check("helpers.py" in text(m[7]), "python import resolves to helpers.py")
     check(json.loads(text(m[8])).get("symbols"), "ts outline has symbols")
     check(json.loads(text(m[9])), "get_tree returns valid JSON array")
+    check("pub fn run" in text(m.get(12, {"result": {"content": [{"text": ""}]}})),
+          f"read_file resolves a workspace-relative path (got {text(m[12])[:60]!r})" if 12 in m else "read_file answered")
+    body = text(m[13]) if 13 in m else ""
+    check("2 indexed files end with settings.py" in body,
+          f"read_file names an ambiguous suffix instead of picking a file (got {body[:80]!r})")
+    body = text(m[14]) if 14 in m else ""
+    check(body.count("\n") < 320 and "Pass max_lines=0" in body,
+          f"read_symbol stops at its default window and says how to read on (got {len(body)} bytes)")
+    body = text(m[15]) if 15 in m else ""
+    check("v399 = 399" in body, "read_symbol with max_lines=0 returns the whole symbol")
 
     # Unknown methods: an error, the right code, and the method named back so the
     # client's log says which call it was.

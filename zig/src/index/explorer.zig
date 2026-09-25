@@ -880,17 +880,31 @@ pub const Explorer = struct {
         return &self.outlines;
     }
 
-    /// Map a user-supplied path to a file id. Files are stored with their full
-    /// absolute path, but callers normally pass a workspace-relative path, so we
-    /// fall back to a '/'-boundary suffix match (e.g. "src/foo.rs" matches the
-    /// stored "/ws/src/foo.rs"). Assumes the caller holds file_lock.
-    fn find_file_id(self: *Explorer, path: []const u8) ?u32 {
-        if (path.len == 0) return null;
+    /// What a user-supplied path names in the index.
+    pub const FileLookup = union(enum) {
+        found: u32,
+        /// More than one indexed file ends with the path. Holds how many.
+        ambiguous: usize,
+        missing,
+    };
+
+    /// Map a user-supplied path to a file. Files are stored with their full
+    /// absolute path, but callers normally pass a workspace-relative path, so
+    /// this falls back to a '/'-boundary suffix match ("src/foo.rs" matches the
+    /// stored "/ws/src/foo.rs"). A suffix that several files share names none of
+    /// them: `mod.rs` used to resolve to whichever file the hash map yielded
+    /// first, and the tool then answered about that file as if it were the one
+    /// asked for. Assumes the caller holds file_lock.
+    fn lookup_file_locked(self: *Explorer, path_in: []const u8) FileLookup {
+        const path = if (std.mem.startsWith(u8, path_in, "./")) path_in[2..] else path_in;
+        if (path.len == 0) return .missing;
         // Exact match — caller passed the stored full path.
         if (self.file_map.get(path)) |id| {
-            if (self.deleted_files.get(id) == null) return id;
+            if (self.deleted_files.get(id) == null) return .{ .found = id };
         }
         // Suffix match on a path-segment boundary.
+        var match: ?u32 = null;
+        var count: usize = 0;
         var it = self.file_map.iterator();
         while (it.next()) |entry| {
             const stored = entry.key_ptr.*;
@@ -900,10 +914,29 @@ pub const Explorer = struct {
                 stored[stored.len - path.len - 1] == '/' and
                 std.mem.endsWith(u8, stored, path))
             {
-                return id;
+                match = id;
+                count += 1;
             }
         }
-        return null;
+        if (count > 1) return .{ .ambiguous = count };
+        if (match) |id| return .{ .found = id };
+        return .missing;
+    }
+
+    /// `lookup_file_locked` for callers that do not hold file_lock.
+    pub fn lookup_file(self: *Explorer, path: []const u8) FileLookup {
+        self.file_lock.lockShared();
+        defer self.file_lock.unlockShared();
+        return self.lookup_file_locked(path);
+    }
+
+    /// The file a path names, when it names exactly one. Assumes the caller
+    /// holds file_lock.
+    fn find_file_id(self: *Explorer, path: []const u8) ?u32 {
+        return switch (self.lookup_file_locked(path)) {
+            .found => |id| id,
+            .ambiguous, .missing => null,
+        };
     }
 
     pub fn get_outline(self: *Explorer, path: []const u8) ?models.FileOutline {
@@ -934,6 +967,42 @@ pub const Explorer = struct {
                     if (results.items.len >= limit) {
                         return try results.toOwnedSlice(self.allocator);
                     }
+                }
+            }
+        }
+        return try results.toOwnedSlice(self.allocator);
+    }
+
+    /// A file's content for a pass that must see every file.
+    ///
+    /// The content cache is an LRU bounded at `max_cache_bytes`, and every
+    /// analysis used to `continue` past a file it did not hold. On a tree larger
+    /// than the cache that silently dropped the evicted files from the result.
+    /// A file the cache no longer holds is read from disk instead.
+    ///
+    /// A disk read is allocated with `allocator` and is not tracked: analyses
+    /// keep slices of the content in their findings, so the bytes must live as
+    /// long as the findings do. Pass an arena that outlives them.
+    pub fn content_of(self: *Explorer, allocator: std.mem.Allocator, file_id: u32) ?[]const u8 {
+        if (self.content_cache.get(file_id)) |c| return c;
+        if (file_id >= self.files.items.len) return null;
+        if (self.deleted_files.get(file_id) != null) return null;
+        return io.readFileAlloc(allocator, self.files.items[file_id], max_fallback_read_bytes) catch null;
+    }
+
+    /// Every definition whose name is exactly `name`. Caller frees the slice.
+    pub fn find_symbol_exact(self: *Explorer, name: []const u8) ![]SymbolResult {
+        self.outline_lock.lockShared();
+        defer self.outline_lock.unlockShared();
+        var results = std.ArrayList(SymbolResult).empty;
+        errdefer results.deinit(self.allocator);
+        var it = self.outlines.iterator();
+        while (it.next()) |entry| {
+            if (self.deleted_files.get(entry.key_ptr.*) != null) continue;
+            const outline = entry.value_ptr.*;
+            for (outline.symbols) |sym| {
+                if (std.mem.eql(u8, sym.name, name)) {
+                    try results.append(self.allocator, .{ .path = outline.path, .symbol = sym });
                 }
             }
         }
