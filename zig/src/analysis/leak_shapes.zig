@@ -996,15 +996,6 @@ const spawn_calls = [_][]const u8{
     "tokio::spawn(", "thread::spawn(", "task::spawn(", "rayon::spawn(",
 };
 
-fn line_starts_loop(t: []const u8, lang: models.Language) bool {
-    const common = [_][]const u8{ "while ", "for ", "while(", "for(" };
-    for (&common) |k| {
-        if (std.mem.startsWith(u8, t, k)) return true;
-    }
-    if (lang == .python) return false;
-    return std.mem.startsWith(u8, t, "loop ") or std.mem.startsWith(u8, t, "loop{");
-}
-
 fn brace_delta(line: []const u8) isize {
     var d: isize = 0;
     var in_single = false;
@@ -1155,27 +1146,11 @@ pub fn scan(allocator: std.mem.Allocator, exp: *explorer.Explorer) ![]Finding {
         defer reported_names.deinit();
 
         var line_no: usize = 0;
-        var depth: isize = 0;
-        var loop_depth: isize = -1;
-        var loop_indent: usize = 0;
-        var in_loop = false;
         var line_it = std.mem.splitScalar(u8, content, '\n');
         while (line_it.next()) |raw| {
             line_no += 1;
             const t = trimmed_line(raw);
-            if (t.len == 0 or is_comment(t, lang)) {
-                if (lang != .python) depth += brace_delta(raw);
-                continue;
-            }
-
-            // Close a loop this line left.
-            if (in_loop) {
-                if (lang == .python) {
-                    if (indent_of(raw) <= loop_indent) in_loop = false;
-                } else if (depth < loop_depth) {
-                    in_loop = false;
-                }
-            }
+            if (t.len == 0 or is_comment(t, lang)) continue;
 
             // A deliberately given-up allocation.
             if (lang == .rust and !file_undoes_leak and contains_any(t, &leak_calls)) {
@@ -1199,8 +1174,10 @@ pub fn scan(allocator: std.mem.Allocator, exp: *explorer.Explorer) ![]Finding {
                 });
             }
 
-            // A task started in a loop that nobody keeps.
-            if (in_loop and is_detached_spawn(t)) {
+            // A task started in a loop that nobody keeps. The loop comes from
+            // the syntax tree, so a `for` in a string or a one-line loop body
+            // is read as it parses.
+            if (is_detached_spawn(t) and repeated(outline.loops, @intCast(line_no - 1), raw)) {
                 try findings.append(allocator, .{
                     .file = outline.path,
                     .line = line_no,
@@ -1230,18 +1207,22 @@ pub fn scan(allocator: std.mem.Allocator, exp: *explorer.Explorer) ![]Finding {
                     }
                 }
             }
-
-            // Open a loop this line starts.
-            if (line_starts_loop(t, lang)) {
-                in_loop = true;
-                loop_indent = indent_of(raw);
-                loop_depth = depth + brace_delta(raw);
-            }
-            if (lang != .python) depth += brace_delta(raw);
         }
     }
 
     return findings.toOwnedSlice(allocator);
+}
+
+/// Whether a loop repeats the spawn call on the 0-based `line`.
+fn repeated(loops: []const models.Loop, line: u32, raw: []const u8) bool {
+    var col: usize = raw.len;
+    for (&spawn_calls) |c| {
+        if (std.mem.indexOf(u8, raw, c)) |at| col = @min(col, at);
+    }
+    for (loops) |l| {
+        if (l.repeats(line, @intCast(col))) return true;
+    }
+    return false;
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -1408,7 +1389,10 @@ test "leak_shapes: a detached spawn in a loop, and a kept handle" {
     ;
     var exp = try explorer.Explorer.init(allocator);
     defer exp.deinit();
-    _ = try exp.add_file(try one_file(allocator, "src/fan.rs", .rust, src), src);
+    const treesitter = @import("../parser/treesitter.zig");
+    var parser = try treesitter.Parser.init(allocator);
+    defer parser.deinit();
+    _ = try exp.add_file(try parser.parse_source("src/fan.rs", .rust, src), src);
     exp.mark_indexing_complete();
 
     const findings = try scan(allocator, &exp);
