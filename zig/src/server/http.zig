@@ -1889,13 +1889,16 @@ const default_symbol_lines: usize = 300;
 
 /// Which definition `read_symbol` reads when several share a name: the one
 /// that holds code. A struct field named `snippet` was read in place of the
-/// function `snippet` in the same file.
+/// function `snippet` in the same file, and the one-line declaration
+/// `mod spawn_agent;` in place of the method `spawn_agent`.
 fn symbol_read_rank(kind: models.SymbolKind) u8 {
     return switch (kind) {
-        .function, .method, .@"struct", .class, .@"enum", .@"union", .trait, .interface, .impl, .type_alias, .macro, .module, .@"test" => 0,
-        .constant => 1,
-        .variable => 2,
-        else => 3,
+        .function, .method, .@"test" => 0,
+        .@"struct", .class, .@"enum", .@"union", .trait, .interface, .impl, .type_alias, .macro => 1,
+        .module => 2,
+        .constant => 3,
+        .variable => 4,
+        else => 5,
     };
 }
 
