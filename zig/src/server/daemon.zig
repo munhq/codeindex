@@ -116,6 +116,7 @@ pub const Daemon = struct {
             monitor = std.Thread.spawn(.{}, idle_monitor, .{self}) catch null;
 
         while (self.running.load(.acquire)) {
+            if (!self.wait_for_client()) break;
             const stream = self.server.accept(io.io()) catch |err| switch (err) {
                 // `shutdown` on the listening socket is how `stop` cancels this
                 // blocking accept; both spellings mean the same thing here.
@@ -164,6 +165,27 @@ pub const Daemon = struct {
         }
     }
 
+    /// Wait until a client is waiting to be accepted, or until `stop` lowers
+    /// `running`. False means stop.
+    ///
+    /// `stop` used to wake the blocking `accept` only by connecting to the
+    /// daemon's own socket file. When that file was gone — a cleared runtime
+    /// directory, another daemon replacing it — the connect failed, `accept`
+    /// never returned, and the daemon outlived its idle time without end: five
+    /// daemons with a 3-second idle setting still ran 18 minutes later. The
+    /// accept now waits in `poll` with a timeout, so `running` is seen within a
+    /// second either way. Windows keeps the connect: its socket lives under
+    /// LOCALAPPDATA, and `std.posix.poll` does not exist there.
+    fn wait_for_client(self: *Daemon) bool {
+        if (comptime builtin.os.tag == .windows) return self.running.load(.acquire);
+        var fds = [_]std.posix.pollfd{.{ .fd = self.server.socket.handle, .events = std.posix.POLL.IN, .revents = 0 }};
+        while (self.running.load(.acquire)) {
+            const ready = std.posix.poll(&fds, 1000) catch return true;
+            if (ready > 0) return self.running.load(.acquire);
+        }
+        return false;
+    }
+
     /// Retire the daemon once nothing has been connected for `idle_exit_secs`.
     ///
     /// Without this every workspace a person ever opened would keep a resident
@@ -175,8 +197,12 @@ pub const Daemon = struct {
             io.sleep(poll_ns);
             if (!self.running.load(.acquire)) break;
             if (self.live.load(.acquire) > 0) continue;
+            // A daemon whose socket file is gone cannot be reached by any new
+            // session, which starts a daemon of its own instead. Waiting out
+            // the idle time only holds the index in memory for nobody.
+            const unreachable_now = io.stampFile(self.sock_path) == null;
             const idle_ms = io.milliTimestamp() - self.idle_since_ms.load(.acquire);
-            if (idle_ms < self.idle_exit_secs * std.time.ms_per_s) continue;
+            if (!unreachable_now and idle_ms < self.idle_exit_secs * std.time.ms_per_s) continue;
             self.stop();
             return;
         }
