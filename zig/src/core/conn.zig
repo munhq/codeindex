@@ -51,20 +51,26 @@ pub const Conn = union(enum) {
             .stdio => return io.readSome(io.stdin(), buffer),
             .socket => |s| {
                 const r = &s.r.interface;
-                // Anything the Reader already holds is the answer; `readVec`
-                // goes to the socket and would leave it stranded.
-                const held = r.buffered();
-                if (held.len > 0) {
-                    const n = @min(buffer.len, held.len);
-                    @memcpy(buffer[0..n], held[0..n]);
-                    r.toss(n);
-                    return n;
+                while (true) {
+                    // Anything the Reader already holds is the answer; `readVec`
+                    // goes to the socket and would leave it stranded.
+                    const held = r.buffered();
+                    if (held.len > 0) {
+                        const n = @min(buffer.len, held.len);
+                        @memcpy(buffer[0..n], held[0..n]);
+                        r.toss(n);
+                        return n;
+                    }
+                    var data: [1][]u8 = .{buffer};
+                    const n = r.readVec(&data) catch |err| switch (err) {
+                        error.EndOfStream => return 0,
+                        else => return err,
+                    };
+                    // Zero is not the end of the stream: the bytes went into
+                    // the Reader's buffer, and the loop takes them next pass.
+                    // Returned as is, the MCP loop read it as its client gone.
+                    if (n > 0) return n;
                 }
-                var data: [1][]u8 = .{buffer};
-                return r.readVec(&data) catch |err| switch (err) {
-                    error.EndOfStream => 0,
-                    else => err,
-                };
             },
         }
     }

@@ -21,16 +21,29 @@ const Pump = struct {
 };
 
 /// Daemon -> our stdout. Runs on its own thread; the caller pumps the other way.
+///
+/// What the reader already holds goes out before the socket is read again.
+/// `readVec` fills `chunk` and leaves the rest of a large answer in the reader's
+/// own buffer, and on the next pass it copies that rest and then waits on the
+/// socket for more before returning. No more comes until the client sends its
+/// next request, so an answer over 64 KiB sat in the proxy while the client
+/// waited for it: a 66 KB `read_symbol` took over 120 s in a live session.
+/// A zero from `readVec` is not the end of the stream either; `EndOfStream` is.
 fn pump_out(ctx: *Pump) void {
     var buf: [64 * 1024]u8 = undefined;
     var r = ctx.stream.reader(io.io(), &buf);
     var chunk: [64 * 1024]u8 = undefined;
     const out = io.stdout();
     while (!ctx.done.load(.acquire)) {
+        const held = r.interface.buffered();
+        if (held.len > 0) {
+            io.writeAll(out, held) catch break;
+            r.interface.toss(held.len);
+            continue;
+        }
         var data: [1][]u8 = .{&chunk};
         const n = r.interface.readVec(&data) catch break;
-        if (n == 0) break;
-        io.writeAll(out, chunk[0..n]) catch break;
+        if (n > 0) io.writeAll(out, chunk[0..n]) catch break;
     }
     ctx.done.store(true, .release);
 }

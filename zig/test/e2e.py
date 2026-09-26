@@ -10,6 +10,7 @@ across multiple languages, including symbol names that contain quotes (the Go
 Usage:  python3 test/e2e.py [path-to-codeindex]
 Exits non-zero on any failure. Wired into the build as `zig build e2e`.
 """
+import glob
 import json
 import os
 import pathlib
@@ -195,6 +196,83 @@ def dialogue(cwd, roots, calls, env_extra=None, settle=4.0):
     return msgs, bool(asked)
 
 
+def open_session_answer(ws, call, wait=20.0):
+    """One call through `--workspace` (so through the daemon and the proxy),
+    with stdin left open the way a client leaves it. Returns the tool text, or
+    "" when no answer arrived within `wait` seconds."""
+    import threading
+    p = subprocess.Popen([BIN, "--mcp", "--workspace", ws], stdin=subprocess.PIPE,
+                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=server_env())
+    got = {}
+
+    def reader():
+        buf = b""
+        while True:
+            chunk = p.stdout.read1(1 << 20)
+            if not chunk:
+                return
+            buf += chunk
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                m = json.loads(line)
+                if "id" in m:
+                    got[m["id"]] = m
+
+    threading.Thread(target=reader, daemon=True).start()
+    for msg in ({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}, call):
+        p.stdin.write((json.dumps(msg) + "\n").encode())
+        p.stdin.flush()
+    deadline = time.time() + wait
+    while time.time() < deadline and call["id"] not in got:
+        time.sleep(0.1)
+    p.kill()
+    p.wait()
+    return text(got[call["id"]]) if call["id"] in got else ""
+
+
+def daemon_without_socket():
+    """A daemon whose socket file is removed must still retire. It woke its own
+    blocking accept only through that file, so a cleared runtime directory left
+    it running without end. Reads /proc, so Linux only."""
+    if not os.path.isdir("/proc/self"):
+        return
+    print("\n-- a daemon whose socket file is gone still retires --")
+    proj = tempfile.mkdtemp(prefix="codeindex_e2e_orphan_")
+    os.makedirs(f"{proj}/.git", exist_ok=True)
+    with open(f"{proj}/a.py", "w") as f:
+        f.write("def a():\n    pass\n")
+    run = tempfile.mkdtemp(prefix="codeindex_e2e_run_")
+    env = server_env()
+    env["XDG_RUNTIME_DIR"] = run
+    p = subprocess.Popen([BIN, "--mcp", "--workspace", proj], stdin=subprocess.PIPE,
+                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env)
+    p.communicate((json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}) + "\n").encode(), timeout=60)
+
+    def daemons():
+        found = []
+        for pid in os.listdir("/proc"):
+            if not pid.isdigit():
+                continue
+            try:
+                args = open(f"/proc/{pid}/cmdline", "rb").read().split(b"\0")
+            except OSError:
+                continue
+            if b"--daemon" in args and proj.encode() in args:
+                found.append(pid)
+        return found
+
+    check(len(daemons()) == 1, f"the session started a daemon ({len(daemons())})")
+    for sock in glob.glob(f"{run}/**/*.sock", recursive=True):
+        os.remove(sock)
+    deadline = time.time() + int(DAEMON_IDLE_SECS) + DAEMON_POLL_SECS + 10
+    while time.time() < deadline and daemons():
+        time.sleep(0.5)
+    left = daemons()
+    check(not left, f"the daemon retired after its socket file was removed ({len(left)} left)")
+    for pid in left:
+        os.kill(int(pid), 9)
+
+
 def workspace_recovery():
     """The launch directory is not always the project, and used to be the end of
     the story: the server refused, every tool answered "No results", and the
@@ -260,6 +338,7 @@ def workspace_recovery():
 def main():
     ws = tempfile.mkdtemp(prefix="codeindex_e2e_")
     os.makedirs(f"{ws}/src", exist_ok=True)
+    os.makedirs(f"{ws}/src/tools", exist_ok=True)
     os.makedirs(f"{ws}/util", exist_ok=True)
     os.makedirs(f"{ws}/deploy", exist_ok=True)
     os.makedirs(f"{ws}/cfg/a", exist_ok=True)
@@ -269,6 +348,9 @@ def main():
     files = {
         "src/lib.rs":  "pub mod helper;\npub fn run(){}\n",
         "src/helper.rs": "pub fn help(){}\n",
+        # `mod runner;` declares a module with the name of a method elsewhere.
+        "src/tools.rs": "pub mod runner;\n",
+        "src/tools/runner.rs": "pub struct R;\nimpl R {\n    pub fn runner(&self) -> u32 {\n        7\n    }\n}\n",
         "main.go":     'package main\nimport "ex.com/m/util"\nfunc Main(){ util.Do() }\n',
         "util/util.go": "package util\nfunc Do(){}\n",
         "app.py":      "from helpers import thing\ndef run():\n    pass\n",
@@ -281,6 +363,9 @@ def main():
         "cfg/a/settings.py": "LEVEL = 1\n",
         "cfg/b/settings.py": "LEVEL = 2\n",
         "long.py": "def long_fn():\n" + "".join(f"    v{i} = {i}\n" for i in range(400)),
+        # A file whose read_file answer passes 64 KiB, the size of the proxy's
+        # read buffer. The answer came back cut, or never.
+        "big.py": "".join(f"value_{i:05d} = {i}  # {'x' * 40}\n" for i in range(1500)),
         # Fixtures for the production-cost analyses. Each one is the shape of a
         # fault measured in a real repository, reduced to the smallest source
         # that still triggers it.
@@ -390,6 +475,9 @@ def main():
         tool(14, "read_symbol", {"name": "long_fn"}),
         tool(15, "read_symbol", {"name": "long_fn", "max_lines": 0}),
         tool(16, "find_callers", {"name": "insert_node"}),
+        tool(17, "read_file", {"path": "big.py"}),
+        tool(18, "status", {}),
+        tool(19, "read_symbol", {"name": "runner"}),
         # Standard MCP methods this server does not implement. A client that
         # probes them on connect — Antigravity does — waited forever for a reply
         # that never came, because the dispatch chain fell off the end instead of
@@ -448,6 +536,13 @@ def main():
           f"read_symbol stops at its default window and says how to read on (got {len(body)} bytes)")
     body = text(m[15]) if 15 in m else ""
     check("v399 = 399" in body, "read_symbol with max_lines=0 returns the whole symbol")
+    body = text(m[17]) if 17 in m else ""
+    check(len(body) > 65536 and "value_01499 = 1499" in body,
+          f"a read_file answer over 64 KiB arrives whole through the daemon (got {len(body)} bytes)")
+    check(18 in m, "the session still answers after the large reply")
+    body = text(m[19]) if 19 in m else ""
+    check("(method)" in body and "7" in body,
+          f"read_symbol reads the method, not the one-line module declaration (got {body[:80]!r})")
     # `insert_node` is called on lines 7 and 8 of src/triples.rs. The answer
     # used to be one line late.
     body = text(m[16]) if 16 in m else ""
@@ -535,7 +630,16 @@ def main():
         check(any(x["name"] == "never_used_crate" for x in d.get("unreferenced", [])),
               f"deps finds the unreferenced crate (got {d.get('unreferenced')})")
 
+    # The batch above closes stdin after the last request, which flushes the
+    # proxy. A real client keeps stdin open and waits: an answer over 64 KiB
+    # sat in the proxy's reader buffer until the next request arrived.
+    print("\n-- a large answer with stdin open --")
+    body = open_session_answer(ws, tool(40, "read_file", {"path": "big.py"}))
+    check(len(body) > 65536 and "value_01499 = 1499" in body,
+          f"an answer over 64 KiB arrives while the session stays open (got {len(body)} bytes)")
+
     workspace_recovery()
+    daemon_without_socket()
 
     await_daemon_exit()
 
