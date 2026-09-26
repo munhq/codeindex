@@ -378,6 +378,41 @@ fn collect_kubernetes(a: std.mem.Allocator, path: []const u8, docs: []std.ArrayL
     }
 }
 
+/// A Helm template with its `{{/* … */}}` comments blanked and each line
+/// that holds only template control (`{{- if … }}`, `{{ end }}`) emptied. Line
+/// numbers stay those of the file.
+fn strip_go_template(a: std.mem.Allocator, content: []const u8) ![]const u8 {
+    const out = try a.dupe(u8, content);
+    // Comments, which can span lines.
+    var pos: usize = 0;
+    while (std.mem.indexOfPos(u8, out, pos, "{{")) |open| {
+        var body = open + 2;
+        if (body < out.len and out[body] == '-') body += 1;
+        while (body < out.len and out[body] == ' ') body += 1;
+        if (!std.mem.startsWith(u8, out[body..], "/*")) {
+            pos = open + 2;
+            continue;
+        }
+        const close = std.mem.indexOfPos(u8, out, body, "*/") orelse break;
+        const end = (std.mem.indexOfPos(u8, out, close, "}}") orelse break) + 2;
+        for (out[open..end]) |*c| {
+            if (c.* != '\n') c.* = ' ';
+        }
+        pos = end;
+    }
+    // Control lines.
+    var line_start: usize = 0;
+    while (line_start < out.len) {
+        const line_end = std.mem.indexOfScalarPos(u8, out, line_start, '\n') orelse out.len;
+        const t = std.mem.trim(u8, out[line_start..line_end], " \t\r");
+        if (std.mem.startsWith(u8, t, "{{") and std.mem.endsWith(u8, t, "}}")) {
+            for (out[line_start..line_end]) |*c| c.* = ' ';
+        }
+        line_start = line_end + 1;
+    }
+    return out;
+}
+
 fn is_compose_file(base: []const u8) bool {
     return (std.mem.startsWith(u8, base, "docker-compose") or std.mem.startsWith(u8, base, "compose")) and
         (std.mem.endsWith(u8, base, ".yml") or std.mem.endsWith(u8, base, ".yaml"));
@@ -530,9 +565,12 @@ pub fn find(allocator: std.mem.Allocator, exp: *explorer.Explorer) !Units {
         const content = exp.content_of(a, file_id) orelse continue;
 
         if (is_yaml) {
-            // Templates hold Go template syntax, which is not YAML to read.
-            if (std.mem.indexOf(u8, path, "/templates/") != null) continue;
-            const docs = try read_yaml(a, content);
+            // A Helm template is YAML with Go template syntax in it. The
+            // comments and control lines go; a `{{ .Values.x }}` value stays a
+            // string that states no number.
+            const in_templates = std.mem.indexOf(u8, path, "/templates/") != null;
+            const yaml = if (in_templates) try strip_go_template(a, content) else content;
+            const docs = try read_yaml(a, yaml);
             if (is_compose_file(base)) {
                 try collect_compose(a, path, docs, &units);
             } else if (std.mem.eql(u8, base, "values.yaml") and chart_dirs.contains(dir)) {
@@ -792,6 +830,37 @@ test "deploy_units: a merge key brings an anchored build, and a prefixed image f
         if (std.mem.eql(u8, u.name, "app")) try testing.expectEqualStrings("/ws", u.contexts.items[0]);
         if (std.mem.eql(u8, u.name, "tts")) try testing.expectEqualStrings("/ws/docker/piper-tts", u.contexts.items[0]);
     }
+}
+
+test "deploy_units: a pooler in a Helm template is read" {
+    var exp = try explorer.Explorer.init(testing.allocator);
+    defer exp.deinit();
+    try add_file(&exp, "/ws/charts/postgresql/Chart.yaml", .yaml, "name: postgresql\n");
+    try add_file(&exp, "/ws/charts/postgresql/templates/pooler.yaml", .yaml,
+        \\{{/*
+        \\CNPG Pooler — pgbouncer in front of the cluster: 1000 virtual clients.
+        \\*/}}
+        \\{{- if .Values.pooler.enabled }}
+        \\apiVersion: postgresql.cnpg.io/v1
+        \\kind: Pooler
+        \\metadata:
+        \\  name: postgresql-pooler-rw
+        \\  namespace: {{ .Release.Namespace }}
+        \\spec:
+        \\  instances: 2
+        \\  pgbouncer:
+        \\    parameters:
+        \\      max_client_conn: "1000"
+        \\{{- end }}
+        \\
+    );
+    exp.mark_indexing_complete();
+    var units = try find(testing.allocator, &exp);
+    defer units.deinit();
+    try testing.expectEqual(@as(usize, 1), units.providers.items.len);
+    try testing.expectEqualStrings("postgresql-pooler-rw", units.providers.items[0].name);
+    try testing.expectEqual(@as(u64, 2000), units.providers.items[0].capacity);
+    try testing.expectEqual(@as(usize, 14), units.providers.items[0].at.line);
 }
 
 test "deploy_units: a Compose service builds its context, and a pooler states its capacity" {
