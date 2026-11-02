@@ -335,6 +335,91 @@ def workspace_recovery():
           f"      status   : {st!r}")
 
 
+def session_moves_to_another_checkout():
+    """An agent starts in one checkout and works in another: a second worktree,
+    or a work folder with a `.desk-work` marker and no `.git`. The daemon of the
+    first checkout serves other sessions and must not re-point, so the session
+    itself moves to the daemon of the folder it names."""
+    import threading
+    print("\n-- a session moves to the daemon of another checkout --")
+    first = tempfile.mkdtemp(prefix="codeindex_e2e_first_")
+    os.makedirs(f"{first}/.git", exist_ok=True)
+    with open(f"{first}/README.md", "w") as f:
+        f.write("stub\n")
+    work = tempfile.mkdtemp(prefix="codeindex_e2e_work_")
+    os.makedirs(f"{work}/.desk-work", exist_ok=True)  # the only marker it has
+    os.makedirs(f"{work}/src", exist_ok=True)
+    with open(f"{work}/src/engine.py", "w") as f:
+        f.write("def build_block(txs):\n    return list(txs)\n")
+
+    p = subprocess.Popen([BIN, "--mcp", "--workspace", first],
+                         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                         stderr=subprocess.DEVNULL, text=True, encoding="utf-8",
+                         bufsize=1, env=server_env())
+    msgs, extra = {}, []
+
+    def reader():
+        for line in p.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                m = json.loads(line)
+            except json.JSONDecodeError as e:
+                failures.append(f"non-JSON line on stdout: {line[:80]!r} ({e})")
+                continue
+            if "id" in m:
+                if m["id"] in msgs:
+                    extra.append(m)
+                msgs[m["id"]] = m
+
+    threading.Thread(target=reader, daemon=True).start()
+
+    def send(obj):
+        p.stdin.write(json.dumps(obj) + "\n")
+        p.stdin.flush()
+
+    def wait_for(i, secs=60):
+        deadline = time.time() + secs
+        while time.time() < deadline and i not in msgs:
+            time.sleep(0.1)
+        return msgs.get(i)
+
+    send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+          "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                     "clientInfo": {"name": "e2e", "version": "0"}}})
+    send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+    wait_for(1)
+    send(tool(2, "find_symbol", {"name": "build_block"}))
+    before = wait_for(2)
+    check(before is not None and "engine.py" not in text(before),
+          "the first checkout does not know the symbol of the work folder")
+
+    # A subfolder, as an agent passes it: the relay resolves the project root.
+    send(tool(3, "index_workspace", {"path": f"{work}/src"}))
+    moved = wait_for(3)
+    body = text(moved) if moved else ""
+    check(moved is not None and not moved["result"].get("isError"),
+          f"index_workspace on another checkout is not refused (got {body!r})")
+    send(tool(4, "find_symbol", {"name": "build_block"}))
+    found = wait_for(4)
+    check(found is not None and "engine.py" in text(found),
+          f"later calls answer from the work folder (got {text(found) if found else None!r})")
+    send(tool(5, "status", {}))
+    st = wait_for(5)
+    st = json.loads(text(st)) if st else {}
+    check(os.path.realpath(st.get("workspace", "")) == os.path.realpath(work),
+          f"status names the work folder (got {st.get('workspace')!r})")
+    check(not extra, f"the replayed handshake sent the client no second answer (got {extra})")
+
+    try:
+        p.stdin.close()
+        p.wait(timeout=10)
+    except Exception:
+        p.kill()
+    check(p.returncode == 0, f"the session ends cleanly after the move (exit {p.returncode})")
+
+
 def main():
     ws = tempfile.mkdtemp(prefix="codeindex_e2e_")
     os.makedirs(f"{ws}/src", exist_ok=True)
@@ -639,6 +724,7 @@ def main():
           f"an answer over 64 KiB arrives while the session stays open (got {len(body)} bytes)")
 
     workspace_recovery()
+    session_moves_to_another_checkout()
     daemon_without_socket()
 
     await_daemon_exit()

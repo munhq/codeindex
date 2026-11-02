@@ -32,6 +32,9 @@ const project_markers = [_][]const u8{
     ".git",       "build.zig",      "package.json", "go.mod",
     "Cargo.toml", "pyproject.toml", "deno.json",    "pom.xml",
     ".hg",        ".svn",
+    // The root of a work folder that a checkout tool writes outside git. It has
+    // no `.git`, and a repository without a build file has no other marker.
+              ".desk-work",
 };
 
 /// Why a candidate directory is not a workspace, or null when it is usable.
@@ -380,6 +383,56 @@ fn spawn_daemon(
     _ = &child;
 }
 
+/// A connection to the daemon of `workspace_abs`, started when none runs, or
+/// null when there is no daemon to be had.
+fn connect_daemon(
+    allocator: std.mem.Allocator,
+    environ: std.process.Environ,
+    exe: ?[]const u8,
+    workspace_abs: []const u8,
+    cfg: config.Config,
+) ?proxy.net.Stream {
+    const p = ipc.paths(allocator, workspace_abs, VERSION) catch return null;
+    defer p.deinit(allocator);
+
+    if (ipc.connect(p.sock)) |stream| return stream;
+
+    const exe_path = exe orelse return null;
+    spawn_daemon(allocator, environ, exe_path, workspace_abs, p.sock, p.log, cfg) catch return null;
+
+    // The daemon binds its socket before it parses anything, so this waits for
+    // a process to start, never for a tree to be indexed.
+    var waited_ms: u64 = 0;
+    while (waited_ms < 10 * std.time.ms_per_s) {
+        io.sleep(50 * std.time.ns_per_ms);
+        waited_ms += 50;
+        if (ipc.connect(p.sock)) |stream| return stream;
+    }
+    return null;
+}
+
+/// What the relay needs to move a session to another project's daemon.
+const SwitchCtx = struct {
+    allocator: std.mem.Allocator,
+    environ: std.process.Environ,
+    exe: ?[]const u8,
+    cfg: config.Config,
+
+    fn resolve(ctx_any: *anyopaque, gpa: std.mem.Allocator, path: []const u8) ?[]u8 {
+        _ = ctx_any;
+        const root = usable_project_root(gpa, path) orelse return null;
+        io.normalizeKey(root);
+        return root;
+    }
+
+    fn connect(ctx_any: *anyopaque, root: []const u8) ?proxy.net.Stream {
+        const ctx: *SwitchCtx = @ptrCast(@alignCast(ctx_any));
+        var cfg = ctx.cfg;
+        cfg.workspace_root = root;
+        return connect_daemon(ctx.allocator, ctx.environ, ctx.exe, root, cfg);
+    }
+};
+
 /// Serve this session from the workspace's daemon instead of indexing here.
 ///
 /// Returns true when the whole session was served over the socket. False means
@@ -393,29 +446,11 @@ fn attach_to_daemon(
     workspace_abs: []const u8,
     cfg: config.Config,
 ) bool {
-    const p = ipc.paths(allocator, workspace_abs, VERSION) catch return false;
-    defer p.deinit(allocator);
-
-    if (ipc.connect(p.sock)) |stream| {
-        proxy.run(stream) catch {};
-        return true;
-    }
-
-    const exe_path = exe orelse return false;
-    spawn_daemon(allocator, environ, exe_path, workspace_abs, p.sock, p.log, cfg) catch return false;
-
-    // The daemon binds its socket before it parses anything, so this waits for
-    // a process to start, never for a tree to be indexed.
-    var waited_ms: u64 = 0;
-    while (waited_ms < 10 * std.time.ms_per_s) {
-        io.sleep(50 * std.time.ns_per_ms);
-        waited_ms += 50;
-        if (ipc.connect(p.sock)) |stream| {
-            proxy.run(stream) catch {};
-            return true;
-        }
-    }
-    return false;
+    const stream = connect_daemon(allocator, environ, exe, workspace_abs, cfg) orelse return false;
+    var sw_ctx = SwitchCtx{ .allocator = allocator, .environ = environ, .exe = exe, .cfg = cfg };
+    const sw = proxy.Switcher{ .ctx = &sw_ctx, .resolve = SwitchCtx.resolve, .connect = SwitchCtx.connect };
+    proxy.run(allocator, stream, workspace_abs, sw) catch {};
+    return true;
 }
 
 pub fn main(init: std.process.Init.Minimal) !void {
