@@ -24,6 +24,7 @@
 
 const std = @import("std");
 const explorer = @import("../index/explorer.zig");
+const filter_mod = @import("../core/filter.zig");
 const models = @import("../core/models.zig");
 
 pub const Shape = enum {
@@ -117,7 +118,12 @@ pub fn free_findings(allocator: std.mem.Allocator, findings: []Finding) void {
 /// only grows matters in a process that runs long enough for the growth to
 /// matter, and a script accumulates into a list and then exits. Six such
 /// accumulators in `scripts/*.py` were the whole output of a self-scan.
-fn is_excluded_path(path: []const u8) bool {
+///
+/// `root` is the workspace root, and only the part of `path` below it counts.
+/// Index keys are absolute, and a workspace under `/srv/build/…` or
+/// `/home/user/test/…` had every file excluded by a folder above the project.
+fn is_excluded_path(root: []const u8, abs_path: []const u8) bool {
+    const path = filter_mod.below_root(root, abs_path);
     const dirs = [_][]const u8{
         "test",         "tests",  "spec",   "benches",  "bench",    "examples", "example",
         "node_modules", "vendor", "target", "testdata", "fixtures", "scripts",  "script",
@@ -1027,6 +1033,7 @@ fn is_detached_spawn(t: []const u8) bool {
 fn scan_struct_fields(
     allocator: std.mem.Allocator,
     exp: *explorer.Explorer,
+    root: []const u8,
     findings: *std.ArrayList(Finding),
 ) !void {
     var fields = std.ArrayList(FieldDecl).empty;
@@ -1037,7 +1044,7 @@ fn scan_struct_fields(
         const file_id = entry.key_ptr.*;
         if (exp.deleted_files.get(file_id) != null) continue;
         const outline = entry.value_ptr.*;
-        if (is_excluded_path(outline.path)) continue;
+        if (is_excluded_path(root, outline.path)) continue;
         switch (outline.language) {
             .rust, .typescript, .javascript, .python, .go => {},
             else => continue,
@@ -1102,7 +1109,8 @@ fn scan_struct_fields(
     }
 }
 
-pub fn scan(allocator: std.mem.Allocator, exp: *explorer.Explorer) ![]Finding {
+/// `root` is the workspace root of the index; "" when the keys are relative.
+pub fn scan(allocator: std.mem.Allocator, exp: *explorer.Explorer, root: []const u8) ![]Finding {
     var findings = std.ArrayList(Finding).empty;
     errdefer {
         for (findings.items) |f| {
@@ -1112,14 +1120,14 @@ pub fn scan(allocator: std.mem.Allocator, exp: *explorer.Explorer) ![]Finding {
         findings.deinit(allocator);
     }
 
-    try scan_struct_fields(allocator, exp, &findings);
+    try scan_struct_fields(allocator, exp, root, &findings);
 
     var it = exp.outlines.iterator();
     while (it.next()) |entry| {
         const file_id = entry.key_ptr.*;
         if (exp.deleted_files.get(file_id) != null) continue;
         const outline = entry.value_ptr.*;
-        if (is_excluded_path(outline.path)) continue;
+        if (is_excluded_path(root, outline.path)) continue;
         const lang = outline.language;
         switch (lang) {
             .rust, .typescript, .javascript, .python, .go => {},
@@ -1236,7 +1244,7 @@ test "leak_shapes: a static map that grows and never shrinks" {
     _ = try exp.add_file(try one_file(allocator, "src/seen.rs", .rust, src), src);
     exp.mark_indexing_complete();
 
-    const findings = try scan(allocator, &exp);
+    const findings = try scan(allocator, &exp, "");
     defer free_findings(allocator, findings);
     try testing.expectEqual(@as(usize, 1), findings.len);
     try testing.expectEqual(Shape.growing_container, findings[0].shape);
@@ -1263,7 +1271,7 @@ test "leak_shapes: one removal clears the shape" {
     _ = try exp.add_file(try one_file(allocator, "src/seen.rs", .rust, src), src);
     exp.mark_indexing_complete();
 
-    const findings = try scan(allocator, &exp);
+    const findings = try scan(allocator, &exp, "");
     defer free_findings(allocator, findings);
     try testing.expectEqual(@as(usize, 0), findings.len);
 }
@@ -1283,7 +1291,7 @@ test "leak_shapes: a bounded cache is not a finding" {
     _ = try exp.add_file(try one_file(allocator, "src/cache.rs", .rust, src), src);
     exp.mark_indexing_complete();
 
-    const findings = try scan(allocator, &exp);
+    const findings = try scan(allocator, &exp, "");
     defer free_findings(allocator, findings);
     try testing.expectEqual(@as(usize, 0), findings.len);
 }
@@ -1306,7 +1314,7 @@ test "leak_shapes: a doc comment does not bound a container" {
     _ = try exp.add_file(try one_file(allocator, "src/probe.rs", .rust, src), src);
     exp.mark_indexing_complete();
 
-    const findings = try scan(allocator, &exp);
+    const findings = try scan(allocator, &exp, "");
     defer free_findings(allocator, findings);
     try testing.expectEqual(@as(usize, 1), findings.len);
     try testing.expectEqualStrings("SEEN", findings[0].subject.?);
@@ -1327,7 +1335,7 @@ test "leak_shapes: an unbounded cache is named as one" {
     _ = try exp.add_file(try one_file(allocator, "src/cache.rs", .rust, src), src);
     exp.mark_indexing_complete();
 
-    const findings = try scan(allocator, &exp);
+    const findings = try scan(allocator, &exp, "");
     defer free_findings(allocator, findings);
     try testing.expectEqual(@as(usize, 1), findings.len);
     try testing.expectEqual(Shape.unbounded_cache, findings[0].shape);
@@ -1344,7 +1352,7 @@ test "leak_shapes: Box::leak, and the same file taking the pointer back" {
     _ = try exp.add_file(try one_file(allocator, "src/roundtrip.rs", .rust, returns), returns);
     exp.mark_indexing_complete();
 
-    const findings = try scan(allocator, &exp);
+    const findings = try scan(allocator, &exp, "");
     defer free_findings(allocator, findings);
     try testing.expectEqual(@as(usize, 1), findings.len);
     try testing.expectEqual(Shape.leaked_allocation, findings[0].shape);
@@ -1376,7 +1384,7 @@ test "leak_shapes: a detached spawn in a loop, and a kept handle" {
     _ = try exp.add_file(try parser.parse_source("src/fan.rs", .rust, src), src);
     exp.mark_indexing_complete();
 
-    const findings = try scan(allocator, &exp);
+    const findings = try scan(allocator, &exp, "");
     defer free_findings(allocator, findings);
     try testing.expectEqual(@as(usize, 1), findings.len);
     try testing.expectEqual(Shape.detached_spawn_in_loop, findings[0].shape);
@@ -1391,7 +1399,7 @@ test "leak_shapes: an unbounded channel construction" {
     _ = try exp.add_file(try one_file(allocator, "src/wire.rs", .rust, src), src);
     exp.mark_indexing_complete();
 
-    const findings = try scan(allocator, &exp);
+    const findings = try scan(allocator, &exp, "");
     defer free_findings(allocator, findings);
     try testing.expectEqual(@as(usize, 1), findings.len);
     try testing.expectEqual(Shape.unbounded_channel, findings[0].shape);
@@ -1406,7 +1414,7 @@ test "leak_shapes: a test file is out of scope" {
     _ = try exp.add_file(try one_file(allocator, "tests/seen.rs", .rust, src), src);
     exp.mark_indexing_complete();
 
-    const findings = try scan(allocator, &exp);
+    const findings = try scan(allocator, &exp, "");
     defer free_findings(allocator, findings);
     try testing.expectEqual(@as(usize, 0), findings.len);
 }
@@ -1434,7 +1442,7 @@ test "leak_shapes: a struct field that grows and never shrinks" {
     _ = try exp.add_file(try one_file(allocator, "src/tracker.rs", .rust, src), src);
     exp.mark_indexing_complete();
 
-    const findings = try scan(allocator, &exp);
+    const findings = try scan(allocator, &exp, "");
     defer free_findings(allocator, findings);
     try testing.expectEqual(@as(usize, 1), findings.len);
     try testing.expectEqualStrings("TaskTracker.tasks", findings[0].subject.?);
@@ -1465,7 +1473,7 @@ test "leak_shapes: a removal through a lock guard clears the shape" {
     _ = try exp.add_file(try one_file(allocator, "src/otp.rs", .rust, src), src);
     exp.mark_indexing_complete();
 
-    const findings = try scan(allocator, &exp);
+    const findings = try scan(allocator, &exp, "");
     defer free_findings(allocator, findings);
     try testing.expectEqual(@as(usize, 0), findings.len);
 }
@@ -1495,7 +1503,7 @@ test "leak_shapes: a guard may carry the field's own name" {
     _ = try exp.add_file(try one_file(allocator, "src/tracker.rs", .rust, src), src);
     exp.mark_indexing_complete();
 
-    const findings = try scan(allocator, &exp);
+    const findings = try scan(allocator, &exp, "");
     defer free_findings(allocator, findings);
     try testing.expectEqual(@as(usize, 0), findings.len);
 }
@@ -1525,7 +1533,7 @@ test "leak_shapes: a constructor fills a container once" {
     _ = try exp.add_file(try one_file(allocator, "src/roles.rs", .rust, src), src);
     exp.mark_indexing_complete();
 
-    const findings = try scan(allocator, &exp);
+    const findings = try scan(allocator, &exp, "");
     defer free_findings(allocator, findings);
     try testing.expectEqual(@as(usize, 0), findings.len);
 }
@@ -1550,7 +1558,7 @@ test "leak_shapes: a builder taking self by value is not a holder" {
     _ = try exp.add_file(try one_file(allocator, "src/validator.rs", .rust, src), src);
     exp.mark_indexing_complete();
 
-    const findings = try scan(allocator, &exp);
+    const findings = try scan(allocator, &exp, "");
     defer free_findings(allocator, findings);
     try testing.expectEqual(@as(usize, 0), findings.len);
 }
@@ -1583,7 +1591,7 @@ test "leak_shapes: a removal in a sibling impl file still counts" {
     _ = try exp.add_file(try one_file(allocator, "src/sessions_sweep.rs", .rust, sweep), sweep);
     exp.mark_indexing_complete();
 
-    const findings = try scan(allocator, &exp);
+    const findings = try scan(allocator, &exp, "");
     defer free_findings(allocator, findings);
     try testing.expectEqual(@as(usize, 0), findings.len);
 }
@@ -1608,7 +1616,7 @@ test "leak_shapes: two structs sharing a field name are ambiguous" {
     _ = try exp.add_file(try one_file(allocator, "src/two.rs", .rust, src), src);
     exp.mark_indexing_complete();
 
-    const findings = try scan(allocator, &exp);
+    const findings = try scan(allocator, &exp, "");
     defer free_findings(allocator, findings);
     try testing.expectEqual(@as(usize, 0), findings.len);
 }
@@ -1634,7 +1642,7 @@ test "leak_shapes: a `#[cfg(test)]` mock struct is out of scope" {
     _ = try exp.add_file(try one_file(allocator, "src/server.rs", .rust, src), src);
     exp.mark_indexing_complete();
 
-    const findings = try scan(allocator, &exp);
+    const findings = try scan(allocator, &exp, "");
     defer free_findings(allocator, findings);
     try testing.expectEqual(@as(usize, 0), findings.len);
 }
@@ -1656,7 +1664,7 @@ test "leak_shapes: a TypeScript class field grows through `this`" {
     _ = try exp.add_file(try one_file(allocator, "src/store.ts", .typescript, src), src);
     exp.mark_indexing_complete();
 
-    const findings = try scan(allocator, &exp);
+    const findings = try scan(allocator, &exp, "");
     defer free_findings(allocator, findings);
     try testing.expectEqual(@as(usize, 1), findings.len);
     try testing.expectEqualStrings("SessionStore.sessions", findings[0].subject.?);
@@ -1679,7 +1687,7 @@ test "leak_shapes: a bounded field type is not a finding" {
     _ = try exp.add_file(try one_file(allocator, "src/cache.rs", .rust, src), src);
     exp.mark_indexing_complete();
 
-    const findings = try scan(allocator, &exp);
+    const findings = try scan(allocator, &exp, "");
     defer free_findings(allocator, findings);
     try testing.expectEqual(@as(usize, 0), findings.len);
 }
@@ -1720,8 +1728,23 @@ test "leak_shapes: a Python class ends where its body ends" {
     _ = try exp.add_file(try one_file(allocator, "app/registry.py", .python, src), src);
     exp.mark_indexing_complete();
 
-    const findings = try scan(allocator, &exp);
+    const findings = try scan(allocator, &exp, "");
     defer free_findings(allocator, findings);
     try testing.expectEqual(@as(usize, 1), findings.len);
     try testing.expectEqualStrings("Registry.sessions", findings[0].subject.?);
+}
+
+test "leak_shapes: a folder above the workspace does not exclude its files" {
+    const allocator = testing.allocator;
+    const src = "static SEEN: Vec<u32> = Vec::new();\nfn t() { SEEN.push(1); }\n";
+    var exp = try explorer.Explorer.init(allocator);
+    defer exp.deinit();
+    _ = try exp.add_file(try one_file(allocator, "/srv/build/app/src/seen.rs", .rust, src), src);
+    _ = try exp.add_file(try one_file(allocator, "/srv/build/app/tests/seen.rs", .rust, src), src);
+    exp.mark_indexing_complete();
+
+    const findings = try scan(allocator, &exp, "/srv/build/app");
+    defer free_findings(allocator, findings);
+    // The file under src/ is a finding; the one under the project's tests/ is not.
+    try testing.expectEqual(@as(usize, 1), findings.len);
 }
