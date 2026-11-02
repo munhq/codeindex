@@ -1,6 +1,17 @@
 const std = @import("std");
 const io = @import("io.zig");
 
+/// `path` without the workspace `root` in front of it, or `path` itself when it
+/// is not below `root`. Index keys are absolute, so a check on the folders of
+/// a key reads the folders above the project too.
+pub fn below_root(root: []const u8, path: []const u8) []const u8 {
+    const r = std.mem.trimEnd(u8, root, "/");
+    if (r.len == 0 or !std.mem.startsWith(u8, path, r)) return path;
+    if (path.len == r.len) return "";
+    if (path[r.len] != '/') return path;
+    return path[r.len + 1 ..];
+}
+
 pub const Filter = struct {
     allocator: std.mem.Allocator,
     ignore_patterns: std.ArrayList([]const u8),

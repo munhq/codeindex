@@ -996,7 +996,7 @@ pub const Server = struct {
                 }
                 try w.writeAll("]}");
             } else if (std.mem.eql(u8, analysis_type, "literal_scan")) {
-                const findings = try literal_scan.scan(aa, self.exp);
+                const findings = try literal_scan.scan(aa, self.exp, self.workspace);
                 defer literal_scan.free_findings(aa, findings);
                 const s = literal_scan.summarize(findings);
                 try w.print("{{\"total\":{d},\"urls\":{d},\"ips\":{d},\"localhosts\":{d},\"abs_paths\":{d},\"secrets\":{d},\"magic_ports\":{d},\"todos\":{d},\"findings\":[", .{
@@ -1253,7 +1253,7 @@ pub const Server = struct {
                 try write_json_string(w, report.confirm_unused_with);
                 try w.writeAll(",\"not_measured\":\"release binary size and resident text size are build and runtime facts, not source facts\"}");
             } else if (std.mem.eql(u8, analysis_type, "leak_shapes")) {
-                const findings = try leak_shapes.scan(aa, self.exp);
+                const findings = try leak_shapes.scan(aa, self.exp, self.workspace);
                 defer leak_shapes.free_findings(aa, findings);
                 const s = leak_shapes.summarize(findings);
                 try w.print("{{\"total\":{d},\"leaked_allocation\":{d},\"growing_container\":{d}," ++

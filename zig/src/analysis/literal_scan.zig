@@ -1,5 +1,6 @@
 const std = @import("std");
 const explorer = @import("../index/explorer.zig");
+const filter_mod = @import("../core/filter.zig");
 
 pub const Category = enum {
     url,
@@ -41,7 +42,18 @@ pub const Summary = struct {
     todos: usize,
 };
 
-fn is_excluded_path(path: []const u8) bool {
+/// Only the part of `path` below `root` counts: a folder
+/// above the project, such as `/srv/build/`, excluded every file of it.
+fn is_excluded_path(root: []const u8, abs_path: []const u8) bool {
+    // A leading '/' keeps the "/build/" style checks below true for a folder
+    // at the top of the project.
+    var buf: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const rel = filter_mod.below_root(root, abs_path);
+    const path = if (rel.len < abs_path.len and rel.len + 1 <= buf.len) blk: {
+        buf[0] = '/';
+        @memcpy(buf[1 .. rel.len + 1], rel);
+        break :blk buf[0 .. rel.len + 1];
+    } else abs_path;
     // Skip obvious non-source
     if (std.mem.indexOf(u8, path, "node_modules") != null) return true;
     if (std.mem.indexOf(u8, path, "/vendor/") != null) return true;
@@ -262,7 +274,8 @@ fn snippet(allocator: std.mem.Allocator, line: []const u8, s: usize, e: usize) !
     return try out.toOwnedSlice(allocator);
 }
 
-pub fn scan(allocator: std.mem.Allocator, exp: *explorer.Explorer) ![]Finding {
+/// `root` is the workspace root of the index; "" when the keys are relative.
+pub fn scan(allocator: std.mem.Allocator, exp: *explorer.Explorer, root: []const u8) ![]Finding {
     var findings = std.ArrayList(Finding).empty;
     errdefer findings.deinit(allocator);
 
@@ -271,7 +284,7 @@ pub fn scan(allocator: std.mem.Allocator, exp: *explorer.Explorer) ![]Finding {
         const file_id = entry.key_ptr.*;
         if (exp.deleted_files.get(file_id) != null) continue;
         const outline = entry.value_ptr.*;
-        if (is_excluded_path(outline.path)) continue;
+        if (is_excluded_path(root, outline.path)) continue;
 
         // Only scan source-ish files. Skip pure data files.
         switch (outline.language) {
