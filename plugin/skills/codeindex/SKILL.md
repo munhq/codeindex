@@ -128,6 +128,12 @@ project fixes it for the rest of the session, watcher included. A refused
 workspace also says so in every tool result, so a result that starts with
 "codeindex has no index" is a configuration problem, never a code answer.
 
+The same call moves the session when you work in another checkout than the one
+the session started in: a second worktree, or a work folder of a tool that
+keeps the code outside the first checkout. Pass the root of the folder you
+edit. The session then answers from that folder's own index, and the index of
+the first checkout stays as it was for the sessions that use it.
+
 ## Strategy
 
 1. Classify the question: definition, body, usage, callers, impact, or content.

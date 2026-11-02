@@ -117,7 +117,7 @@ The next time your agent starts, codeindex indexes your project in the backgroun
 | `get_hot_files` | Recently changed files sorted by recency |
 | `read_file` | Read file contents with optional line range |
 | `read_symbol` | Read just a symbol's source code (with optional context lines) |
-| `index_workspace` | Index or re-index a workspace directory |
+| `index_workspace` | Index or re-index a project directory; a session that works in another checkout moves to that checkout's index |
 | `analyze` | Run one of 22 code analyses (see below) |
 
 ### Analyses (`analyze` tool)
@@ -225,6 +225,13 @@ It refuses to index your entire home directory, the filesystem root, or a folder
 that merely holds several independent repositories. A refused workspace answers
 every query with the reason and the one call that fixes it — `index_workspace`
 with the project path — rather than with "no results".
+
+One daemon serves one project, and every session on that project shares it, so
+a daemon never moves to another tree. A session can move instead. An agent that
+starts in one checkout and edits another (a second worktree, or a work folder
+with a `.desk-work` marker and no `.git`) calls `index_workspace` with that
+folder. The session then talks to the daemon of that folder, which starts if
+none runs, and the first daemon keeps serving its own tree.
 
 ## Architecture
 

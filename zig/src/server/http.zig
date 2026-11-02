@@ -742,19 +742,34 @@ pub const Server = struct {
                 }
             }
             if (path != null and self.shared_index and !same_tree(path.?, self.workspace)) {
-                try w.print("Refused: this daemon serves {s} and does not re-point a shared index. Start a session in {s} to index it.", .{ self.workspace, path.? });
+                // The relay in front of the daemon moves the session to the
+                // daemon of `path` when `path` is in a project. A call that
+                // reaches here named a folder with no project of its own.
+                try w.print("Refused: this daemon serves {s}, and {s} is not a project codeindex can index on its own: no project marker (.git, .desk-work, Cargo.toml, package.json, go.mod, …) in it or above it, or a folder that holds several repositories. Pass the root folder of one project.", .{ self.workspace, path.? });
                 try self.write_tool_result(writer, id, out.written(), true);
+                return;
+            }
+            if (path != null and self.shared_index) {
+                // The daemon's own tree. Its build and its watcher keep this
+                // index current for every session, and the relay sends this
+                // call each time it moves a session here. A full scan for each
+                // move took 25 s on a 505-file tree with the daemon warm. Wait
+                // for the build when it still runs, then answer its counts.
+                while (self.exp.is_indexing()) {
+                    io.sleep(100 * std.time.ns_per_ms);
+                }
+                try w.print("Indexed {s} — {d} files, {d} symbols, watcher active", .{
+                    self.workspace, self.exp.file_count(), self.exp.symbol_count(),
+                });
+                try self.write_tool_result(writer, id, out.written(), false);
                 return;
             }
             if (path != null and self.parser != null and self.filter != null) {
                 // No adoption path, or a directory with no project marker: index
                 // it in place. Unwatched, but a deliberate answer to an explicit
-                // request. In the daemon the index stays; the scan updates it
-                // file by file under the per-index write locks.
-                if (!self.shared_index) {
-                    self.exp.deinit();
-                    self.exp.* = try explorer.Explorer.init(self.allocator);
-                }
+                // request. This process owns its index, so it starts empty.
+                self.exp.deinit();
+                self.exp.* = try explorer.Explorer.init(self.allocator);
 
                 // One tree-sitter parser, shared with the watcher and, in the
                 // daemon, with every other connection. Entering it twice
@@ -1586,7 +1601,7 @@ pub const Server = struct {
             // get_hot_files
             "{\"name\":\"get_hot_files\",\"description\":\"Get recently changed files sorted by recency\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"limit\":{\"type\":\"integer\",\"description\":\"Max results (default 20)\"}}},\"annotations\":{\"readOnlyHint\":true,\"openWorldHint\":false,\"destructiveHint\":false}}",
             // index_workspace
-            "{\"name\":\"index_workspace\",\"description\":\"Index or re-index a workspace directory\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Directory path to index\"}},\"required\":[\"path\"]},\"annotations\":{\"readOnlyHint\":false,\"openWorldHint\":false,\"destructiveHint\":false}}",
+            "{\"name\":\"index_workspace\",\"description\":\"Index or re-index a project directory. If you work in another checkout than the one this session started in (a second worktree, a work folder), pass its root: the session moves to that project's index and every later call answers from it.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Absolute path of the project root to index\"}},\"required\":[\"path\"]},\"annotations\":{\"readOnlyHint\":false,\"openWorldHint\":false,\"destructiveHint\":false}}",
             // analyze
             "{\"name\":\"analyze\",\"description\":\"Run code analysis. Types: security, dead_code, unwrap_audit, test_coverage, architecture, crossref, type_drift, db_schema, migration_parity, manifest_compliance, literal_scan, coupling, cycles, duplication, clones, spawn_scan, deps, leak_shapes, logic_shapes, call_cost, field_contention, health\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"analysis\":{\"type\":\"string\",\"description\":\"Analysis type: security, dead_code, unwrap_audit, test_coverage, architecture, crossref, type_drift, db_schema, migration_parity, manifest_compliance, literal_scan, coupling, cycles, duplication, clones, spawn_scan, deps, leak_shapes, logic_shapes, call_cost, field_contention, health\"}},\"required\":[\"analysis\"]},\"annotations\":{\"readOnlyHint\":true,\"openWorldHint\":false,\"destructiveHint\":false}}",
             // read_file

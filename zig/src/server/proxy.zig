@@ -7,17 +7,45 @@
 //! it forwards bytes to the one process that already has them. Eight sessions
 //! on one repository stop being eight indexes, eight file watchers and eight
 //! writers of the same snapshot.
+//!
+//! A daemon serves one tree, and other sessions read it, so it never re-points.
+//! A session can still move: an agent that starts in one checkout and works in
+//! another (a second worktree, or a work folder that a checkout tool keeps
+//! outside the first checkout) calls
+//! `index_workspace` with the folder it works in. The relay sees that call,
+//! connects to the daemon of that folder's project, replays the session's
+//! `initialize` to it, and sends the call there. The client keeps one stdio
+//! session and the old daemon keeps its tree.
 
 const std = @import("std");
 const io = @import("../core/io.zig");
 
 pub const net = std.Io.net;
 
+/// How the relay reaches another project's daemon. main.zig owns the project
+/// rules and the daemon launch; the relay owns only the session.
+pub const Switcher = struct {
+    ctx: *anyopaque,
+    /// The project root that `path` belongs to, owned by the caller, or null
+    /// when the path is not a project the startup guards would allow.
+    resolve: *const fn (ctx: *anyopaque, gpa: std.mem.Allocator, path: []const u8) ?[]u8,
+    /// A connection to the daemon of `root`, started when none runs.
+    connect: *const fn (ctx: *anyopaque, root: []const u8) ?net.Stream,
+};
+
+/// The longest wait for the old daemon to answer what this session still has
+/// in flight on it before the session moves. An analysis of a large tree takes
+/// seconds; a minute is far past any answer the daemon sends.
+const switch_drain_ms: u64 = 60 * std.time.ms_per_s;
+
 const Pump = struct {
     stream: net.Stream,
-    /// Set when either direction ends, so the other stops rather than blocking
-    /// forever on a peer that has gone.
-    done: *std.atomic.Value(bool),
+    /// Set when this direction ends, so the input loop stops rather than
+    /// writing to a peer that has gone.
+    done: std.atomic.Value(bool) = .init(false),
+    /// Lines of daemon output to drop before anything reaches the client. A
+    /// replayed `initialize` has an answer the client already received once.
+    skip_lines: usize = 0,
 };
 
 /// Daemon -> our stdout. Runs on its own thread; the caller pumps the other way.
@@ -34,55 +62,216 @@ fn pump_out(ctx: *Pump) void {
     var r = ctx.stream.reader(io.io(), &buf);
     var chunk: [64 * 1024]u8 = undefined;
     const out = io.stdout();
-    while (!ctx.done.load(.acquire)) {
+    while (true) {
         const held = r.interface.buffered();
         if (held.len > 0) {
-            io.writeAll(out, held) catch break;
+            const keep = drop_skipped_lines(&ctx.skip_lines, held);
+            io.writeAll(out, held[held.len - keep.len ..]) catch break;
             r.interface.toss(held.len);
             continue;
         }
         var data: [1][]u8 = .{&chunk};
         const n = r.interface.readVec(&data) catch break;
-        if (n > 0) io.writeAll(out, chunk[0..n]) catch break;
+        if (n > 0) {
+            const keep = drop_skipped_lines(&ctx.skip_lines, chunk[0..n]);
+            io.writeAll(out, keep) catch break;
+        }
     }
     ctx.done.store(true, .release);
 }
 
-/// Relay until either side closes. Returns when the session is over.
-pub fn run(stream: net.Stream) !void {
-    var done = std.atomic.Value(bool).init(false);
-    var ctx = Pump{ .stream = stream, .done = &done };
-    const t = try std.Thread.spawn(.{}, pump_out, .{&ctx});
-
-    var buf: [64 * 1024]u8 = undefined;
-    var w = stream.writer(io.io(), &buf);
-    var chunk: [1024 * 1024]u8 = undefined;
-
-    while (!done.load(.acquire)) {
-        const n = io.readSome(io.stdin(), &chunk) catch break;
-        if (n == 0) break; // the MCP client closed our stdin: the session ended
-        w.interface.writeAll(chunk[0..n]) catch break;
-        w.interface.flush() catch break;
+/// The part of `bytes` that follows the first `skip.*` newlines, counting the
+/// lines it consumes down. Bytes of a skipped line that ends in a later chunk
+/// are dropped too: the count goes down only at the newline.
+pub fn drop_skipped_lines(skip: *usize, bytes: []const u8) []const u8 {
+    var rest = bytes;
+    while (skip.* > 0) {
+        const nl = std.mem.indexOfScalar(u8, rest, '\n') orelse return rest[rest.len..];
+        rest = rest[nl + 1 ..];
+        skip.* -= 1;
     }
+    return rest;
+}
 
-    // Tell the daemon this client is finished so it can retire the connection,
-    // then wait for anything still in flight the other way.
-    stream.shutdown(io.io(), .send) catch {};
+/// The `path` argument of an `index_workspace` call, or null for any other
+/// line. Owned by the caller.
+pub fn index_workspace_path(gpa: std.mem.Allocator, line: []const u8) ?[]u8 {
+    // Most lines are other calls; parse only the ones that can match.
+    if (std.mem.indexOf(u8, line, "index_workspace") == null) return null;
+    const parsed = std.json.parseFromSlice(std.json.Value, gpa, line, .{}) catch return null;
+    defer parsed.deinit();
+    const obj = switch (parsed.value) {
+        .object => |o| o,
+        else => return null,
+    };
+    const method = obj.get("method") orelse return null;
+    if (method != .string or !std.mem.eql(u8, method.string, "tools/call")) return null;
+    const params = obj.get("params") orelse return null;
+    if (params != .object) return null;
+    const name = params.object.get("name") orelse return null;
+    if (name != .string or !std.mem.eql(u8, name.string, "index_workspace")) return null;
+    const args = params.object.get("arguments") orelse return null;
+    if (args != .object) return null;
+    const path = args.object.get("path") orelse return null;
+    if (path != .string or path.string.len == 0) return null;
+    return gpa.dupe(u8, path.string) catch null;
+}
 
-    // The reader is blocked inside `readVec`, and `done` cannot wake it — only
-    // the socket can. Ending the send side asks the daemon to close its half,
-    // which is what unblocks the read; a peer that does not close leaves this
-    // process alive forever, and the MCP client then waits on a stdout that
-    // never reaches EOF. Give the drain a bounded moment, then end the read
-    // side here so the session always exits.
-    const drain_ms: u64 = 2000;
+/// True for the client's `initialize` request.
+pub fn is_initialize(gpa: std.mem.Allocator, line: []const u8) bool {
+    if (std.mem.indexOf(u8, line, "\"initialize\"") == null) return false;
+    const parsed = std.json.parseFromSlice(std.json.Value, gpa, line, .{}) catch return false;
+    defer parsed.deinit();
+    if (parsed.value != .object) return false;
+    const method = parsed.value.object.get("method") orelse return false;
+    return method == .string and std.mem.eql(u8, method.string, "initialize");
+}
+
+/// `line` with the `path` argument of its `index_workspace` call set to
+/// `root`, newline-terminated. The new daemon serves `root` exactly, and it
+/// refuses any path that is not its own tree, a subfolder included.
+pub fn with_path(gpa: std.mem.Allocator, line: []const u8, root: []const u8) ![]u8 {
+    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, line, .{});
+    defer parsed.deinit();
+    const args = &parsed.value.object.getPtr("params").?.object.getPtr("arguments").?.object;
+    try args.put(parsed.arena.allocator(), "path", .{ .string = root });
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    errdefer out.deinit();
+    try std.json.Stringify.value(parsed.value, .{}, &out.writer);
+    try out.writer.writeByte('\n');
+    return out.toOwnedSlice();
+}
+
+fn same_tree(a: []const u8, b: []const u8) bool {
+    return std.mem.eql(u8, std.mem.trimEnd(u8, a, "/"), std.mem.trimEnd(u8, b, "/"));
+}
+
+fn send(stream: net.Stream, bytes: []const u8) bool {
+    var buf: [4096]u8 = undefined;
+    var w = stream.writer(io.io(), &buf);
+    w.interface.writeAll(bytes) catch return false;
+    w.interface.flush() catch return false;
+    return true;
+}
+
+/// End one daemon connection: ask the daemon to finish, let it answer what is
+/// still in flight, then close. The pump thread is joined before this returns,
+/// so two daemons never write to stdout at once.
+fn retire(pump: *Pump, thread: std.Thread, drain_ms: u64) void {
+    // Ending the send side asks the daemon to close its half, which is what
+    // unblocks the reader. A peer that does not close would leave this process
+    // alive forever, so the drain is bounded and the read side ends here.
+    pump.stream.shutdown(io.io(), .send) catch {};
     var waited_ms: u64 = 0;
-    while (!done.load(.acquire) and waited_ms < drain_ms) {
+    while (!pump.done.load(.acquire) and waited_ms < drain_ms) {
         io.sleep(10 * std.time.ns_per_ms);
         waited_ms += 10;
     }
-    if (!done.load(.acquire)) stream.shutdown(io.io(), .recv) catch {};
+    if (!pump.done.load(.acquire)) pump.stream.shutdown(io.io(), .recv) catch {};
+    thread.join();
+    pump.stream.close(io.io());
+}
 
-    t.join();
-    stream.close(io.io());
+/// Relay until either side closes. Returns when the session is over.
+///
+/// `root` is the project the daemon behind `stream` serves. With a `switcher`,
+/// an `index_workspace` call for another project moves the session to that
+/// project's daemon; without one, every line goes to `stream` unchanged.
+pub fn run(gpa: std.mem.Allocator, stream: net.Stream, root: []const u8, switcher: ?Switcher) !void {
+    var pump = try gpa.create(Pump);
+    pump.* = .{ .stream = stream };
+    var thread = std.Thread.spawn(.{}, pump_out, .{pump}) catch |err| {
+        gpa.destroy(pump);
+        return err;
+    };
+
+    var current_root = try gpa.dupe(u8, root);
+    defer gpa.free(current_root);
+    // The client's `initialize`, kept to replay to the next daemon.
+    var init_line: ?[]u8 = null;
+    defer if (init_line) |l| gpa.free(l);
+
+    var chunk: [1024 * 1024]u8 = undefined;
+    var carry = std.ArrayList(u8).empty;
+    defer carry.deinit(gpa);
+
+    session: while (!pump.done.load(.acquire)) {
+        const n = io.readSome(io.stdin(), &chunk) catch break;
+        if (n == 0) break; // the MCP client closed our stdin: the session ended
+        try carry.appendSlice(gpa, chunk[0..n]);
+
+        var start: usize = 0;
+        while (std.mem.indexOfScalarPos(u8, carry.items, start, '\n')) |nl| {
+            const raw = carry.items[start .. nl + 1];
+            start = nl + 1;
+            const line = std.mem.trimEnd(u8, raw, "\r\n");
+
+            if (init_line == null and is_initialize(gpa, line)) {
+                init_line = gpa.dupe(u8, raw) catch null;
+            }
+
+            if (switcher) |sw| move: {
+                const path = index_workspace_path(gpa, line) orelse break :move;
+                defer gpa.free(path);
+                const new_root = sw.resolve(sw.ctx, gpa, path) orelse break :move;
+                if (same_tree(new_root, current_root)) {
+                    gpa.free(new_root);
+                    break :move;
+                }
+                const replay = init_line orelse {
+                    gpa.free(new_root);
+                    break :move;
+                };
+                const rewritten = with_path(gpa, line, new_root) catch {
+                    gpa.free(new_root);
+                    break :move;
+                };
+                defer gpa.free(rewritten);
+                const next = sw.connect(sw.ctx, new_root) orelse {
+                    gpa.free(new_root);
+                    break :move;
+                };
+
+                // The new daemon gets the same handshake the client sent the
+                // first one. Its answer to `initialize` is dropped: the client
+                // has one already. The daemon answers in order, so that answer
+                // is the first line it writes.
+                const handshake = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n";
+                if (!send(next, replay) or !send(next, handshake)) {
+                    next.close(io.io());
+                    gpa.free(new_root);
+                    break :move;
+                }
+
+                retire(pump, thread, switch_drain_ms);
+                pump.* = .{ .stream = next, .skip_lines = 1 };
+                thread = std.Thread.spawn(.{}, pump_out, .{pump}) catch {
+                    next.close(io.io());
+                    gpa.free(new_root);
+                    gpa.destroy(pump);
+                    return error.ThreadSpawnFailed;
+                };
+                gpa.free(current_root);
+                current_root = new_root;
+                // A relative path in a later call means the folder the session
+                // now works in, as it does in the daemon.
+                io.changeCurDir(current_root) catch {};
+                std.debug.print("codeindex: session moved to the daemon of {s}\n", .{current_root});
+
+                if (!send(pump.stream, rewritten)) break :session;
+                continue;
+            }
+
+            if (!send(pump.stream, raw)) break :session;
+        }
+        // Keep the part of a line that has not ended yet.
+        const rest = carry.items[start..];
+        std.mem.copyForwards(u8, carry.items[0..rest.len], rest);
+        carry.items.len = rest.len;
+    }
+
+    // Tell the daemon this client is finished so it can retire the connection,
+    // then wait a bounded moment for anything still in flight the other way.
+    retire(pump, thread, 2000);
+    gpa.destroy(pump);
 }

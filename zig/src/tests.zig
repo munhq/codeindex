@@ -19,6 +19,7 @@ const duplication = @import("analysis/duplication.zig");
 const clones = @import("analysis/clones.zig");
 const scanner_mod = @import("index/scanner.zig");
 const ipc_mod = @import("server/ipc.zig");
+const proxy_mod = @import("server/proxy.zig");
 const server_mod = @import("server/http.zig");
 // Imported for its OWN tests, which live beside the rule they cover. It was
 // absent from this aggregator, so the credential_in_manifest matcher shipped
@@ -2931,4 +2932,61 @@ fn node_named_at(g: *const callgraph.Graph, name: []const u8, line0: u32) ?u32 {
         if (std.mem.eql(u8, n.name, name) and n.line_start == line0) return @intCast(i);
     }
     return null;
+}
+
+test "proxy: an index_workspace call names its path, other calls name none" {
+    const gpa = testing.allocator;
+    const call =
+        \\{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"index_workspace","arguments":{"path":"/home/user/code/example"}}}
+    ;
+    const path = proxy_mod.index_workspace_path(gpa, call).?;
+    defer gpa.free(path);
+    try testing.expectEqualStrings("/home/user/code/example", path);
+
+    // The tool name inside an argument is not the tool being called.
+    const other =
+        \\{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"search","arguments":{"query":"index_workspace"}}}
+    ;
+    try testing.expect(proxy_mod.index_workspace_path(gpa, other) == null);
+    const no_path =
+        \\{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"index_workspace","arguments":{}}}
+    ;
+    try testing.expect(proxy_mod.index_workspace_path(gpa, no_path) == null);
+}
+
+test "proxy: the initialize request is told apart from its notification" {
+    const gpa = testing.allocator;
+    try testing.expect(proxy_mod.is_initialize(gpa,
+        \\{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}
+    ));
+    try testing.expect(!proxy_mod.is_initialize(gpa,
+        \\{"jsonrpc":"2.0","method":"notifications/initialized"}
+    ));
+}
+
+test "proxy: a moved call carries the project root and keeps its id" {
+    // The daemon of the new project refuses any path but its own root, a
+    // subfolder included, so the relay sends the root it resolved.
+    const gpa = testing.allocator;
+    const call =
+        \\{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"index_workspace","arguments":{"path":"/home/user/code/example/src"}}}
+    ;
+    const out = try proxy_mod.with_path(gpa, call, "/home/user/code/example");
+    defer gpa.free(out);
+    try testing.expect(out[out.len - 1] == '\n');
+    const parsed = try std.json.parseFromSlice(std.json.Value, gpa, out, .{});
+    defer parsed.deinit();
+    try testing.expectEqual(@as(i64, 7), parsed.value.object.get("id").?.integer);
+    const args = parsed.value.object.get("params").?.object.get("arguments").?.object;
+    try testing.expectEqualStrings("/home/user/code/example", args.get("path").?.string);
+}
+
+test "proxy: the answer to a replayed initialize never reaches the client" {
+    var skip: usize = 1;
+    // The answer can arrive split across reads; nothing of it goes out.
+    try testing.expectEqualStrings("", proxy_mod.drop_skipped_lines(&skip, "{\"id\":1,\"res"));
+    try testing.expectEqual(@as(usize, 1), skip);
+    try testing.expectEqualStrings("{\"id\":7}\n", proxy_mod.drop_skipped_lines(&skip, "ult\":{}}\n{\"id\":7}\n"));
+    try testing.expectEqual(@as(usize, 0), skip);
+    try testing.expectEqualStrings("next\n", proxy_mod.drop_skipped_lines(&skip, "next\n"));
 }
