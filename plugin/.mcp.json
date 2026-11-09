@@ -2,7 +2,7 @@
   "mcpServers": {
     "codeindex": {
       "command": "npx",
-      "args": ["-y", "@munhq/codeindex"]
+      "args": ["-y", "--@munhq:registry=https://registry.npmjs.org", "@munhq/codeindex"]
     }
   }
 }
