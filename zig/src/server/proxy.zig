@@ -146,6 +146,62 @@ fn same_tree(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, std.mem.trimEnd(u8, a, "/"), std.mem.trimEnd(u8, b, "/"));
 }
 
+/// The JSON-RPC id of a request line, or null for a notification and for a
+/// line that does not parse.
+pub fn request_id(gpa: std.mem.Allocator, line: []const u8) ?i64 {
+    if (std.mem.indexOf(u8, line, "\"id\"") == null) return null;
+    const parsed = std.json.parseFromSlice(std.json.Value, gpa, line, .{}) catch return null;
+    defer parsed.deinit();
+    if (parsed.value != .object) return null;
+    const id = parsed.value.object.get("id") orelse return null;
+    return switch (id) {
+        .integer => |n| n,
+        else => null,
+    };
+}
+
+/// The answer to an `index_workspace` call this session cannot move for: the
+/// daemon of `wanted` did not open, so the session stays on `served`.
+///
+/// Forwarding the call to `served` instead made that daemon answer "no project
+/// marker" about a folder that has one. It cannot see the reason: a session
+/// whose executable was replaced by an install or removed by a cache cleanup
+/// cannot start any daemon at all. Name the two folders here, where the relay
+/// knows both.
+pub fn move_failed_answer(gpa: std.mem.Allocator, id: i64, served: []const u8, wanted: []const u8) ![]u8 {
+    const Content = struct { @"type": []const u8 = "text", text: []const u8 };
+    const Result = struct { content: []const Content, isError: bool = true };
+    const Answer = struct { jsonrpc: []const u8 = "2.0", id: i64, result: Result };
+
+    var msg: std.Io.Writer.Allocating = .init(gpa);
+    defer msg.deinit();
+    try msg.writer.print(
+        "Refused: this session serves {s}. It could not start the daemon of {s}, so it did not move, and this call did not reach that project. Start a session in that folder; if it fails too, check that the codeindex executable of this session still exists.",
+        .{ served, wanted },
+    );
+
+    const content = [1]Content{.{ .text = msg.written() }};
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    errdefer out.deinit();
+    try std.json.Stringify.value(Answer{ .id = id, .result = .{ .content = &content } }, .{}, &out.writer);
+    try out.writer.writeByte('\n');
+    return out.toOwnedSlice();
+}
+
+/// Tell the client why its call did not move. False only when the write to the
+/// client failed, which ends the session.
+/// Answer a call this session could not forward, on the client's own stream.
+/// `send` writes to the daemon, so the answer goes to stdout, where the client
+/// reads. A notification gets no answer, and a failure to build one is not a
+/// reason to end the session.
+fn answer_move_failed(gpa: std.mem.Allocator, line: []const u8, served: []const u8, wanted: []const u8) bool {
+    const id = request_id(gpa, line) orelse return true; // a notification: nothing to answer
+    const answer = move_failed_answer(gpa, id, served, wanted) catch return true;
+    defer gpa.free(answer);
+    io.writeAll(io.stdout(), answer) catch return false;
+    return true;
+}
+
 fn send(stream: net.Stream, bytes: []const u8) bool {
     var buf: [4096]u8 = undefined;
     var w = stream.writer(io.io(), &buf);
@@ -201,7 +257,7 @@ pub fn run(gpa: std.mem.Allocator, stream: net.Stream, root: []const u8, switche
         try carry.appendSlice(gpa, chunk[0..n]);
 
         var start: usize = 0;
-        while (std.mem.indexOfScalarPos(u8, carry.items, start, '\n')) |nl| {
+        lines: while (std.mem.indexOfScalarPos(u8, carry.items, start, '\n')) |nl| {
             const raw = carry.items[start .. nl + 1];
             start = nl + 1;
             const line = std.mem.trimEnd(u8, raw, "\r\n");
@@ -219,8 +275,13 @@ pub fn run(gpa: std.mem.Allocator, stream: net.Stream, root: []const u8, switche
                     break :move;
                 }
                 const replay = init_line orelse {
+                    // Without the client's handshake the new daemon cannot
+                    // answer as this session. Say so instead of letting the old
+                    // daemon refuse a tree it does not serve.
+                    const ok = answer_move_failed(gpa, line, current_root, new_root);
                     gpa.free(new_root);
-                    break :move;
+                    if (!ok) break :session;
+                    continue :lines;
                 };
                 const rewritten = with_path(gpa, line, new_root) catch {
                     gpa.free(new_root);
@@ -228,8 +289,15 @@ pub fn run(gpa: std.mem.Allocator, stream: net.Stream, root: []const u8, switche
                 };
                 defer gpa.free(rewritten);
                 const next = sw.connect(sw.ctx, new_root) orelse {
+                    // The daemon of the target did not open: none runs and this
+                    // process could not start one. Its own executable may have
+                    // been replaced by an install or removed by a cleanup.
+                    // Answer for that here; `current_root` refuses for itself
+                    // with a reason it cannot know.
+                    const ok = answer_move_failed(gpa, line, current_root, new_root);
                     gpa.free(new_root);
-                    break :move;
+                    if (!ok) break :session;
+                    continue :lines;
                 };
 
                 // The new daemon gets the same handshake the client sent the
@@ -239,8 +307,10 @@ pub fn run(gpa: std.mem.Allocator, stream: net.Stream, root: []const u8, switche
                 const handshake = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n";
                 if (!send(next, replay) or !send(next, handshake)) {
                     next.close(io.io());
+                    const ok = answer_move_failed(gpa, line, current_root, new_root);
                     gpa.free(new_root);
-                    break :move;
+                    if (!ok) break :session;
+                    continue :lines;
                 }
 
                 retire(pump, thread, switch_drain_ms);
