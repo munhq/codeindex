@@ -744,8 +744,13 @@ pub const Server = struct {
             if (path != null and self.shared_index and !same_tree(path.?, self.workspace)) {
                 // The relay in front of the daemon moves the session to the
                 // daemon of `path` when `path` is in a project. A call that
-                // reaches here named a folder with no project of its own.
-                try w.print("Refused: this daemon serves {s}, and {s} is not a project codeindex can index on its own: no project marker (.git, .desk-work, Cargo.toml, package.json, go.mod, …) in it or above it, or a folder that holds several repositories. Pass the root folder of one project.", .{ self.workspace, path.? });
+                // reaches here named a folder this daemon does not serve, and
+                // this daemon cannot know why the session did not move: the
+                // relay moves when it can start that project's daemon, and it
+                // forwards when it cannot. Saying "no project marker" here was
+                // wrong for a desk work folder that holds `.desk-work` and
+                // `Cargo.toml`, and it sent the reader to the wrong place.
+                try w.print("Refused: this daemon serves {s}, and the session did not move to the daemon of {s}, so the call arrived here. A folder codeindex can index on its own holds a project marker (.git, .desk-work, Cargo.toml, package.json, go.mod, …) in it or above it. Pass the root folder of one project.", .{ self.workspace, path.? });
                 try self.write_tool_result(writer, id, out.written(), true);
                 return;
             }

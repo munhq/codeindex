@@ -14,6 +14,7 @@ import glob
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -420,6 +421,95 @@ def session_moves_to_another_checkout():
     check(p.returncode == 0, f"the session ends cleanly after the move (exit {p.returncode})")
 
 
+def session_move_without_its_own_executable():
+    """A move that cannot start the daemon of the target: this process's own
+    executable was replaced by an install or removed by a cache cleanup, so it
+    has no file to launch. The daemon that serves the session is another tree
+    and cannot say why the call arrived; the relay must answer for the move it
+    could not make, and the session must keep serving its own tree."""
+    import threading
+    print("\n-- a move that cannot start the new daemon --")
+    if os.name == "nt":
+        # Windows locks a running .exe, so this cause cannot be produced there.
+        print("  skip (a running executable cannot be removed on Windows)")
+        return
+    first = tempfile.mkdtemp(prefix="codeindex_e2e_first_")
+    os.makedirs(f"{first}/.git", exist_ok=True)
+    with open(f"{first}/engine.py", "w") as f:
+        f.write("def served_here():\n    return 1\n")
+    work = tempfile.mkdtemp(prefix="codeindex_e2e_work_")
+    os.makedirs(f"{work}/.desk-work", exist_ok=True)  # the only marker it has
+    with open(f"{work}/engine.py", "w") as f:
+        f.write("def only_in_work():\n    return 2\n")
+
+    copy = os.path.join(tempfile.mkdtemp(prefix="codeindex_e2e_bin_"), "codeindex")
+    shutil.copy2(BIN, copy)
+    p = subprocess.Popen([copy, "--mcp", "--workspace", first],
+                         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                         stderr=subprocess.DEVNULL, text=True, encoding="utf-8",
+                         bufsize=1, env=server_env())
+    msgs = {}
+
+    def reader():
+        for line in p.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                m = json.loads(line)
+            except json.JSONDecodeError as e:
+                failures.append(f"non-JSON line on stdout: {line[:80]!r} ({e})")
+                continue
+            if "id" in m:
+                msgs[m["id"]] = m
+
+    threading.Thread(target=reader, daemon=True).start()
+
+    def send(obj):
+        p.stdin.write(json.dumps(obj) + "\n")
+        p.stdin.flush()
+
+    def wait_for(i, secs=60):
+        deadline = time.time() + secs
+        while time.time() < deadline and i not in msgs:
+            time.sleep(0.1)
+        return msgs.get(i)
+
+    send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+          "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                     "clientInfo": {"name": "e2e", "version": "0"}}})
+    send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+    wait_for(1)
+
+    # From here the process has no executable file to start any daemon from.
+    os.remove(copy)
+
+    send(tool(2, "index_workspace", {"path": work}))
+    moved = wait_for(2)
+    body = text(moved) if moved else ""
+    check(moved is not None and moved["result"].get("isError") is True,
+          f"a move it cannot make answers with an error (got {body!r})")
+    check(work in body, f"the answer names the folder it could not move to (got {body!r})")
+    check(first in body, f"the answer names the tree the session still serves (got {body!r})")
+    # The work folder holds `.desk-work`: an answer that blames a missing marker
+    # sends the reader to the wrong place, and that was the reported failure.
+    check("no project marker" not in body,
+          f"the answer does not blame a marker the folder has (got {body!r})")
+
+    send(tool(3, "status", {}))
+    st = wait_for(3)
+    st = json.loads(text(st)) if st else {}
+    check(os.path.realpath(st.get("workspace", "")) == os.path.realpath(first),
+          f"the session still serves its own tree (got {st.get('workspace')!r})")
+
+    try:
+        p.stdin.close()
+        p.wait(timeout=10)
+    except Exception:
+        p.kill()
+    check(p.returncode == 0, f"the session ends cleanly after the refused move (exit {p.returncode})")
+
+
 def main():
     ws = tempfile.mkdtemp(prefix="codeindex_e2e_")
     os.makedirs(f"{ws}/src", exist_ok=True)
@@ -725,6 +815,7 @@ def main():
 
     workspace_recovery()
     session_moves_to_another_checkout()
+    session_move_without_its_own_executable()
     daemon_without_socket()
 
     await_daemon_exit()

@@ -2990,3 +2990,28 @@ test "proxy: the answer to a replayed initialize never reaches the client" {
     try testing.expectEqual(@as(usize, 0), skip);
     try testing.expectEqualStrings("next\n", proxy_mod.drop_skipped_lines(&skip, "next\n"));
 }
+
+test "proxy: a move it cannot make answers for itself" {
+    // The session stays on the daemon of its own tree, which serves another
+    // project and cannot say why the call arrived. Forwarding the call let it
+    // answer "no project marker" about a folder that has one.
+    const gpa = testing.allocator;
+    const call =
+        \\{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"index_workspace","arguments":{"path":"/home/user/code/work"}}}
+    ;
+    try testing.expectEqual(@as(?i64, 7), proxy_mod.request_id(gpa, call));
+    try testing.expect(proxy_mod.request_id(gpa, "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}") == null);
+
+    const out = try proxy_mod.move_failed_answer(gpa, 7, "/home/user/code/first", "/home/user/code/work");
+    defer gpa.free(out);
+    try testing.expect(out[out.len - 1] == '\n');
+    const parsed = try std.json.parseFromSlice(std.json.Value, gpa, out, .{});
+    defer parsed.deinit();
+    try testing.expectEqual(@as(i64, 7), parsed.value.object.get("id").?.integer);
+    const result = parsed.value.object.get("result").?.object;
+    try testing.expect(result.get("isError").?.bool);
+    const body = result.get("content").?.array.items[0].object.get("text").?.string;
+    try testing.expect(std.mem.indexOf(u8, body, "/home/user/code/first") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "/home/user/code/work") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "no project marker") == null);
+}
