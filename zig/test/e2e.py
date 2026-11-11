@@ -352,6 +352,10 @@ def session_moves_to_another_checkout():
     os.makedirs(f"{work}/src", exist_ok=True)
     with open(f"{work}/src/engine.py", "w") as f:
         f.write("def build_block(txs):\n    return list(txs)\n")
+    # A review folder keeps the repositories it audits below it. Three of them
+    # made the folder look like a parent of many projects and the move failed.
+    for i in range(3):
+        os.makedirs(f"{work}/research/audited{i}/.git", exist_ok=True)
 
     p = subprocess.Popen([BIN, "--mcp", "--workspace", first],
                          stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -412,6 +416,12 @@ def session_moves_to_another_checkout():
     check(os.path.realpath(st.get("workspace", "")) == os.path.realpath(work),
           f"status names the work folder (got {st.get('workspace')!r})")
     check(not extra, f"the replayed handshake sent the client no second answer (got {extra})")
+
+    # The folder itself, as the session names it: the same project.
+    send(tool(6, "index_workspace", {"path": work}))
+    again = wait_for(6)
+    check(again is not None and not again["result"].get("isError"),
+          f"index_workspace on the work folder itself is not refused (got {text(again) if again else None!r})")
 
     try:
         p.stdin.close()
