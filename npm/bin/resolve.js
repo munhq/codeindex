@@ -46,8 +46,12 @@ function assetName() {
   return assetFor(process.platform, process.arch);
 }
 
+// The binary lives in the data folder. A running session executes this file, and
+// its daemon retires when the file is gone. A cache folder is the place that
+// cleanup jobs empty: an hourly disk cleanup removed ~/.cache/codeindex while
+// sessions ran from it, and every call answered "a new one did not start".
 function cacheDir() {
-  const base = process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache');
+  const base = process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share');
   return path.join(base, 'codeindex', 'bin');
 }
 

@@ -37,7 +37,7 @@ Anything that reads a JSON config (Claude Desktop, Cursor, Windsurf, Zed, Cline)
 codeindex is a statically linked binary — no runtime, no node_modules, about
 53 MB per platform. This package is a 4 KB wrapper: on install it resolves the
 release asset for your platform, verifies it against the `SHA256SUMS` published
-beside it, caches it under `~/.cache/codeindex/bin/codeindex-<version>`, and
+beside it, stores it under `~/.local/share/codeindex/bin/codeindex-<version>`, and
 executes it. Six platforms are covered: linux and macOS on x86_64 and arm64,
 Windows on x86_64 and arm64.
 
