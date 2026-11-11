@@ -66,7 +66,12 @@ pub fn usable_project_root(allocator: std.mem.Allocator, candidate: []const u8) 
     const abs = io.realpathAlloc(allocator, candidate) catch return null;
     defer allocator.free(abs);
     const proj = find_project_root(allocator, abs) orelse return null;
-    if (workspace_refusal(allocator, proj, true) != null) {
+    // A candidate is a guess only when the walk had to climb above the folder
+    // the caller named. A folder that carries a marker itself was chosen by the
+    // caller (a work folder with nested checkouts under `research/` is one
+    // project), so the repo-parent check must not override that choice.
+    const climbed = !std.mem.eql(u8, proj, abs);
+    if (workspace_refusal(allocator, proj, climbed) != null) {
         allocator.free(proj);
         return null;
     }
@@ -147,6 +152,8 @@ fn count_repos(dir: *io.Dir, depth: u8, count: *u32, visited: *u32) void {
 fn looks_like_repo_parent(root: []const u8) bool {
     var d = io.cwd().openDir(io.io(), root, .{ .iterate = true }) catch return false;
     defer d.close(io.io());
+    // A work folder is one project by definition, whatever it holds below.
+    if (d.access(io.io(), ".desk-work", .{})) |_| return false else |_| {}
     var count: u32 = 0;
     var visited: u32 = 0;
     count_repos(&d, 0, &count, &visited);
