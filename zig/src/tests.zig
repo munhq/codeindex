@@ -3014,4 +3014,14 @@ test "proxy: a move it cannot make answers for itself" {
     try testing.expect(std.mem.indexOf(u8, body, "/home/user/code/first") != null);
     try testing.expect(std.mem.indexOf(u8, body, "/home/user/code/work") != null);
     try testing.expect(std.mem.indexOf(u8, body, "no project marker") == null);
+
+    const gone = try proxy_mod.daemon_gone_answer(gpa, 9, "/home/user/code/first");
+    defer gpa.free(gone);
+    const gone_parsed = try std.json.parseFromSlice(std.json.Value, gpa, gone, .{});
+    defer gone_parsed.deinit();
+    try testing.expectEqual(@as(i64, 9), gone_parsed.value.object.get("id").?.integer);
+    const gone_result = gone_parsed.value.object.get("result").?.object;
+    try testing.expect(gone_result.get("isError").?.bool);
+    const gone_body = gone_result.get("content").?.array.items[0].object.get("text").?.string;
+    try testing.expect(std.mem.indexOf(u8, gone_body, "/home/user/code/first") != null);
 }
