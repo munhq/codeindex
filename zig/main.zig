@@ -302,13 +302,26 @@ fn idle_loop(ctx: *IdleCtx) void {
     }
 }
 
-/// Absolute path to this binary, resolved from argv[0].
+/// Absolute path to this binary.
 ///
 /// Must be called before anything chdirs. The daemon is spawned later, from the
 /// project root, and a relative argv[0] such as `./codeindex` would no longer
-/// name this binary from there. A bare name is left alone on purpose: `spawn`
-/// resolves one through PATH, which is exactly what a PATH install wants.
+/// name this binary from there.
+///
+/// On Linux the path is the binary that runs, from /proc/self/exe. A client that
+/// starts `codeindex` by its bare name from a PATH entry such as ~/.local/bin
+/// gives argv[0] = "codeindex", and `spawn` looks for that name only in
+/// /usr/local/bin, /bin and /usr/bin. No daemon could start then: not for a
+/// first session, and not for the reconnect of a session whose daemon retired
+/// after an install ("a new one did not start"). Resolving at start keeps the
+/// path of the file, so after an install it names the new build.
 fn resolve_self_exe(allocator: std.mem.Allocator, args_vec: std.process.Args) ?[]u8 {
+    if (comptime builtin.os.tag == .linux) {
+        if (io.realpathAlloc(allocator, "/proc/self/exe")) |abs| {
+            defer allocator.free(abs);
+            return allocator.dupe(u8, abs) catch null;
+        } else |_| {}
+    }
     var args = if (comptime builtin.os.tag == .windows)
         (std.process.Args.Iterator.initAllocator(args_vec, allocator) catch return null)
     else
