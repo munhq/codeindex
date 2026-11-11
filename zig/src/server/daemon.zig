@@ -56,6 +56,8 @@ pub const Daemon = struct {
     /// the last query, so a client that is attached but quiet keeps the index.
     idle_since_ms: std.atomic.Value(i64) = .init(0),
     running: std.atomic.Value(bool) = .init(true),
+    /// Set when the executable of this process was replaced by an install.
+    replaced: std.atomic.Value(bool) = .init(false),
     /// Seconds with no connection at all before the daemon exits and returns
     /// its memory. 0 keeps it alive indefinitely.
     idle_exit_secs: i64 = 900,
@@ -111,9 +113,9 @@ pub const Daemon = struct {
     pub fn serve(self: *Daemon) !void {
         self.idle_since_ms.store(io.milliTimestamp(), .release);
 
-        var monitor: ?std.Thread = null;
-        if (self.idle_exit_secs > 0)
-            monitor = std.Thread.spawn(.{}, idle_monitor, .{self}) catch null;
+        // The monitor also watches the executable, so it runs when the idle
+        // exit is off.
+        const monitor: ?std.Thread = std.Thread.spawn(.{}, idle_monitor, .{self}) catch null;
 
         while (self.running.load(.acquire)) {
             if (!self.wait_for_client()) break;
@@ -153,8 +155,14 @@ pub const Daemon = struct {
         // Let sessions in flight finish. They are agent conversations, not
         // requests, so this waits on the connection closing rather than on any
         // one answer.
+        //
+        // A daemon whose executable was replaced does not wait: its sessions
+        // reconnect to the daemon of the new build on their next call, and
+        // waiting would keep them on the old build until they end.
         var waited: u64 = 0;
-        while (self.live.load(.acquire) > 0 and waited < 10 * std.time.ms_per_s) {
+        while (self.live.load(.acquire) > 0 and waited < 10 * std.time.ms_per_s and
+            !self.replaced.load(.acquire))
+        {
             io.sleep(shutting_down_ms * std.time.ns_per_ms);
             waited += shutting_down_ms;
         }
@@ -192,10 +200,29 @@ pub const Daemon = struct {
     /// index for the life of the login session — which is the problem the
     /// daemon exists to fix, moved rather than solved.
     fn idle_monitor(self: *Daemon) void {
-        const poll_ns: u64 = 5 * std.time.ns_per_s;
+        // CODEINDEX_DAEMON_POLL_SECS sets how often the monitor looks; the tests
+        // use it to see a retirement in seconds and to keep one from happening.
+        var poll_secs: u64 = 5;
+        if (io.getEnv(self.gpa, "CODEINDEX_DAEMON_POLL_SECS")) |val| {
+            defer self.gpa.free(val);
+            if (std.fmt.parseInt(u64, val, 10)) |s| {
+                if (s > 0) poll_secs = s;
+            } else |_| {}
+        }
+        const poll_ns: u64 = poll_secs * std.time.ns_per_s;
         while (self.running.load(.acquire)) {
             io.sleep(poll_ns);
             if (!self.running.load(.acquire)) break;
+            // An install replaced the executable of this process. Every session
+            // attached here would otherwise keep the old build for as long as it
+            // lives; they reconnect to a daemon of the new build.
+            if (executable_replaced(self.gpa)) {
+                std.debug.print("codeindex: the executable was replaced, retiring\n", .{});
+                self.replaced.store(true, .release);
+                self.stop();
+                return;
+            }
+            if (self.idle_exit_secs <= 0) continue;
             if (self.live.load(.acquire) > 0) continue;
             // A daemon whose socket file is gone cannot be reached by any new
             // session, which starts a daemon of its own instead. Waiting out
@@ -223,6 +250,18 @@ pub const Daemon = struct {
         if (ipc.connect(self.sock_path)) |s| s.close(io.io());
     }
 };
+
+/// True when the file this process was started from no longer exists under its
+/// name: an install renamed a new build over it, or a cleanup removed it. Linux
+/// resolves `/proc/self/exe` to the running inode, and the path of an unlinked
+/// file does not resolve. Other systems keep the executable locked or give no
+/// such path, so they never report a replacement.
+fn executable_replaced(gpa: std.mem.Allocator) bool {
+    if (comptime builtin.os.tag != .linux) return false;
+    const abs = io.realpathAlloc(gpa, "/proc/self/exe") catch |err| return err == error.FileNotFound;
+    gpa.free(abs);
+    return false;
+}
 
 /// Write the snapshot one last time, so the next daemon starts from disk rather
 /// than re-parsing a tree this one already knows.

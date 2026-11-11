@@ -169,18 +169,33 @@ pub fn request_id(gpa: std.mem.Allocator, line: []const u8) ?i64 {
 /// cannot start any daemon at all. Name the two folders here, where the relay
 /// knows both.
 pub fn move_failed_answer(gpa: std.mem.Allocator, id: i64, served: []const u8, wanted: []const u8) ![]u8 {
-    const Content = struct { @"type": []const u8 = "text", text: []const u8 };
-    const Result = struct { content: []const Content, isError: bool = true };
-    const Answer = struct { jsonrpc: []const u8 = "2.0", id: i64, result: Result };
-
     var msg: std.Io.Writer.Allocating = .init(gpa);
     defer msg.deinit();
     try msg.writer.print(
         "Refused: this session serves {s}. It could not start the daemon of {s}, so it did not move, and this call did not reach that project. Start a session in that folder; if it fails too, check that the codeindex executable of this session still exists.",
         .{ served, wanted },
     );
+    return error_answer(gpa, id, msg.written());
+}
 
-    const content = [1]Content{.{ .text = msg.written() }};
+/// The answer to a call that arrived after the daemon of `root` went away and no
+/// new one could be started.
+pub fn daemon_gone_answer(gpa: std.mem.Allocator, id: i64, root: []const u8) ![]u8 {
+    var msg: std.Io.Writer.Allocating = .init(gpa);
+    defer msg.deinit();
+    try msg.writer.print(
+        "Refused: the daemon of {s} went away and a new one did not start, so this call did not reach the index. Check that the codeindex executable of this session still exists, then reconnect the MCP server.",
+        .{root},
+    );
+    return error_answer(gpa, id, msg.written());
+}
+
+fn error_answer(gpa: std.mem.Allocator, id: i64, text: []const u8) ![]u8 {
+    const Content = struct { type: []const u8 = "text", text: []const u8 };
+    const Result = struct { content: []const Content, isError: bool = true };
+    const Answer = struct { jsonrpc: []const u8 = "2.0", id: i64, result: Result };
+
+    const content = [1]Content{.{ .text = text }};
     var out: std.Io.Writer.Allocating = .init(gpa);
     errdefer out.deinit();
     try std.json.Stringify.value(Answer{ .id = id, .result = .{ .content = &content } }, .{}, &out.writer);
@@ -197,6 +212,16 @@ pub fn move_failed_answer(gpa: std.mem.Allocator, id: i64, served: []const u8, w
 fn answer_move_failed(gpa: std.mem.Allocator, line: []const u8, served: []const u8, wanted: []const u8) bool {
     const id = request_id(gpa, line) orelse return true; // a notification: nothing to answer
     const answer = move_failed_answer(gpa, id, served, wanted) catch return true;
+    defer gpa.free(answer);
+    io.writeAll(io.stdout(), answer) catch return false;
+    return true;
+}
+
+/// Answer a call that cannot reach any daemon, on the client's own stream. A
+/// notification gets no answer. False only when the write to the client failed.
+fn answer_daemon_gone(gpa: std.mem.Allocator, line: []const u8, root: []const u8) bool {
+    const id = request_id(gpa, line) orelse return true;
+    const answer = daemon_gone_answer(gpa, id, root) catch return true;
     defer gpa.free(answer);
     io.writeAll(io.stdout(), answer) catch return false;
     return true;
@@ -228,11 +253,47 @@ fn retire(pump: *Pump, thread: std.Thread, drain_ms: u64) void {
     pump.stream.close(io.io());
 }
 
+/// Give a session whose daemon went away a connection to the daemon of `root`,
+/// started when none runs. The daemon retires itself when its executable is
+/// replaced by an install, so this is how a running session picks up the new
+/// build: the new daemon gets the handshake the client sent the first one, and
+/// the answer to the replayed `initialize` is dropped because the client has
+/// one already.
+///
+/// False means no daemon could be reached and the session is over. The error
+/// means the pump thread could not start; `pump` is gone then.
+fn reconnect(
+    gpa: std.mem.Allocator,
+    sw: Switcher,
+    root: []const u8,
+    init_line: ?[]const u8,
+    pump: *Pump,
+    thread: *std.Thread,
+) !bool {
+    const replay = init_line orelse return false;
+    const next = sw.connect(sw.ctx, root) orelse return false;
+    const handshake = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n";
+    if (!send(next, replay) or !send(next, handshake)) {
+        next.close(io.io());
+        return false;
+    }
+    retire(pump, thread.*, 0);
+    pump.* = .{ .stream = next, .skip_lines = 1 };
+    thread.* = std.Thread.spawn(.{}, pump_out, .{pump}) catch {
+        next.close(io.io());
+        gpa.destroy(pump);
+        return error.ThreadSpawnFailed;
+    };
+    std.debug.print("codeindex: session reconnected to the daemon of {s}\n", .{root});
+    return true;
+}
+
 /// Relay until either side closes. Returns when the session is over.
 ///
 /// `root` is the project the daemon behind `stream` serves. With a `switcher`,
 /// an `index_workspace` call for another project moves the session to that
-/// project's daemon; without one, every line goes to `stream` unchanged.
+/// project's daemon, and a daemon that went away is replaced by a new one for
+/// the same project; without one, every line goes to `stream` unchanged.
 pub fn run(gpa: std.mem.Allocator, stream: net.Stream, root: []const u8, switcher: ?Switcher) !void {
     var pump = try gpa.create(Pump);
     pump.* = .{ .stream = stream };
@@ -251,7 +312,7 @@ pub fn run(gpa: std.mem.Allocator, stream: net.Stream, root: []const u8, switche
     var carry = std.ArrayList(u8).empty;
     defer carry.deinit(gpa);
 
-    session: while (!pump.done.load(.acquire)) {
+    session: while (true) {
         const n = io.readSome(io.stdin(), &chunk) catch break;
         if (n == 0) break; // the MCP client closed our stdin: the session ended
         try carry.appendSlice(gpa, chunk[0..n]);
@@ -264,6 +325,16 @@ pub fn run(gpa: std.mem.Allocator, stream: net.Stream, root: []const u8, switche
 
             if (init_line == null and is_initialize(gpa, line)) {
                 init_line = gpa.dupe(u8, raw) catch null;
+            }
+
+            // The daemon closed its side while the client stayed: it retired
+            // because its executable was replaced, or it was stopped.
+            if (pump.done.load(.acquire)) {
+                const sw = switcher orelse break :session;
+                if (!(try reconnect(gpa, sw, current_root, init_line, pump, &thread))) {
+                    if (!answer_daemon_gone(gpa, line, current_root)) break :session;
+                    continue :lines;
+                }
             }
 
             if (switcher) |sw| move: {
@@ -332,7 +403,15 @@ pub fn run(gpa: std.mem.Allocator, stream: net.Stream, root: []const u8, switche
                 continue;
             }
 
-            if (!send(pump.stream, raw)) break :session;
+            if (!send(pump.stream, raw)) {
+                // The write found the daemon gone before the reader did.
+                const sw = switcher orelse break :session;
+                if (!(try reconnect(gpa, sw, current_root, init_line, pump, &thread))) {
+                    if (!answer_daemon_gone(gpa, line, current_root)) break :session;
+                    continue :lines;
+                }
+                if (!send(pump.stream, raw)) break :session;
+            }
         }
         // Keep the part of a line that has not ended yet.
         const rest = carry.items[start..];

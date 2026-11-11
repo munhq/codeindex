@@ -457,7 +457,10 @@ def session_move_without_its_own_executable():
     p = subprocess.Popen([copy, "--mcp", "--workspace", first],
                          stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                          stderr=subprocess.DEVNULL, text=True, encoding="utf-8",
-                         bufsize=1, env=server_env())
+                         bufsize=1,
+                         # The daemon retires when its executable is gone; keep it
+                         # for the length of this test.
+                         env=dict(server_env(), CODEINDEX_DAEMON_POLL_SECS="30"))
     msgs = {}
 
     def reader():
@@ -518,6 +521,102 @@ def session_move_without_its_own_executable():
     except Exception:
         p.kill()
     check(p.returncode == 0, f"the session ends cleanly after the refused move (exit {p.returncode})")
+
+
+def session_survives_an_install():
+    """An install renames a new executable over the one that runs. The daemon of
+    the old build retires, and a session attached to it must go on: the relay
+    starts a daemon from the new file, replays the handshake and answers the
+    next call."""
+    import threading
+    print("\n-- a session goes on after its executable is replaced --")
+    if os.name == "nt":
+        print("  skip (a running executable cannot be replaced on Windows)")
+        return
+    first = tempfile.mkdtemp(prefix="codeindex_e2e_first_")
+    os.makedirs(f"{first}/.git", exist_ok=True)
+    with open(f"{first}/engine.py", "w") as f:
+        f.write("def served_here():\n    return 1\n")
+
+    bindir = tempfile.mkdtemp(prefix="codeindex_e2e_bin_")
+    copy = os.path.join(bindir, "codeindex")
+    shutil.copy2(BIN, copy)
+    errpath = os.path.join(bindir, "relay.err")
+    errlog = open(errpath, "w")
+    p = subprocess.Popen([copy, "--mcp", "--workspace", first],
+                         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                         stderr=errlog, text=True, encoding="utf-8",
+                         bufsize=1,
+                         env=dict(server_env(), CODEINDEX_DAEMON_POLL_SECS="1"))
+    msgs = {}
+
+    def reader():
+        for line in p.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                m = json.loads(line)
+            except json.JSONDecodeError as e:
+                failures.append(f"non-JSON line on stdout: {line[:80]!r} ({e})")
+                continue
+            if "id" in m:
+                if m["id"] in msgs:
+                    failures.append(f"a second answer for id {m['id']}: {line[:120]!r}")
+                msgs[m["id"]] = m
+
+    threading.Thread(target=reader, daemon=True).start()
+
+    def send(obj):
+        p.stdin.write(json.dumps(obj) + "\n")
+        p.stdin.flush()
+
+    def wait_for(i, secs=60):
+        deadline = time.time() + secs
+        while time.time() < deadline and i not in msgs:
+            time.sleep(0.1)
+        return msgs.get(i)
+
+    send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+          "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                     "clientInfo": {"name": "e2e", "version": "0"}}})
+    send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+    wait_for(1)
+    send(tool(2, "find_symbol", {"name": "served_here"}))
+    before = wait_for(2)
+    check(before is not None and "engine.py" in text(before),
+          f"the session answers before the install (got {text(before) if before else None!r})")
+
+    # What an install does: a new file renamed over the path of the running one.
+    shutil.copy2(BIN, copy + ".next")
+    os.replace(copy + ".next", copy)
+    # The daemon looks once a second and then retires. Wait for that, so the
+    # next call is the first one that finds the old daemon gone.
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        found = subprocess.run(["pgrep", "-af", "--", f"daemon --workspace {first}"],
+                               capture_output=True, text=True).stdout
+        if copy not in found:
+            break
+        time.sleep(0.2)
+
+    send(tool(3, "find_symbol", {"name": "served_here"}))
+    after = wait_for(3)
+    body = text(after) if after else ""
+    check(after is not None and not after["result"].get("isError") and "engine.py" in body,
+          f"the session answers after the install (got {body!r})")
+    errlog.flush()
+    with open(errpath, errors="replace") as f:
+        relay_err = f.read()
+    check("session reconnected to the daemon" in relay_err,
+          f"the relay started a daemon from the new file (stderr {relay_err[-300:]!r})")
+
+    try:
+        p.stdin.close()
+        p.wait(timeout=10)
+    except Exception:
+        p.kill()
+    check(p.returncode == 0, f"the session ends cleanly after the install (exit {p.returncode})")
 
 
 def main():
@@ -826,6 +925,7 @@ def main():
     workspace_recovery()
     session_moves_to_another_checkout()
     session_move_without_its_own_executable()
+    session_survives_an_install()
     daemon_without_socket()
 
     await_daemon_exit()
