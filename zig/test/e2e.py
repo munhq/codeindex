@@ -543,11 +543,14 @@ def session_survives_an_install():
     shutil.copy2(BIN, copy)
     errpath = os.path.join(bindir, "relay.err")
     errlog = open(errpath, "w")
-    p = subprocess.Popen([copy, "--mcp", "--workspace", first],
+    # By its bare name from a PATH entry, the way a client that runs `codeindex`
+    # starts it. The relay must still find its own file to start a daemon from.
+    p = subprocess.Popen(["codeindex", "--mcp", "--workspace", first],
                          stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                          stderr=errlog, text=True, encoding="utf-8",
                          bufsize=1,
-                         env=dict(server_env(), CODEINDEX_DAEMON_POLL_SECS="1"))
+                         env=dict(server_env(), CODEINDEX_DAEMON_POLL_SECS="1",
+                                  PATH=bindir + os.pathsep + os.environ.get("PATH", "")))
     msgs = {}
 
     def reader():
