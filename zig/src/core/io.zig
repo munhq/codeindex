@@ -184,6 +184,14 @@ pub const Stamp = struct {
 
 /// Stamp for `path` relative to cwd, or null when it cannot be read. A null is
 /// treated as "changed" by callers, which errs toward re-indexing.
+/// The inode of the file at `path`, or null when nothing is there. A rename of
+/// a new file over the path gives a new inode, with the same size and mtime when
+/// the copy kept them.
+pub fn inodeOf(path: []const u8) ?File.INode {
+    const st = cwd().statFile(h(), path, .{}) catch return null;
+    return st.inode;
+}
+
 pub fn stampFile(path: []const u8) ?Stamp {
     const st = cwd().statFile(h(), path, .{}) catch return null;
     return .{ .mtime_ns = @intCast(st.mtime.toNanoseconds()), .size = st.size };

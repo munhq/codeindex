@@ -821,6 +821,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
             .sock_path = sock_path,
             .server = listener,
             .idle_exit_secs = cfg.daemon_idle_secs,
+            .exe_path = self_exe,
+            .exe_inode = if (self_exe) |e| io.inodeOf(e) else null,
         };
 
         var idle_ctx = IdleCtx{
