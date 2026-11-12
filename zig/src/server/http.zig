@@ -741,7 +741,7 @@ pub const Server = struct {
                     }
                 }
             }
-            if (path != null and self.shared_index and !same_tree(path.?, self.workspace)) {
+            if (path != null and self.shared_index and !same_tree(self.allocator, path.?, self.workspace)) {
                 // The relay in front of the daemon moves the session to the
                 // daemon of `path` when `path` is in a project. A call that
                 // reaches here named a folder this daemon does not serve, and
@@ -1794,8 +1794,30 @@ fn write_id(writer: anytype, id: ?std.json.Value) !void {
 /// Two paths name the same tree when they are equal after trailing slashes are
 /// dropped. Used to tell "re-index what this daemon serves" from "index some
 /// other directory", which a shared index must refuse.
-fn same_tree(a: []const u8, b: []const u8) bool {
-    return std.mem.eql(u8, std.mem.trimEnd(u8, a, "/"), std.mem.trimEnd(u8, b, "/"));
+///
+/// The relay resolves the folder of an `index_workspace` call to its real path
+/// and forwards the call here when that path is the tree of this daemon. The
+/// call itself still holds the text the agent sent: `/var/...` on macOS, where
+/// /var links to /private/var, and `C:\...` on Windows, where the daemon holds
+/// `C:/...`. Such a text is compared by its real path.
+pub fn same_tree(allocator: std.mem.Allocator, a: []const u8, b: []const u8) bool {
+    if (same_text(a, b)) return true;
+    const real_a = io.realpathAlloc(allocator, a) catch return false;
+    defer allocator.free(real_a);
+    const real_b = io.realpathAlloc(allocator, b) catch return false;
+    defer allocator.free(real_b);
+    return same_text(real_a, real_b);
+}
+
+/// Two paths with the trailing separators dropped and `\` read as `/`.
+pub fn same_text(a: []const u8, b: []const u8) bool {
+    const x = std.mem.trimEnd(u8, a, "/\\");
+    const y = std.mem.trimEnd(u8, b, "/\\");
+    if (x.len != y.len) return false;
+    for (x, y) |c, d| {
+        if ((if (c == '\\') '/' else c) != (if (d == '\\') '/' else d)) return false;
+    }
+    return true;
 }
 
 /// Mirror of main.zig's startup workspace guard. The `index_workspace` tool

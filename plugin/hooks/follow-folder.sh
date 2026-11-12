@@ -59,7 +59,7 @@ command_folder() {
     for word in $1; do
         word="$(printf '%s' "$word" | sed -e "s/^[\"']//" -e "s/[\"';)]*\$//")"
         case "$word" in
-            /proc/*|/dev/*|/sys/*|/usr/*|/etc/*|/bin/*|/sbin/*|/lib*|/tmp|/tmp/*) continue ;;
+            /proc/*|/dev/*|/sys/*|/usr/*|/etc/*|/bin/*|/sbin/*|/lib/*|/lib64/*) continue ;;
             /*) [ -e "$word" ] || continue; folder_of "$word" && return 0 ;;
         esac
     done

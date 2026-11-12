@@ -3048,3 +3048,25 @@ test "proxy: only a tools/call line follows the folder of the session" {
     try testing.expect(!proxy_mod.is_tool_call("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}"));
     try testing.expect(!proxy_mod.is_tool_call("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}"));
 }
+
+// ── The tree of an index_workspace call ─────────────────────────────────────────
+// The daemon compares the folder of the call with its own tree. The text differs
+// on macOS (/var links to /private/var) and on Windows (`\` and `/`), so the
+// compare reads the real path when the text differs.
+
+test "same_tree: separators and trailing separators do not make two trees" {
+    const http = @import("server/http.zig");
+    try testing.expect(http.same_text("C:/Users/a/work", "C:\\Users\\a\\work"));
+    try testing.expect(http.same_text("/data/work/", "/data/work"));
+    try testing.expect(http.same_text("C:\\a\\", "C:/a"));
+    try testing.expect(!http.same_text("/data/work", "/data/worker"));
+    try testing.expect(!http.same_text("/data/work", "/data/other"));
+}
+
+test "same_tree: a relative path and its real path are one tree" {
+    const http = @import("server/http.zig");
+    const real = try io_mod.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(real);
+    try testing.expect(http.same_tree(testing.allocator, ".", real));
+    try testing.expect(!http.same_tree(testing.allocator, "/nonexistent-codeindex-a", "/nonexistent-codeindex-b"));
+}
