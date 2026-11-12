@@ -107,6 +107,9 @@ jobs:
       - name: The hint and the measurement must agree on what a code question is
         run: bash plugin/test_hint.sh
 
+      - name: The follow hook reports the folder of each call to the relay
+        run: bash plugin/test_follow.sh
+
       # Both installers derive the release asset name from uname, which did not
       # match the matrix on a Mac. That shipped, so it is checked now.
       - name: Both installers must ask for assets the release publishes

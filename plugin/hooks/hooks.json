@@ -1,5 +1,5 @@
 {
-  "description": "Routes code questions to the index instead of a byte scan, at the two moments that decide it: the start of the session, before the agent has chosen a tool, and the moment it is about to scan. The PreToolUse matcher includes Bash because with auto mode active the harness routes file work through grep, cat and sed, so a Read|Grep|Glob matcher never fired in the mode that needs it most.",
+  "description": "Routes code questions to the index instead of a byte scan, at the two moments that decide it: the start of the session, before the agent has chosen a tool, and the moment it is about to scan. The PreToolUse matcher includes Bash because with auto mode active the harness routes file work through grep, cat and sed, so a Read|Grep|Glob matcher never fired in the mode that needs it most. follow-folder.sh reports the folder of each call to the relay, so the session answers from the project the agent works in.",
   "hooks": {
     "SessionStart": [
       {
@@ -19,6 +19,16 @@
           {
             "type": "command",
             "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/first-read-hint.sh\"",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "Read|Grep|Glob|Bash|Edit|MultiEdit|Write|NotebookEdit|mcp__.*codeindex.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/follow-folder.sh\"",
             "timeout": 5
           }
         ]

@@ -160,6 +160,7 @@ shell_scripts="
 install.sh
 plugin/bin/codeindex-launch
 plugin/hooks/first-read-hint.sh
+plugin/hooks/follow-folder.sh
 plugin/hooks/session-brief.sh
 "
 shells_checked=0

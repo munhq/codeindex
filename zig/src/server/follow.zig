@@ -2,8 +2,9 @@
 //!
 //! An MCP server starts in one folder and never learns that the agent changed
 //! folders: a `find_symbol` call carries a name and no folder, and the client
-//! sends its roots once, at startup. The hook of the client runs before every
-//! tool call and knows the folder of the call. It writes that folder to
+//! sends its roots once, at startup. The PreToolUse hook of the plugin
+//! (plugin/hooks/follow-folder.sh) runs before every tool call and knows the
+//! folder of the call. It writes that folder to
 //!
 //!     $XDG_RUNTIME_DIR/codeindex-follow/<pid>
 //!
