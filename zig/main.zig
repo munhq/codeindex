@@ -330,13 +330,37 @@ fn resolve_self_exe(allocator: std.mem.Allocator, args_vec: std.process.Args) ?[
     defer args.deinit();
     const a0 = args.next() orelse return null;
     if (a0.len == 0) return null;
-    if (std.mem.indexOfAny(u8, a0, "/\\") == null) return allocator.dupe(u8, a0) catch null;
+    // A bare name came from a PATH entry: find that file the way the shell of
+    // the client did. macOS has no /proc/self/exe, so without this a session
+    // started as `codeindex` served itself in-process ("no daemon available").
+    if (std.mem.indexOfAny(u8, a0, "/\\") == null) return find_in_path(allocator, a0) orelse (allocator.dupe(u8, a0) catch null);
     if (io.realpathAlloc(allocator, a0)) |abs| {
         defer allocator.free(abs);
         return allocator.dupe(u8, abs) catch null;
     } else |_| {
         return allocator.dupe(u8, a0) catch null;
     }
+}
+
+/// The real path of the first file named `name` in a folder of PATH, or null.
+/// On Windows a name without an extension is looked up as `name.exe` too.
+fn find_in_path(allocator: std.mem.Allocator, name: []const u8) ?[]u8 {
+    const path = io.getEnv(allocator, "PATH") orelse return null;
+    defer allocator.free(path);
+    const sep: u8 = if (comptime builtin.os.tag == .windows) ';' else ':';
+    var dirs = std.mem.tokenizeScalar(u8, path, sep);
+    while (dirs.next()) |dir| {
+        const exts: []const []const u8 = if (comptime builtin.os.tag == .windows) &.{ "", ".exe" } else &.{""};
+        for (exts) |ext| {
+            const candidate = std.fmt.allocPrint(allocator, "{s}/{s}{s}", .{ dir, name, ext }) catch return null;
+            defer allocator.free(candidate);
+            if (io.realpathAlloc(allocator, candidate)) |abs| {
+                defer allocator.free(abs);
+                return allocator.dupe(u8, abs) catch null;
+            } else |_| {}
+        }
+    }
+    return null;
 }
 
 /// Start the workspace's daemon and leave it running.
