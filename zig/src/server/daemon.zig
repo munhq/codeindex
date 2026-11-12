@@ -58,6 +58,10 @@ pub const Daemon = struct {
     running: std.atomic.Value(bool) = .init(true),
     /// Set when the executable of this process was replaced by an install.
     replaced: std.atomic.Value(bool) = .init(false),
+    /// The file this process started from, and its inode at start. Only the
+    /// systems with no /proc/self/exe read them (see `executable_replaced`).
+    exe_path: ?[]const u8 = null,
+    exe_inode: ?io.File.INode = null,
     /// Seconds with no connection at all before the daemon exits and returns
     /// its memory. 0 keeps it alive indefinitely.
     idle_exit_secs: i64 = 900,
@@ -216,7 +220,7 @@ pub const Daemon = struct {
             // An install replaced the executable of this process. Every session
             // attached here would otherwise keep the old build for as long as it
             // lives; they reconnect to a daemon of the new build.
-            if (executable_replaced(self.gpa)) {
+            if (executable_replaced(self)) {
                 std.debug.print("codeindex: the executable was replaced, retiring\n", .{});
                 self.replaced.store(true, .release);
                 self.stop();
@@ -254,13 +258,19 @@ pub const Daemon = struct {
 /// True when the file this process was started from no longer exists under its
 /// name: an install renamed a new build over it, or a cleanup removed it. Linux
 /// resolves `/proc/self/exe` to the running inode, and the path of an unlinked
-/// file does not resolve. Other systems keep the executable locked or give no
-/// such path, so they never report a replacement.
-fn executable_replaced(gpa: std.mem.Allocator) bool {
-    if (comptime builtin.os.tag != .linux) return false;
-    const abs = io.realpathAlloc(gpa, "/proc/self/exe") catch |err| return err == error.FileNotFound;
-    gpa.free(abs);
-    return false;
+/// file does not resolve. macOS has no such path: there the file at the start
+/// path has a new inode after an install, or is gone. Windows locks a running
+/// executable, so its path keeps the inode and no replacement is reported.
+fn executable_replaced(self: *const Daemon) bool {
+    if (comptime builtin.os.tag == .linux) {
+        const abs = io.realpathAlloc(self.gpa, "/proc/self/exe") catch |err| return err == error.FileNotFound;
+        self.gpa.free(abs);
+        return false;
+    }
+    const path = self.exe_path orelse return false;
+    const before = self.exe_inode orelse return false;
+    const now = io.inodeOf(path) orelse return true;
+    return now != before;
 }
 
 /// Write the snapshot one last time, so the next daemon starts from disk rather
