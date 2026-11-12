@@ -31,6 +31,9 @@ pub const Switcher = struct {
     resolve: *const fn (ctx: *anyopaque, gpa: std.mem.Allocator, path: []const u8) ?[]u8,
     /// A connection to the daemon of `root`, started when none runs.
     connect: *const fn (ctx: *anyopaque, root: []const u8) ?net.Stream,
+    /// The folder that the hook of the client last reported for this session, owned
+    /// by the caller, or null when none did. See follow.zig.
+    follow: ?*const fn (ctx: *anyopaque, gpa: std.mem.Allocator) ?[]u8 = null,
 };
 
 /// The longest wait for the old daemon to answer what this session still has
@@ -288,12 +291,56 @@ fn reconnect(
     return true;
 }
 
+/// Move the session to the daemon of `new_root`, which the caller owns until this
+/// returns true. The new daemon gets the handshake the client sent the first one,
+/// and its answer to the replayed `initialize` is dropped. False means no daemon
+/// of `new_root` could be reached and the session stays where it is. The error
+/// means the pump thread could not start; `pump` is gone then.
+fn switch_to(
+    gpa: std.mem.Allocator,
+    sw: Switcher,
+    new_root: []u8,
+    init_line: ?[]const u8,
+    pump: *Pump,
+    thread: *std.Thread,
+    current_root: *[]u8,
+) !bool {
+    const replay = init_line orelse return false;
+    const next = sw.connect(sw.ctx, new_root) orelse return false;
+    const handshake = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n";
+    if (!send(next, replay) or !send(next, handshake)) {
+        next.close(io.io());
+        return false;
+    }
+    retire(pump, thread.*, switch_drain_ms);
+    pump.* = .{ .stream = next, .skip_lines = 1 };
+    thread.* = std.Thread.spawn(.{}, pump_out, .{pump}) catch {
+        next.close(io.io());
+        gpa.destroy(pump);
+        return error.ThreadSpawnFailed;
+    };
+    gpa.free(current_root.*);
+    current_root.* = new_root;
+    // A relative path in a later call means the folder the session now works
+    // in, as it does in the daemon.
+    io.changeCurDir(new_root) catch {};
+    std.debug.print("codeindex: session moved to the daemon of {s}\n", .{new_root});
+    return true;
+}
+
+/// True for a line that is a `tools/call` request, the only line that follows the
+/// folder of the session.
+pub fn is_tool_call(line: []const u8) bool {
+    return std.mem.indexOf(u8, line, "\"tools/call\"") != null;
+}
+
 /// Relay until either side closes. Returns when the session is over.
 ///
 /// `root` is the project the daemon behind `stream` serves. With a `switcher`,
 /// an `index_workspace` call for another project moves the session to that
-/// project's daemon, and a daemon that went away is replaced by a new one for
-/// the same project; without one, every line goes to `stream` unchanged.
+/// project's daemon, so does a change of the folder that the hook of the client
+/// reports, and a daemon that went away is replaced by a new one for the same
+/// project; without one, every line goes to `stream` unchanged.
 pub fn run(gpa: std.mem.Allocator, stream: net.Stream, root: []const u8, switcher: ?Switcher) !void {
     var pump = try gpa.create(Pump);
     pump.* = .{ .stream = stream };
@@ -307,6 +354,10 @@ pub fn run(gpa: std.mem.Allocator, stream: net.Stream, root: []const u8, switche
     // The client's `initialize`, kept to replay to the next daemon.
     var init_line: ?[]u8 = null;
     defer if (init_line) |l| gpa.free(l);
+    // The folder the hook reported at the last tool call. Only a change moves the
+    // session, so an `index_workspace` call for another folder is not undone.
+    var last_follow: ?[]u8 = null;
+    defer if (last_follow) |f| gpa.free(f);
 
     var chunk: [1024 * 1024]u8 = undefined;
     var carry = std.ArrayList(u8).empty;
@@ -335,6 +386,29 @@ pub fn run(gpa: std.mem.Allocator, stream: net.Stream, root: []const u8, switche
                     if (!answer_daemon_gone(gpa, line, current_root)) break :session;
                     continue :lines;
                 }
+            }
+
+            // The hook of the client reports the folder the session works in. A
+            // call after a change of folder is answered from the project of that
+            // folder, with no `index_workspace` call from the agent.
+            if (switcher) |sw| follow: {
+                const folder_of = sw.follow orelse break :follow;
+                if (!is_tool_call(line) or index_workspace_path(gpa, line) != null) break :follow;
+                const folder = folder_of(sw.ctx, gpa) orelse break :follow;
+                if (last_follow) |old| {
+                    if (std.mem.eql(u8, old, folder)) {
+                        gpa.free(folder);
+                        break :follow;
+                    }
+                    gpa.free(old);
+                }
+                last_follow = folder;
+                const new_root = sw.resolve(sw.ctx, gpa, folder) orelse break :follow;
+                if (same_tree(new_root, current_root)) {
+                    gpa.free(new_root);
+                    break :follow;
+                }
+                if (!(try switch_to(gpa, sw, new_root, init_line, pump, &thread, &current_root))) gpa.free(new_root);
             }
 
             if (switcher) |sw| move: {
@@ -398,6 +472,14 @@ pub fn run(gpa: std.mem.Allocator, stream: net.Stream, root: []const u8, switche
                 // now works in, as it does in the daemon.
                 io.changeCurDir(current_root) catch {};
                 std.debug.print("codeindex: session moved to the daemon of {s}\n", .{current_root});
+                // The folder the hook reports now is the one this move answers
+                // for; only a later change of it moves the session again.
+                if (sw.follow) |folder_of| {
+                    if (folder_of(sw.ctx, gpa)) |folder| {
+                        if (last_follow) |old| gpa.free(old);
+                        last_follow = folder;
+                    }
+                }
 
                 if (!send(pump.stream, rewritten)) break :session;
                 continue;

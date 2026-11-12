@@ -622,6 +622,111 @@ def session_survives_an_install():
     check(p.returncode == 0, f"the session ends cleanly after the install (exit {p.returncode})")
 
 
+def session_follows_the_folder_of_the_hook():
+    """The hook of the client reports the folder of each tool call in a file named
+    for the client process. The relay reads it before a tool call and moves the
+    session to the project of that folder, so the agent does not call
+    index_workspace. This process is the client: the relay is its child."""
+    import threading
+    print("\n-- a session follows the folder that the hook reports --")
+    if sys.platform != "linux":
+        print("  skip (the process tree is read from /proc)")
+        return
+    first = tempfile.mkdtemp(prefix="codeindex_e2e_first_")
+    os.makedirs(f"{first}/.git", exist_ok=True)
+    with open(f"{first}/engine.py", "w") as f:
+        f.write("def served_here():\n    return 1\n")
+    work = tempfile.mkdtemp(prefix="codeindex_e2e_work_")
+    os.makedirs(f"{work}/.desk-work", exist_ok=True)
+    with open(f"{work}/engine.py", "w") as f:
+        f.write("def only_in_work():\n    return 2\n")
+
+    runtime = tempfile.mkdtemp(prefix="ci_rt_")
+    os.chmod(runtime, 0o700)
+    follow_dir = os.path.join(runtime, "codeindex-follow")
+    os.makedirs(follow_dir, exist_ok=True)
+    follow_file = os.path.join(follow_dir, str(os.getpid()))
+
+    def hook_reports(folder):
+        with open(follow_file, "w") as f:
+            f.write(folder + "\n")
+
+    p = subprocess.Popen([BIN, "--mcp", "--workspace", first],
+                         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                         stderr=subprocess.DEVNULL, text=True, encoding="utf-8",
+                         bufsize=1, env=dict(server_env(), XDG_RUNTIME_DIR=runtime))
+    msgs = {}
+
+    def reader():
+        for line in p.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                m = json.loads(line)
+            except json.JSONDecodeError as e:
+                failures.append(f"non-JSON line on stdout: {line[:80]!r} ({e})")
+                continue
+            if "id" in m:
+                if m["id"] in msgs:
+                    failures.append(f"a second answer for id {m['id']}: {line[:120]!r}")
+                msgs[m["id"]] = m
+
+    threading.Thread(target=reader, daemon=True).start()
+
+    def send(obj):
+        p.stdin.write(json.dumps(obj) + "\n")
+        p.stdin.flush()
+
+    def wait_for(i, secs=60):
+        deadline = time.time() + secs
+        while time.time() < deadline and i not in msgs:
+            time.sleep(0.1)
+        return msgs.get(i)
+
+    def ask(i, name, args):
+        send(tool(i, name, args))
+        m = wait_for(i)
+        return text(m) if m else ""
+
+    send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+          "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                     "clientInfo": {"name": "e2e", "version": "0"}}})
+    send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+    wait_for(1)
+
+    body = ask(2, "find_symbol", {"name": "only_in_work"})
+    check("engine.py" not in body, f"before any report the session serves the first folder (got {body!r})")
+
+    hook_reports(work)
+    body = ask(3, "find_symbol", {"name": "only_in_work"})
+    check("engine.py" in body, f"after the hook reports the work folder the session answers from it (got {body!r})")
+
+    hook_reports(first)
+    body = ask(4, "find_symbol", {"name": "served_here"})
+    check("engine.py" in body, f"a later report of the first folder moves the session back (got {body!r})")
+
+    # An explicit index_workspace stays until the hook reports another folder.
+    ask(5, "index_workspace", {"path": work})
+    body = ask(6, "find_symbol", {"name": "only_in_work"})
+    check("engine.py" in body, f"index_workspace moves the session (got {body!r})")
+    body = ask(7, "find_symbol", {"name": "only_in_work"})
+    check("engine.py" in body, f"the report that was there before the move does not undo it (got {body!r})")
+
+    # A report of a folder in no project changes nothing.
+    nowhere = tempfile.mkdtemp(prefix="codeindex_e2e_nowhere_")
+    hook_reports(nowhere)
+    body = ask(8, "find_symbol", {"name": "only_in_work"})
+    check("engine.py" in body, f"a report of a folder with no project keeps the session where it is (got {body!r})")
+
+    try:
+        p.stdin.close()
+        p.wait(timeout=10)
+    except Exception:
+        p.kill()
+    check(p.returncode == 0, f"the session ends cleanly (exit {p.returncode})")
+
+
 def main():
     ws = tempfile.mkdtemp(prefix="codeindex_e2e_")
     os.makedirs(f"{ws}/src", exist_ok=True)
@@ -929,6 +1034,7 @@ def main():
     session_moves_to_another_checkout()
     session_move_without_its_own_executable()
     session_survives_an_install()
+    session_follows_the_folder_of_the_hook()
     daemon_without_socket()
 
     await_daemon_exit()
