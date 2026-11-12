@@ -20,6 +20,7 @@ const clones = @import("analysis/clones.zig");
 const scanner_mod = @import("index/scanner.zig");
 const ipc_mod = @import("server/ipc.zig");
 const proxy_mod = @import("server/proxy.zig");
+const follow_mod = @import("server/follow.zig");
 const server_mod = @import("server/http.zig");
 // Imported for its OWN tests, which live beside the rule they cover. It was
 // absent from this aggregator, so the credential_in_manifest matcher shipped
@@ -3024,4 +3025,26 @@ test "proxy: a move it cannot make answers for itself" {
     try testing.expect(gone_result.get("isError").?.bool);
     const gone_body = gone_result.get("content").?.array.items[0].object.get("text").?.string;
     try testing.expect(std.mem.indexOf(u8, gone_body, "/home/user/code/first") != null);
+}
+
+test "follow: the parent pid is read from the text of /proc/<pid>/stat" {
+    try testing.expectEqual(@as(?i64, 4242), follow_mod.parent_of_stat("1234 (codeindex) S 4242 1234 1234 0 -1 4194560\n"));
+    // A process name with spaces and parentheses does not move the fields.
+    try testing.expectEqual(@as(?i64, 77), follow_mod.parent_of_stat("9 (a b) (c) R 77 9 9 0\n"));
+    try testing.expect(follow_mod.parent_of_stat("garbage") == null);
+    try testing.expect(follow_mod.parent_of_stat("5 (x)") == null);
+}
+
+test "follow: a folder is the first line of the file, and an absolute path" {
+    try testing.expectEqualStrings("/home/user/code/example", follow_mod.folder_of_file("/home/user/code/example\n").?);
+    try testing.expectEqualStrings("/home/user/code/example", follow_mod.folder_of_file("  /home/user/code/example \r\nignored\n").?);
+    try testing.expect(follow_mod.folder_of_file("") == null);
+    try testing.expect(follow_mod.folder_of_file("relative/path\n") == null);
+    try testing.expect(follow_mod.folder_of_file("\n/home/user/x\n") == null);
+}
+
+test "proxy: only a tools/call line follows the folder of the session" {
+    try testing.expect(proxy_mod.is_tool_call("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"status\"}}"));
+    try testing.expect(!proxy_mod.is_tool_call("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}"));
+    try testing.expect(!proxy_mod.is_tool_call("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}"));
 }

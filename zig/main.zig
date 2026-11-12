@@ -12,6 +12,7 @@ const scanner = @import("src/index/scanner.zig");
 const io = @import("src/core/io.zig");
 const ipc = @import("src/server/ipc.zig");
 const proxy = @import("src/server/proxy.zig");
+const follow = @import("src/server/follow.zig");
 const daemon_mod = @import("src/server/daemon.zig");
 
 // 0.2.0 changes two things a user can observe: the snapshot carries an identity
@@ -451,6 +452,11 @@ const SwitchCtx = struct {
         cfg.workspace_root = root;
         return connect_daemon(ctx.allocator, ctx.environ, ctx.exe, root, cfg);
     }
+
+    fn follow_folder(ctx_any: *anyopaque, gpa: std.mem.Allocator) ?[]u8 {
+        _ = ctx_any;
+        return follow.client_folder(gpa);
+    }
 };
 
 /// Serve this session from the workspace's daemon instead of indexing here.
@@ -468,7 +474,7 @@ fn attach_to_daemon(
 ) bool {
     const stream = connect_daemon(allocator, environ, exe, workspace_abs, cfg) orelse return false;
     var sw_ctx = SwitchCtx{ .allocator = allocator, .environ = environ, .exe = exe, .cfg = cfg };
-    const sw = proxy.Switcher{ .ctx = &sw_ctx, .resolve = SwitchCtx.resolve, .connect = SwitchCtx.connect };
+    const sw = proxy.Switcher{ .ctx = &sw_ctx, .resolve = SwitchCtx.resolve, .connect = SwitchCtx.connect, .follow = SwitchCtx.follow_folder };
     proxy.run(allocator, stream, workspace_abs, sw) catch {};
     return true;
 }
