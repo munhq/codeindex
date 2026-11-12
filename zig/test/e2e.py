@@ -594,12 +594,15 @@ def session_survives_an_install():
     shutil.copy2(BIN, copy + ".next")
     os.replace(copy + ".next", copy)
     # The daemon looks once a second and then retires. Wait for that, so the
-    # next call is the first one that finds the old daemon gone.
+    # next call is the first one that finds the old daemon gone. `ps -A -o
+    # command=` prints the command lines on Linux and macOS alike; `pgrep -af`
+    # prints them only on Linux, and on macOS the wait ended at once.
     deadline = time.time() + 30
     while time.time() < deadline:
-        found = subprocess.run(["pgrep", "-af", "--", f"daemon --workspace {first}"],
+        found = subprocess.run(["ps", "-A", "-o", "command="],
                                capture_output=True, text=True).stdout
-        if copy not in found:
+        if not any(copy in line and f"daemon --workspace {first}" in line
+                   for line in found.splitlines()):
             break
         time.sleep(0.2)
 
