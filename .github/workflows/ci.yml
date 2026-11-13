@@ -64,6 +64,19 @@ jobs:
           # test.exe on Windows, test elsewhere.
           if [ -x zig-out/bin/test.exe ]; then ./zig-out/bin/test.exe; else ./zig-out/bin/test; fi
 
+      # A ReleaseSafe build checks every call through a function pointer
+      # (-fsanitize=function). The vendored grammars declare their scanner
+      # functions with empty parentheses, and until build.zig turned that one
+      # check off, every grammar with an external scanner trapped (SIGILL) on its
+      # first parse. The release builds use ReleaseFast, which has no such check,
+      # so only this step sees the fault (munhq/codeindex#3).
+      - name: Unit tests in a ReleaseSafe build
+        if: runner.os == 'Linux'
+        run: |
+          cd zig
+          zig build test-bin -Doptimize=ReleaseSafe -p zig-out-safe
+          ./zig-out-safe/bin/test
+
       # The MCP protocol itself, driven over real stdio against the built
       # binary. Runs per platform: the stdin read path is the one place where
       # Windows differs from POSIX at the syscall level.
