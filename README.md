@@ -77,11 +77,18 @@ Register with your AI agent:
 claude plugin marketplace add munhq/codeindex
 claude plugin install codeindex@codeindex
 
-# Without the plugin (or for a different MCP client), register the binary
-# directly. Do not do both: two registrations mean two servers, two copies of
-# every tool schema, and two writers on one snapshot. install.sh detects the
-# plugin and skips this step when it is present.
-claude mcp add -s user codeindex -- ~/.local/bin/codeindex --mcp
+# Without the plugin (or for a different MCP client), register the binary.
+# Do not do both: two registrations mean two servers, two copies of every tool
+# schema, and two writers on one snapshot. install.sh detects the plugin and
+# skips this step when it is present.
+#
+# install.sh starts the machine host and adds the server to it, so this entry
+# is a URL: one server for the machine, and each session gets its own state
+# from the host. A stdio command would start one server for each session.
+claude mcp add --scope user --transport http codeindex http://127.0.0.1:7717/codeindex
+
+# The host has no project folder of its own, so a session names its project
+# once with the index_workspace tool. Every call after that answers for it.
 
 # Cursor / Claude Desktop / other MCP clients: add to your config
 {
@@ -154,7 +161,7 @@ The next time your agent starts, codeindex indexes your project in the backgroun
 ## Configuration
 
 ```bash
-codeindex --mcp                          # Run as MCP server (stdio)
+codeindex --mcp                          # Run as MCP server (stdio, one per client)
 codeindex --mcp --no-daemon              # ...without sharing the workspace daemon
 codeindex --daemon-idle-secs 0           # Keep the daemon resident indefinitely
 codeindex --workspace ./my-project       # Index a specific directory
