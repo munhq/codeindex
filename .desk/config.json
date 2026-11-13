@@ -65,5 +65,10 @@
         ".desk/config.json"
       ]
     }
-  ]
+  ],
+  "budget": {
+    "mode": "refuse",
+    "checkSeconds": 60,
+    "checks": {}
+  }
 }
