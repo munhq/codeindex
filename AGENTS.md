@@ -17,7 +17,8 @@ The repository lives on the desk server (`"store": "server"` in `.desk/config.js
 3. Run `desk change --intent <issue>` with a message of the shape `<type>(<scope>): <summary>`.
 4. Run `desk land`. The server merges the change onto `main` and runs the checks of the repository.
    Do not push to GitHub, and do not open a pull request.
-5. Run `desk runs landing <n>` to read the checks of a landing. Every check has a run id.
+5. `desk runs list` names every check with its run id and its status. `desk runs view <id>` shows one
+   check.
 
 ## A test, a lint and a build run on the runners, never on the PC of the owner
 
@@ -28,7 +29,7 @@ there. The runners of desk do that work.
 2. Until then, run `desk pr create` to propose the last change. The server runs the checks of the
    change on the runners, on the tree of the change, and it does not merge the change.
 3. A landing runs the checks with `"stage": "land"` in `.desk/config.json` on `main`. A failed check
-   refuses the landing of the next change, so read `desk runs landing <n>` after a landing.
+   refuses the landing of the next change, so run `desk runs list` after a landing.
 
 The checks of the Zig code:
 
