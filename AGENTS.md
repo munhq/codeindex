@@ -87,3 +87,13 @@ ask the owner in chat.
 ## What is still over one minute
 
 A runner that has never built the grammars pays about 92 s for `zig:test` (measured on 2026-11-13: fetch 2 s, build 92 s, run 3 s on `desk-runner-3`, with 337 MB in the cache after it). The next run on the same runner takes 1 s to 5 s. The pool has 4 runners, so a cold run happens once on each runner after its pod restarts. The way to remove it is to bake the Zig cache of the grammars into the runner image (munhq/codeindex#10).
+
+## Keep the pipeline inside its time budget
+
+The goal of the owner (munhq/desk#145, #243): every check of this repository ends in under 60 s, and more work must not make it slower. A change that adds time to a check is not done.
+
+1. Before you land, run `desk try` and read the time of each check. If your change makes a check slower, make the test or the build cheaper, or split it, before you land.
+2. Run `desk runs budget --check` to see which checks are over 60 s by the median of the last 5 landings.
+3. Do not raise a budget to land a change. A higher budget is a decision of the owner.
+4. While a check is over its budget and the server setting `budget.mode` is `refuse`, only a change of type `perf`, `build`, `ci`, `test` or `revert` lands.
+5. Put the cache first: keep a cache key to the files that a step reads, and keep a build cache on the persistent folder of the runner. The rules for a fast check are in `docs/runs.md` of munhq/desk.
