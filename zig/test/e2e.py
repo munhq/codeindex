@@ -602,8 +602,13 @@ def session_survives_an_install():
     while time.time() < deadline:
         found = subprocess.run(["ps", "-A", "-o", "command="],
                                capture_output=True, text=True).stdout
+        # The daemon is started with the real path of its workspace. On macOS
+        # the temp folder /var/folders/... is a link to /private/var/folders/...,
+        # so a match on the path as written never found the daemon and the
+        # wait ended at once.
         old_daemons = [line for line in found.splitlines()
-                       if copy in line and f"daemon --workspace {first}" in line]
+                       if copy in line and any(f"daemon --workspace {w}" in line
+                                               for w in {first, os.path.realpath(first)})]
         if not old_daemons:
             break
         time.sleep(0.2)
