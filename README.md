@@ -102,7 +102,8 @@ claude mcp add --scope user --transport http codeindex http://127.0.0.1:7717/cod
 ```
 
 Every listing points at the same server: npm `@munhq/codeindex`, the official MCP
-registry as `io.github.munhq/codeindex`, and Smithery as `munhq/codeindex`.
+registry as `io.github.munhq/codeindex`, and Smithery as `munhq/codeindex` (its page
+keeps the 0.6.6 card: Smithery closed its publish API on 2026-10-31).
 
 The next time your agent starts, codeindex indexes your project in the background and serves structural queries.
 

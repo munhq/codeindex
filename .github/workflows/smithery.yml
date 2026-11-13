@@ -1,5 +1,13 @@
 # Update the Smithery listing after a release.
 #
+# STOPPED ON A TAG since v0.6.7. Smithery shut down its API, CLI, accounts and
+# API keys on 2026-10-31 and stays only as a public directory
+# (https://www.smithery.ai/future). The release PUT answers
+#   HTTP 403 {"error":"Updating servers has been removed."}
+# so a tag could only fail this job. The listing page keeps the 0.6.6 card. The
+# job stays as a manual run (workflow_dispatch) with its files, so nothing is
+# lost if Smithery brings an API back. munhq/codeindex#3.
+#
 # Smithery does not read this repository. A smithery.yaml sitting in it publishes
 # nothing — the listing exists because something PUTs a release to the Platform
 # API, and the first one was PUT by hand. A listing published by hand describes an
@@ -16,8 +24,6 @@
 name: smithery
 
 on:
-  push:
-    tags: ['v*']
   workflow_dispatch:
 
 permissions:

@@ -472,3 +472,27 @@ pub const Parser = struct {
         };
     }
 };
+
+// A valid file parses with no error node, and the parse does not trap. A
+// ReleaseSafe or Debug build checks calls through function pointers
+// (-fsanitize=function); the scanner functions of the grammars are declared
+// with empty parentheses, and every grammar with an external scanner trapped
+// (SIGILL) on its first parse until build.zig turned that one check off for the
+// vendored C (codeindex#3). Run this test in a ReleaseSafe build too.
+fn root_has_error(language: models.Language, path: []const u8, source: []const u8) !bool {
+    var p = try Parser.init(std.testing.allocator);
+    defer p.deinit();
+    const lang = try p.get_ts_language(language, path);
+    try std.testing.expect(ts.ts_parser_set_language(p.parser, @ptrCast(lang)));
+    const tree = ts.ts_parser_parse_string(p.parser, null, source.ptr, @intCast(source.len)) orelse return error.TSParseFailed;
+    defer ts.ts_tree_delete(tree);
+    return ts.ts_node_has_error(ts.ts_tree_root_node(tree));
+}
+
+test "parse: a valid file of a language with an external scanner has no error node" {
+    try std.testing.expect(!try root_has_error(.go, "a.go", "package m\n\nfunc F() {}\n"));
+    try std.testing.expect(!try root_has_error(.python, "a.py", "x = 1\n"));
+    try std.testing.expect(!try root_has_error(.python, "a.py", "def f():\n    return 1\n"));
+    try std.testing.expect(!try root_has_error(.rust, "a.rs", "fn f() {}\n"));
+    try std.testing.expect(!try root_has_error(.typescript, "a.ts", "export const a = 1;\n"));
+}

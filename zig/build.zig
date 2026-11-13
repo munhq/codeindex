@@ -4,7 +4,15 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const flags = &.{ "-std=c11", "-D_POSIX_C_SOURCE=200809L", "-D_GNU_SOURCE" };
+    // -fno-sanitize=function: a ReleaseSafe or Debug build checks, before each
+    // call through a function pointer, that the callee has the type of the
+    // pointer. The grammars declare their scanner functions with empty
+    // parentheses (`void *tree_sitter_rust_external_scanner_create()`), the
+    // TSLanguage struct holds `void *(*)(void)`, and clang gives the two types
+    // different hashes although C treats them as compatible. Every grammar with
+    // an external scanner then trapped (SIGILL) on its first parse. ReleaseFast
+    // has no such check. Only this one check is off for the vendored C.
+    const flags = &.{ "-std=c11", "-D_POSIX_C_SOURCE=200809L", "-D_GNU_SOURCE", "-fno-sanitize=function" };
 
     // The version the binary reports. It used to be a string literal in
     // main.zig, so cutting a tag without editing that line shipped a binary
@@ -124,7 +132,7 @@ pub fn build(b: *std.Build) void {
         if (b.build_root.handle.access(b.graph.io, sc_cc, .{})) |_| {
             grammar_mod.addCSourceFile(.{
                 .file = b.path(sc_cc),
-                .flags = &.{ "-std=c++11", "-D_POSIX_C_SOURCE=200809L", "-D_GNU_SOURCE" },
+                .flags = &.{ "-std=c++11", "-D_POSIX_C_SOURCE=200809L", "-D_GNU_SOURCE", "-fno-sanitize=function" },
             });
         } else |_| {}
     }
