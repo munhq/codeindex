@@ -4,6 +4,7 @@ const testing = std.testing;
 const io_mod = @import("core/io.zig");
 const models = @import("core/models.zig");
 const explorer_mod = @import("index/explorer.zig");
+const imports_mod = @import("resolver/imports.zig");
 const version_mod = @import("index/version.zig");
 const filter_mod = @import("core/filter.zig");
 const security_scan = @import("analysis/security_scan.zig");
@@ -3069,4 +3070,65 @@ test "same_tree: a relative path and its real path are one tree" {
     defer testing.allocator.free(real);
     try testing.expect(http.same_tree(testing.allocator, ".", real));
     try testing.expect(!http.same_tree(testing.allocator, "/nonexistent-codeindex-a", "/nonexistent-codeindex-b"));
+}
+
+// ── Rust import resolver ────────────────────────────────────────────────────
+// The Rust support of codeindex is a tree-sitter grammar plus the resolver
+// below. The Zig checks build the grammar and run these tests on a runner.
+
+test "resolve_rust: a bare mod name finds the sibling .rs and mod.rs" {
+    const known = [_][]const u8{ "src/main.rs", "src/security/mod.rs", "src/security/estop.rs" };
+
+    const bare = try imports_mod.resolve(
+        testing.allocator,
+        "estop",
+        .rust,
+        "src/security/mod.rs",
+        &known,
+    );
+    defer testing.allocator.free(bare);
+    try testing.expectEqual(@as(usize, 1), bare.len);
+    try testing.expectEqualStrings("src/security/estop.rs", bare[0]);
+
+    const mod_file = try imports_mod.resolve(
+        testing.allocator,
+        "security",
+        .rust,
+        "src/main.rs",
+        &known,
+    );
+    defer testing.allocator.free(mod_file);
+    try testing.expectEqual(@as(usize, 1), mod_file.len);
+    try testing.expectEqualStrings("src/security/mod.rs", mod_file[0]);
+}
+
+test "resolve_rust: an item path falls back to its module file" {
+    const known = [_][]const u8{ "src/main.rs", "src/security/mod.rs", "src/security/estop.rs" };
+
+    // `crate::security::EstopManager` names a type inside the module, so the
+    // trailing components drop until a module file matches.
+    const item = try imports_mod.resolve(
+        testing.allocator,
+        "crate::security::EstopManager",
+        .rust,
+        "src/main.rs",
+        &known,
+    );
+    defer testing.allocator.free(item);
+    try testing.expectEqual(@as(usize, 1), item.len);
+    try testing.expectEqualStrings("src/security/mod.rs", item[0]);
+}
+
+test "resolve_rust: the std, core and alloc crates resolve to nothing" {
+    const known = [_][]const u8{"src/main.rs"};
+
+    const found = try imports_mod.resolve(
+        testing.allocator,
+        "std::collections::HashMap",
+        .rust,
+        "src/main.rs",
+        &known,
+    );
+    defer testing.allocator.free(found);
+    try testing.expectEqual(@as(usize, 0), found.len);
 }
