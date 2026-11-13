@@ -598,13 +598,20 @@ def session_survives_an_install():
     # command=` prints the command lines on Linux and macOS alike; `pgrep -af`
     # prints them only on Linux, and on macOS the wait ended at once.
     deadline = time.time() + 30
+    old_daemons = []
     while time.time() < deadline:
         found = subprocess.run(["ps", "-A", "-o", "command="],
                                capture_output=True, text=True).stdout
-        if not any(copy in line and f"daemon --workspace {first}" in line
-                   for line in found.splitlines()):
+        old_daemons = [line for line in found.splitlines()
+                       if copy in line and f"daemon --workspace {first}" in line]
+        if not old_daemons:
             break
         time.sleep(0.2)
+    # A wait that ran out is the cause of a later failure, so it is a failure
+    # of its own, with the command line of the daemon that did not retire.
+    check(not old_daemons,
+          f"the old daemon retired after the install (still running: {old_daemons[:2]!r}; "
+          f"daemon log: {daemon_logs()!r})")
 
     send(tool(3, "find_symbol", {"name": "served_here"}))
     after = wait_for(3)
@@ -615,7 +622,8 @@ def session_survives_an_install():
     with open(errpath, errors="replace") as f:
         relay_err = f.read()
     check("session reconnected to the daemon" in relay_err,
-          f"the relay started a daemon from the new file (stderr {relay_err[-300:]!r})")
+          f"the relay started a daemon from the new file (stderr {relay_err[-300:]!r}; "
+          f"daemon log: {daemon_logs()!r})")
 
     try:
         p.stdin.close()
