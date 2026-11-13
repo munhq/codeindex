@@ -207,7 +207,8 @@ pub fn build(b: *std.Build) void {
     // The unit tests also install as a binary. `zig build test` runs them through
     // the build runner's IPC protocol on stdout, which the linked tree-sitter C
     // sources corrupt via their debug printf paths. Building the binary and
-    // executing it directly runs the same tests without that protocol.
+    // executing it directly runs the same tests without that protocol. The check
+    // `zig:test` of `.desk/config.json` runs the binary on a runner for that reason.
     const install_tests = b.addInstallArtifact(tests, .{});
     const test_bin_step = b.step("test-bin", "Build the unit-test binary into zig-out/bin");
     test_bin_step.dependOn(&install_tests.step);
