@@ -299,6 +299,47 @@ else
     fi
 fi
 
+# One server for the machine, one URL for each client.
+#
+# A client that holds a stdio command starts its own copy of the server, so a
+# machine with ten agent sessions runs ten servers, holds ten indexes and spends
+# ten times the memory. The server belongs to the machine: the host of
+# @munhq/mcp-kit runs it once, and each client reaches it at a URL. The state of
+# one session stays separate because the host keys it by the MCP session id.
+#
+# The registration lives in the npm package, because it calls @munhq/mcp-kit and
+# that kit is private: it cannot be a dependency of this public package. So this
+# script runs the package for this one step. The host program that the step
+# copies into ~/.local/share/codeindex/host stays there, and the service reads
+# that folder rather than the package cache.
+HOST_URL="http://127.0.0.1:7717/$BINARY"
+
+# The host runs as a systemd user unit on Linux and as a launchd agent on macOS.
+# Windows has neither, so a client keeps the stdio command there.
+machine_host_supported() {
+    case "$(uname -s)" in
+        MINGW*|MSYS*|CYGWIN*|Windows_NT) return 1 ;;
+    esac
+    return 0
+}
+
+# register_host [--host-only | --command <path>]
+#
+# Runs the npm package when there is no checkout to run. It prints the reason
+# and returns 1 when node or the package is missing, so the caller can fall back
+# to the stdio command.
+register_host() {
+    if ! command -v node >/dev/null 2>&1; then
+        echo "node is not installed, so the machine host cannot run." >&2
+        return 1
+    fi
+    if [ -n "$SRC_DIR" ] && [ -f "$SRC_DIR/npm/bin/host-install.mjs" ]; then
+        node "$SRC_DIR/npm/bin/host-install.mjs" install "$@"
+    else
+        npm exec --yes --ignore-scripts --package @munhq/codeindex -- codeindex-host install "$@"
+    fi
+}
+
 if [ "$PLUGIN_OWNS" = "1" ]; then
     # The plugin's .mcp.json already registers the server. Registering a second
     # one here is what produced the duplicate `codeindex` entry; remove any left
@@ -310,18 +351,36 @@ if [ "$PLUGIN_OWNS" = "1" ]; then
     else
         echo "Skipping MCP registration: the plugin provides it."
     fi
-elif command -v claude >/dev/null 2>&1; then
-    # -s user, because `claude mcp add` defaults to local scope and would
-    # register the server for one directory only. Re-adding a name that exists
-    # errors instead of replacing it, so drop any previous entry in either
-    # scope first and keep the script re-runnable.
+    # The machine keeps the server and the service anyway, so a client that
+    # moves to the URL finds both and needs no second run of this script.
+    if machine_host_supported; then
+        register_host --host-only || true
+    fi
+elif machine_host_supported && command -v claude >/dev/null 2>&1; then
+    # Re-adding a name that exists errors instead of replacing it, so drop a
+    # previous entry in either scope first and keep the script re-runnable.
     claude mcp remove -s user codeindex 2>/dev/null || true
     claude mcp remove codeindex 2>/dev/null || true
-    claude mcp add -s user codeindex -- "$INSTALL_DIR/$BINARY" --mcp
-    echo "Registered with Claude Code (user scope)"
+    if register_host --command "$DEST"; then
+        echo "Registered with Claude Code (user scope)"
+    else
+        claude mcp add -s user codeindex -- "$DEST" --mcp
+        echo "Registered with Claude Code (user scope), as a stdio command"
+    fi
+elif command -v claude >/dev/null 2>&1; then
+    # Windows: no systemd unit and no launchd agent, so one client, one server.
+    claude mcp remove -s user codeindex 2>/dev/null || true
+    claude mcp remove codeindex 2>/dev/null || true
+    claude mcp add -s user codeindex -- "$DEST" --mcp
+    echo "Registered with Claude Code (user scope), as a stdio command"
 else
-    echo "Claude Code not found — register manually:"
-    echo "  claude mcp add -s user codeindex -- $INSTALL_DIR/$BINARY --mcp"
+    echo "Claude Code not found — register manually after installing it:"
+    if machine_host_supported; then
+        register_host --host-only || true
+        echo "  claude mcp add --scope user --transport http codeindex $HOST_URL"
+    else
+        echo "  claude mcp add -s user codeindex -- $DEST --mcp"
+    fi
 fi
 
 # The skill applies when the model elects to load it. The plugin's two hooks
