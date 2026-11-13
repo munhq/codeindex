@@ -32,6 +32,38 @@
         "zig/build.zig.zon",
         "check-versions.py"
       ]
+    },
+    {
+      "name": "zig:fmt",
+      "command": "/opt/zig-0.16/zig fmt --check src/ main.zig build.zig tests_main.zig",
+      "cwd": "zig",
+      "stage": "land",
+      "paths": [
+        "zig/**",
+        ".desk/config.json"
+      ]
+    },
+    {
+      "name": "zig:build",
+      "command": "/opt/zig-0.16/zig build",
+      "setup": "./fetch-vendor.sh",
+      "cwd": "zig",
+      "stage": "land",
+      "paths": [
+        "zig/**",
+        ".desk/config.json"
+      ]
+    },
+    {
+      "name": "zig:test",
+      "command": "/opt/zig-0.16/zig build test-bin && ./zig-out/bin/test",
+      "setup": "./fetch-vendor.sh",
+      "cwd": "zig",
+      "stage": "land",
+      "paths": [
+        "zig/**",
+        ".desk/config.json"
+      ]
     }
   ]
 }
