@@ -36,9 +36,9 @@ The checks of the Zig code:
 | Check | Command |
 | --- | --- |
 | `zig:fmt` | `/opt/zig-0.16/zig fmt --check src/ main.zig build.zig tests_main.zig` |
-| `zig:build` | `/opt/zig-0.16/zig build` |
-| `zig:test` | `/opt/zig-0.16/zig build test-bin` then `./zig-out/bin/test` |
-| `zig:e2e` | `/opt/zig-0.16/zig build` then `/opt/zig-0.16/zig build e2e` — not a check of desk yet: see #9 |
+| `zig:build` | `./scripts/ci.sh` (`zig build` with the caches of the runner) |
+| `zig:test` | `./scripts/ci.sh test-bin` then `./zig-out/bin/test` |
+| `zig:e2e` | `./scripts/ci.sh` then `./scripts/ci.sh e2e` — not a check of desk yet: see #9 |
 
 Read two points before you copy a command into a new check:
 
@@ -54,8 +54,36 @@ in the `cwd` of the check, which is `zig`.
 `.github/workflows/ci.yml` holds the same commands, for the CI of GitHub. Read it when you change a
 check, so that both stay equal.
 
+## Keep every check under one minute
+
+The goal of the owner (munhq/desk#145): each check ends in under one minute, with the cluster as it is. These rules
+come from the measurements of munhq/codeindex#10. They hold for every repository.
+
+1. Measure before you change. Add a temporary check to `.desk/config.json` that prints the seconds of each step, run
+   it with `desk try --only <check>`, and delete it before the landing. A guess cost three runs here.
+2. Run one `desk try` at a time. The cluster has 40 cores that production shares. A second run at once makes both
+   slower and proves nothing.
+3. Keep the build cache on the persistent folder of the runner: `DESK_RUNNER_CARGO_CACHE` (a claim of the pod, so it
+   survives a restart). A cache in the scratch folder of the run is cold on every run. `zig/scripts/ci.sh` is the
+   example: `ZIG_GLOBAL_CACHE_DIR` and `--cache-dir` point there, and a size limit empties it under an exclusive lock.
+4. The cache belongs to one pod. A pool of four runners gives a warm run one time in four, so the first run on each
+   pod pays the cold cost. Keep the cold cost under one minute too.
+5. Find the slow step by a filter, not by a guess. The test filter of the test runner (`zig test --test-filter`), or one run for each
+   group of tests, found the cause here in four runs: 60 s of the 150 s were the link of 47 parsers built as Debug C
+   with debug information.
+6. Build vendored code (the grammars) as ReleaseFast without debug information, also in a Debug build. It is not code
+   that you debug, and it made the unit tests 9 times slower (36 s against 4 s).
+7. Give each check its own command, so two checks run on two runners and share the cache. Do not put a build and a
+   test in one command when two checks can run apart.
+8. A check that lands must keep its test count. `zig:test` ends with `All 232 tests passed.`; read that line after
+   a change of the build.
+
 ## Issues
 
 A question for the owner goes into the section "Questions for the owner" of the issue:
 `desk issue questions --issue <n> --body-file <f>`, then `desk questions review --issue <n>`. Do not
 ask the owner in chat.
+
+## What is still over one minute
+
+A runner that has never built the grammars pays about 92 s for `zig:test` (measured on 2026-11-13: fetch 2 s, build 92 s, run 3 s on `desk-runner-3`, with 337 MB in the cache after it). The next run on the same runner takes 1 s to 5 s. The pool has 4 runners, so a cold run happens once on each runner after its pod restarts. The way to remove it is to bake the Zig cache of the grammars into the runner image (munhq/codeindex#10).
