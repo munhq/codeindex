@@ -45,7 +45,7 @@
     },
     {
       "name": "zig:build",
-      "command": "/opt/zig-0.16/zig build",
+      "command": "./scripts/ci.sh",
       "setup": "./fetch-vendor.sh",
       "cwd": "zig",
       "stage": "land",
@@ -56,7 +56,7 @@
     },
     {
       "name": "zig:test",
-      "command": "/opt/zig-0.16/zig build test-bin && ./zig-out/bin/test",
+      "command": "./scripts/ci.sh test-bin && ./zig-out/bin/test",
       "setup": "./fetch-vendor.sh",
       "cwd": "zig",
       "stage": "land",

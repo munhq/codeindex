@@ -35,9 +35,16 @@ pub fn build(b: *std.Build) void {
     // ── Tree-sitter library ──────────────────────────────────────────
     // Zig 0.16: C sources, include paths and lib linkage live on the Module,
     // and libc/libc++ linkage are Module create-options.
+    // The vendored C is not code of this repository, so a Debug build compiles it as ReleaseFast without debug
+    // information. Measured on a runner (munhq/codeindex#10): Debug C with debug information made the link of the
+    // test binary take 60 s, and ReleaseSmall took 60 s too; Debug C without debug information linked in 2 s but ran
+    // the unit tests in 42 s; ReleaseFast without debug information links in 1 s and runs them in 4 s.
+    const c_optimize: std.builtin.OptimizeMode = if (optimize == .Debug) .ReleaseFast else optimize;
+    const c_strip: ?bool = if (optimize == .Debug) true else null;
     const ts_mod = b.createModule(.{
         .target = target,
-        .optimize = optimize,
+        .optimize = c_optimize,
+        .strip = c_strip,
         .link_libc = true,
     });
     ts_mod.addCSourceFile(.{
@@ -101,7 +108,8 @@ pub fn build(b: *std.Build) void {
 
     const grammar_mod = b.createModule(.{
         .target = target,
-        .optimize = optimize,
+        .optimize = c_optimize,
+        .strip = c_strip,
         .link_libc = true,
     });
     grammar_mod.addIncludePath(b.path("vendor/tree-sitter/lib/include"));
