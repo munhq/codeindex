@@ -155,15 +155,24 @@ pub fn build(b: *std.Build) void {
         .strip = strip,
     });
     mod.addIncludePath(b.path("vendor/tree-sitter/lib/include"));
-    mod.linkLibrary(ts_lib);
-    mod.linkLibrary(grammar_lib);
+    // With -Dprebuilt=<folder>, the binary links the archives that the `grammars` step installed (the Buck2 target `cache`,
+    // munhq/desk#244) instead of compiling the C code again. A Zig cache folder cannot carry them between machines: Zig keys
+    // its build cache on the absolute path of the sources.
+    const prebuilt = b.option([]const u8, "prebuilt", "Folder with libtree-sitter.a and libgrammars.a from the grammars step");
+    if (prebuilt) |dir| {
+        mod.addObjectFile(.{ .cwd_relative = b.fmt("{s}/libtree-sitter.a", .{dir}) });
+        mod.addObjectFile(.{ .cwd_relative = b.fmt("{s}/libgrammars.a", .{dir}) });
+    } else {
+        mod.linkLibrary(ts_lib);
+        mod.linkLibrary(grammar_lib);
+    }
     mod.addOptions("build_options", build_options);
 
     // The libraries of tree-sitter and the grammars alone: the C code that takes most of a cold build. The Buck2 target `cache`
-    // builds this step into a cache folder that the other targets start from (munhq/desk#244).
+    // installs the two archives into zig-out/lib, and the other targets link them (munhq/desk#244).
     const grammars_step = b.step("grammars", "Build the tree-sitter and grammar libraries only");
-    grammars_step.dependOn(&ts_lib.step);
-    grammars_step.dependOn(&grammar_lib.step);
+    grammars_step.dependOn(&b.addInstallArtifact(ts_lib, .{}).step);
+    grammars_step.dependOn(&b.addInstallArtifact(grammar_lib, .{}).step);
 
     const exe = b.addExecutable(.{
         .name = "codeindex",
