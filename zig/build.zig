@@ -159,6 +159,12 @@ pub fn build(b: *std.Build) void {
     mod.linkLibrary(grammar_lib);
     mod.addOptions("build_options", build_options);
 
+    // The libraries of tree-sitter and the grammars alone: the C code that takes most of a cold build. The Buck2 target `cache`
+    // builds this step into a cache folder that the other targets start from (munhq/desk#244).
+    const grammars_step = b.step("grammars", "Build the tree-sitter and grammar libraries only");
+    grammars_step.dependOn(&ts_lib.step);
+    grammars_step.dependOn(&grammar_lib.step);
+
     const exe = b.addExecutable(.{
         .name = "codeindex",
         .root_module = mod,
