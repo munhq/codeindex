@@ -20,8 +20,7 @@
     },
     {
       "name": "npm:syntax",
-      "command": "find . -name node_modules -prune -o \\( -name '*.js' -o -name '*.mjs' -o -name '*.cjs' \\) -print0 | xargs -0 -r -n1 node --check",
-      "cwd": "npm",
+      "command": "sh .desk/workflows/buck-base/scripts/buck-run.sh build //:npm-syntax",
       "stage": "land",
       "paths": [
         "npm/**/*.js",
@@ -32,7 +31,7 @@
     },
     {
       "name": "versions",
-      "command": "python3 check-versions.py",
+      "command": "sh .desk/workflows/buck-base/scripts/buck-run.sh build //:versions",
       "stage": "land",
       "paths": [
         "npm/package.json",
@@ -60,7 +59,7 @@
     {
       "repo": "munhq/desk",
       "path": ".desk/workflows/buck-node",
-      "at": 580,
+      "at": 609,
       "subpath": "workflows/buck-node"
     },
     {
