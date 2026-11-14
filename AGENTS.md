@@ -36,9 +36,8 @@ The checks of the Zig code:
 | Check | Command |
 | --- | --- |
 | `zig:fmt` | `/opt/zig-0.16/zig fmt --check src/ main.zig build.zig tests_main.zig` |
-| `zig:build` | `./scripts/ci.sh` (`zig build` with the caches of the runner) |
-| `zig:test` | `./scripts/ci.sh test-bin` then `./zig-out/bin/test` |
-| `zig:e2e` | `./scripts/ci.sh` then `./scripts/ci.sh e2e` — not a check of desk yet: see #9 |
+| `root` | `sh .desk/workflows/buck-base/scripts/buck-run.sh build //:check`: the format check, the build and the tests as cached Buck2 actions of the workflow buck-zig (`BUCK`) |
+| `zig:e2e` | `zig build`, then `zig build e2e` — not a check of desk yet: see #9 |
 
 Read two points before you copy a command into a new check:
 
@@ -63,11 +62,13 @@ come from the measurements of munhq/codeindex#10. They hold for every repository
    it with `desk try --only <check>`, and delete it before the landing. A guess cost three runs here.
 2. Run one `desk try` at a time. The cluster has 40 cores that production shares. A second run at once makes both
    slower and proves nothing.
-3. Keep the build cache on the persistent folder of the runner: `DESK_RUNNER_CARGO_CACHE` (a claim of the pod, so it
-   survives a restart). A cache in the scratch folder of the run is cold on every run. `zig/scripts/ci.sh` is the
-   example: `ZIG_GLOBAL_CACHE_DIR` and `--cache-dir` point there, and a size limit empties it under an exclusive lock.
-4. The cache belongs to one pod. A pool of four runners gives a warm run one time in four, so the first run on each
-   pod pays the cold cost. Keep the cold cost under one minute too.
+3. Keep no build cache on a runner. The vendor snapshot, the grammar archives, the build and the tests are Buck2 actions
+   (`BUCK`, the workflow buck-zig of munhq/desk), so NativeLink serves their results to every runner and every
+   `desk try`: a run of an unchanged tree is a hit in the cache (3 s), and a runner that never built the project is as fast
+   as a warm one. The grammars are static archives (`zig build grammars` installs them, and `-Dprebuilt=<folder>` links
+   them), because Zig keys its own build cache on the absolute path of the sources.
+4. A change of a Zig source builds the executable and the test binary again (about 1 min each, in parallel): Zig
+   compiles a module as one unit.
 5. Find the slow step by a filter, not by a guess. The test filter of the test runner (`zig test --test-filter`), or one run for each
    group of tests, found the cause here in four runs: 60 s of the 150 s were the link of 47 parsers built as Debug C
    with debug information.
