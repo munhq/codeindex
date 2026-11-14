@@ -54,19 +54,19 @@
     {
       "repo": "munhq/desk",
       "path": ".desk/workflows/buck-base",
-      "at": 579,
+      "at": 580,
       "subpath": "workflows/buck-base"
     },
     {
       "repo": "munhq/desk",
       "path": ".desk/workflows/buck-node",
-      "at": 579,
+      "at": 580,
       "subpath": "workflows/buck-node"
     },
     {
       "repo": "munhq/desk",
       "path": ".desk/workflows/buck-zig",
-      "at": 579,
+      "at": 580,
       "subpath": "workflows/buck-zig"
     }
   ]
