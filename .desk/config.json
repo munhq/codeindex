@@ -8,6 +8,17 @@
   },
   "validation": [
     {
+      "name": "root",
+      "command": "DESK_BUCK_TOOLCHAIN=\"zig $(/opt/zig-0.16/zig version)\" sh .desk/workflows/buck-base/scripts/buck-run.sh build //:check",
+      "timeoutMinutes": 30,
+      "paths": [
+        "zig/**",
+        "BUCK",
+        ".buckconfig",
+        ".desk/config.json"
+      ]
+    },
+    {
       "name": "npm:syntax",
       "command": "find . -name node_modules -prune -o \\( -name '*.js' -o -name '*.mjs' -o -name '*.cjs' \\) -print0 | xargs -0 -r -n1 node --check",
       "cwd": "npm",
@@ -32,43 +43,31 @@
         "zig/build.zig.zon",
         "check-versions.py"
       ]
-    },
-    {
-      "name": "zig:fmt",
-      "command": "/opt/zig-0.16/zig fmt --check src/ main.zig build.zig tests_main.zig",
-      "cwd": "zig",
-      "stage": "land",
-      "paths": [
-        "zig/**",
-        ".desk/config.json"
-      ]
-    },
-    {
-      "name": "zig:build",
-      "command": "./scripts/ci.sh",
-      "setup": "./fetch-vendor.sh",
-      "cwd": "zig",
-      "stage": "land",
-      "paths": [
-        "zig/**",
-        ".desk/config.json"
-      ]
-    },
-    {
-      "name": "zig:test",
-      "command": "./scripts/ci.sh test-bin && ./zig-out/bin/test",
-      "setup": "./fetch-vendor.sh",
-      "cwd": "zig",
-      "stage": "land",
-      "paths": [
-        "zig/**",
-        ".desk/config.json"
-      ]
     }
   ],
   "budget": {
     "mode": "refuse",
     "checkSeconds": 60,
     "checks": {}
-  }
+  },
+  "checkouts": [
+    {
+      "repo": "munhq/desk",
+      "path": ".desk/workflows/buck-base",
+      "at": 579,
+      "subpath": "workflows/buck-base"
+    },
+    {
+      "repo": "munhq/desk",
+      "path": ".desk/workflows/buck-node",
+      "at": 579,
+      "subpath": "workflows/buck-node"
+    },
+    {
+      "repo": "munhq/desk",
+      "path": ".desk/workflows/buck-zig",
+      "at": 579,
+      "subpath": "workflows/buck-zig"
+    }
+  ]
 }

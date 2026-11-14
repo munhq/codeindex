@@ -1,0 +1,33 @@
+# Buck2 builds and tests this repository (munhq/desk#244): each action declares its inputs, so NativeLink serves the
+# result of an action whose inputs did not change. The rules, the toolchains and the platform are the workflows buck-base,
+# buck-node and buck-zig of munhq/desk, mounted by `checkouts` of .desk/config.json.
+[cells]
+root = .
+prelude = prelude
+toolchains = .desk/workflows/buck-base/toolchains
+desk_platforms = .desk/workflows/buck-base/platforms
+desk_node = .desk/workflows/buck-node
+desk_zig = .desk/workflows/buck-zig
+none = none
+
+[cell_aliases]
+config = prelude
+fbcode = none
+fbsource = none
+buck = none
+
+[external_cells]
+prelude = bundled
+
+[parser]
+target_platform_detector_spec = target:root//...->prelude//platforms:default
+
+[build]
+execution_platforms = desk_platforms//:platforms
+
+[buck2_re_client]
+tls = false
+instance_name = main
+
+[project]
+ignore = .git, node_modules, npm/node_modules, zig/zig-out, zig/.zig-cache, buck-out, .desk-work
