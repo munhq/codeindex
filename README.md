@@ -241,6 +241,23 @@ with a `.desk-work` marker and no `.git`) calls `index_workspace` with that
 folder. The session then talks to the daemon of that folder, which starts if
 none runs, and the first daemon keeps serving its own tree.
 
+With the Claude Code plugin the agent needs no `index_workspace` call for this. An
+MCP server never learns that the agent changed folders: a tool call carries no
+folder, and the client sends its roots once. The plugin's PreToolUse hook
+`follow-folder.sh` therefore writes the folder of each tool call to
+`$XDG_RUNTIME_DIR/codeindex-follow/<pid>`, for the client process and the
+processes above the hook. The folder is the folder of a path that the call names
+(`file_path`, `path`, an absolute path in a shell command), else the working
+directory of the call. A codeindex call with no path reports nothing, so it
+answers for the folder of the call before it. Before a tool call the relay reads
+the file of its nearest shared ancestor and moves the session to the project of
+that folder, as `index_workspace` would. A folder with no project moves nothing,
+and an explicit `index_workspace` stays until the folder changes again. This
+exists on Linux only (the process tree comes from `/proc`); elsewhere a session
+keeps the folder it started in until the agent calls `index_workspace`. The hook
+does not block a call and needs no other tool: `plugin/test_follow.sh` tests it,
+and `zig/src/server/follow.zig` is the relay side.
+
 ## Architecture
 
 - **Parser**: tree-sitter with 40+ grammars, compiled into a single binary
