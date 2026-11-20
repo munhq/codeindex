@@ -30,6 +30,15 @@
       ]
     },
     {
+      "name": "npm:bin",
+      "command": "sh .desk/workflows/buck-base/scripts/buck-run.sh build //:npm-bin",
+      "stage": "land",
+      "paths": [
+        "npm/package.json",
+        "npm/test/bin.test.mjs"
+      ]
+    },
+    {
       "name": "versions",
       "command": "sh .desk/workflows/buck-base/scripts/buck-run.sh build //:versions",
       "stage": "land",

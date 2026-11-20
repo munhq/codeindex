@@ -27,3 +27,11 @@ genrule(
     out = "versions.txt",
     cmd = "cd $SRCDIR && python3 check-versions.py && echo ok > $OUT",
 )
+
+# `npx -y @munhq/codeindex` runs the MCP launcher: the default command of the package (npm/test/bin.test.mjs).
+genrule(
+    name = "npm-bin",
+    srcs = ["npm/package.json", "npm/test/bin.test.mjs"],
+    out = "npm-bin.txt",
+    cmd = "O=`realpath -m $OUT` && cd $SRCDIR/npm && node --test test/bin.test.mjs && echo ok > $O",
+)

@@ -21,12 +21,13 @@
   },
   "license": "MIT",
   "bin": {
+    "codeindex": "bin/codeindex-mcp.js",
     "codeindex-mcp": "bin/codeindex-mcp.js",
     "codeindex-host": "bin/host-install.mjs"
   },
   "scripts": {
     "postinstall": "node bin/postinstall.js",
-    "test": "node bin/selftest.js && node --test test/host-install.test.mjs",
+    "test": "node bin/selftest.js && node --test test/host-install.test.mjs test/bin.test.mjs",
     "vendor": "node ../scripts/vendor-mcp-kit.mjs"
   },
   "files": [
