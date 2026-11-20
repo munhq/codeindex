@@ -250,10 +250,26 @@ fn watch_callback(c: *WatchCtx, e: watcher.Event) !void {
     }
 }
 
-fn watch_loop(ctx: *WatchCtx) void {
-    var w = watcher.Watcher.init(ctx.allocator) catch return;
-    defer w.deinit();
-    w.add_recursive(ctx.workspace_root) catch return;
+fn ignore_event(_: *WatchCtx, _: watcher.Event) !void {}
+
+/// The watches of the workspace, set before the build. A change during the
+/// build waits in the kernel queue of inotify, or in the stamps of the first
+/// polling walk, and the watcher reads it after the build. With the watches set
+/// after the build, a file made and removed during a cold start stayed in the
+/// index (a 0.6.10 daemon held 91 files of 90).
+fn watch_open(ctx: *WatchCtx) ?watcher.Watcher {
+    var w = watcher.Watcher.init(ctx.allocator) catch return null;
+    w.add_recursive(ctx.workspace_root) catch {
+        w.deinit();
+        return null;
+    };
+    if (comptime !std.mem.eql(u8, watcher.backend, "inotify")) {
+        w.poll_events(ctx, ignore_event) catch {};
+    }
+    return w;
+}
+
+fn watch_run(ctx: *WatchCtx, w: *watcher.Watcher) void {
     std.debug.print("Watcher active on {s}\n", .{ctx.workspace_root});
 
     while (ctx.running.*) {
@@ -754,12 +770,16 @@ pub fn main(init: std.process.Init.Minimal) !void {
             ctx.exp.mark_indexing_complete();
         }
 
-        // Background worker: build the index, THEN take over file-watching.
-        // Watching starts only after the build so the lock-free snapshot restore
-        // never races a concurrent watcher write into the same Explorer.
+        // Background worker: set the watches, build the index, THEN read the
+        // events. The events wait until the build ends, so the lock-free
+        // snapshot restore never races a watcher write into the same Explorer.
         fn build_then_watch(ctx: *@This()) void {
+            var w = if (ctx.start_watcher) watch_open(ctx.watch_ctx) else null;
             ctx.build();
-            if (ctx.start_watcher) watch_loop(ctx.watch_ctx);
+            if (w) |*wp| {
+                defer wp.deinit();
+                watch_run(ctx.watch_ctx, wp);
+            }
         }
     };
 
@@ -977,9 +997,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
     } else {
         // Standalone: build synchronously, then watch in the foreground.
         if (refused_reason == null) {
+            var w = watch_open(&watch_ctx);
             build_ctx.build();
             std.debug.print("\nWatcher active. Press Ctrl+C to stop.\n", .{});
-            watch_loop(&watch_ctx);
+            if (w) |*wp| {
+                defer wp.deinit();
+                watch_run(&watch_ctx, wp);
+            }
         }
     }
 }

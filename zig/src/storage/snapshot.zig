@@ -14,7 +14,12 @@ const io = @import("../core/io.zig");
 /// launch modes over one project then produced two entries per file, and the
 /// reconcile pass matched neither set — it re-indexed all of them and deleted
 /// the others on every start. See the stamp rule in `load_into`.
-const SNAPSHOT_VERSION: u32 = 4;
+///
+/// Bumped to 5 when a stamp became the stamp of the read that the outline came
+/// from. Up to 0.6.8 a save stamped the disk, and a daemon that had missed a
+/// change saved the new stamp beside the old outline (a 587539-byte file with
+/// an outline of 580866 bytes); every later start kept that outline.
+const SNAPSHOT_VERSION: u32 = 5;
 
 /// Strip the workspace prefix so a stored path names the file inside the
 /// project, not on this machine. A path outside the workspace cannot be made
@@ -392,9 +397,13 @@ pub const Snapshot = struct {
         // the index and current", which is what the reconcile pass assumes.
         for (exp.files.items, 0..) |fp, idx| {
             const fid: u32 = @intCast(idx);
-            if (exp.outlines.get(fid) == null) continue;
-            try stamps.put(fp, raw_stamps[idx]);
-            try exp.stamps.put(fid, raw_stamps[idx]);
+            const o = exp.outlines.get(fid) orelse continue;
+            // A stamp of another size than its outline did not come from the
+            // read of that outline. A zero stamp never matches the disk, so
+            // the reconcile reads the file again, or drops it when it is gone.
+            const stamp = if (raw_stamps[idx].size == o.byte_size) raw_stamps[idx] else io.Stamp{ .mtime_ns = 0, .size = 0 };
+            try stamps.put(fp, stamp);
+            try exp.stamps.put(fid, stamp);
             const fc = io.readFileAlloc(allocator, fp, 10 * 1024 * 1024) catch continue;
             defer allocator.free(fc);
             exp.prime_file(fid, fc) catch continue;

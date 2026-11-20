@@ -3223,3 +3223,52 @@ test "index: a refresh from the recorded stamps reads a file that the watcher mi
     defer testing.allocator.free(found);
     try testing.expectEqual(@as(usize, 1), found.len);
 }
+
+test "snapshot: a stamp of another size than its outline makes the reconcile read the file" {
+    // Up to 0.6.8 a save stamped the disk. A daemon that missed a change saved
+    // the new stamp beside the old outline, and every later start kept it.
+    const storage = @import("storage/snapshot.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old = "pub fn kept() void {}\n";
+    try tmp.dir.writeFile(io_mod.io(), .{ .sub_path = "a.zig", .data = old });
+    const dir_path = try tmp.dir.realPathFileAlloc(io_mod.io(), ".", testing.allocator);
+    io_mod.normalizeKey(dir_path);
+    defer testing.allocator.free(dir_path);
+    const snap_path = try io_mod.joinKey(testing.allocator, &.{ dir_path, ".codeindex.json" });
+    defer testing.allocator.free(snap_path);
+    const file_path = try io_mod.joinKey(testing.allocator, &.{ dir_path, "a.zig" });
+    defer testing.allocator.free(file_path);
+
+    {
+        var exp = try explorer_mod.Explorer.init(testing.allocator);
+        defer exp.deinit();
+        _ = try exp.add_file(.{
+            .path = try testing.allocator.dupe(u8, file_path),
+            .language = .zig,
+            .line_count = 2,
+            .byte_size = old.len,
+            .symbols = &[_]models.Symbol{},
+            .imports = &[_][]const u8{},
+        }, old);
+        // The disk moves on; the outline above stays. No read stamp is
+        // recorded, so the save stamps the disk.
+        try tmp.dir.writeFile(io_mod.io(), .{ .sub_path = "a.zig", .data = "pub fn kept() void {}\npub fn added() void {}\n" });
+        try storage.Snapshot.save(&exp, snap_path, dir_path);
+    }
+
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
+    defer exp.deinit();
+    var stamps = storage.Stamps.init(testing.allocator);
+    defer stamps.deinit();
+    try storage.Snapshot.load_into(&exp, testing.allocator, snap_path, dir_path, &stamps);
+    var parser = try treesitter.Parser.init(testing.allocator);
+    defer parser.deinit();
+    var f = filter_mod.Filter.init(testing.allocator);
+    defer f.deinit();
+    const res = try scanner_mod.reconcile_tree(testing.allocator, &exp, &parser, &f, dir_path, 1024 * 1024, .{}, &stamps);
+    try testing.expectEqual(@as(usize, 1), res.changed);
+    const found = try exp.find_symbol_exact("added");
+    defer testing.allocator.free(found);
+    try testing.expectEqual(@as(usize, 1), found.len);
+}
