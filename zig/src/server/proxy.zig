@@ -502,7 +502,9 @@ pub fn run(gpa: std.mem.Allocator, stream: net.Stream, root: []const u8, switche
     }
 
     // Tell the daemon this client is finished so it can retire the connection,
-    // then wait a bounded moment for anything still in flight the other way.
-    retire(pump, thread, 2000);
+    // then wait for the answers still in flight. The daemon closes its half
+    // after the last one. A 2 s wait cut nine `analyze` answers of a client
+    // that sent its calls and closed stdin (e2e, Debug build on a busy runner).
+    retire(pump, thread, switch_drain_ms);
     gpa.destroy(pump);
 }
