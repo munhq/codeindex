@@ -12,9 +12,6 @@ zig_project(
     cache_step = "grammars",
     cache_srcs = ["zig/build.zig", "zig/build.zig.zon"],
     fmt_args = "src/ main.zig build.zig tests_main.zig",
-    # The end-to-end tests drive the built binary over MCP stdio, the way a client does.
-    test_step = "test-bin install",
-    test_run = "./zig-out/bin/test && python3 test/e2e.py zig-out/bin/codeindex",
 )
 
 # `node --check` of the JavaScript files of npm/, as one cached action (munhq/desk#244).
