@@ -49,7 +49,7 @@ pub const Stamps = struct {
         self.map.deinit();
     }
 
-    fn put(self: *Stamps, path: []const u8, stamp: io.Stamp) !void {
+    pub fn put(self: *Stamps, path: []const u8, stamp: io.Stamp) !void {
         const gop = try self.map.getOrPut(path);
         if (!gop.found_existing) {
             gop.key_ptr.* = try self.allocator.dupe(u8, path);
@@ -121,7 +121,10 @@ pub const Snapshot = struct {
             try writeJsonString(w, to_workspace_relative(f, workspace_abs));
             const indexed = exp.outlines.get(@intCast(i)) != null and
                 exp.deleted_files.get(@intCast(i)) == null;
-            const stamp = if (indexed) io.stampFile(f) else null;
+            // The stamp of the read that the outline came from. A stamp taken
+            // now names the disk, and after a missed change it marked an old
+            // outline as current, so the next start kept the old outline.
+            const stamp = if (!indexed) null else exp.stamp_of(@intCast(i)) orelse io.stampFile(f);
             try w.print(",\"m\":{d},\"b\":{d}}}", .{
                 if (stamp) |s| s.mtime_ns else 0,
                 if (stamp) |s| s.size else 0,
@@ -391,6 +394,7 @@ pub const Snapshot = struct {
             const fid: u32 = @intCast(idx);
             if (exp.outlines.get(fid) == null) continue;
             try stamps.put(fp, raw_stamps[idx]);
+            try exp.stamps.put(fid, raw_stamps[idx]);
             const fc = io.readFileAlloc(allocator, fp, 10 * 1024 * 1024) catch continue;
             defer allocator.free(fc);
             exp.prime_file(fid, fc) catch continue;

@@ -369,6 +369,16 @@ pub const Explorer = struct {
     /// Files larger than this get outlines/content but no trigram/word
     /// postings — a stray data dump must not dominate the index.
     max_posting_file_bytes: usize = 512 * 1024,
+    /// Live files over `max_posting_file_bytes`. They have no postings, so
+    /// every posting lookup adds them as candidates and the content scan
+    /// decides. A 580 KB Rust source file had no postings, and `search`,
+    /// `find_word` and `find_callers` returned nothing from it while
+    /// `get_outline` listed its 381 symbols.
+    unposted: std.AutoHashMap(u32, void),
+    /// The mtime and size of each file when its content was read for the
+    /// index. A refresh compares them with the disk; a stamp taken at save
+    /// time could name content that the index never read.
+    stamps: std.AutoHashMap(u32, io.Stamp),
 
     // Per-index RwLocks for concurrent read access during writes
     trigram_lock: io.RwLock = .{},
@@ -416,6 +426,8 @@ pub const Explorer = struct {
             .file_map = std.StringHashMap(u32).init(allocator),
             .outlines = std.AutoHashMap(u32, models.FileOutline).init(allocator),
             .deleted_files = std.AutoHashMap(u32, void).init(allocator),
+            .unposted = std.AutoHashMap(u32, void).init(allocator),
+            .stamps = std.AutoHashMap(u32, io.Stamp).init(allocator),
             .version = version_mod.VersionStore.init(allocator),
             .indexing = true,
             .content_cache = std.AutoHashMap(u32, []const u8).init(allocator),
@@ -442,6 +454,8 @@ pub const Explorer = struct {
         }
         self.outlines.deinit();
         self.deleted_files.deinit();
+        self.unposted.deinit();
+        self.stamps.deinit();
         self.version.deinit();
         var cache_it = self.content_cache.iterator();
         while (cache_it.next()) |entry| {
@@ -564,6 +578,7 @@ pub const Explorer = struct {
                 try self.trigrams.add_text(existing_id, content);
                 try self.words.add_text(existing_id, content);
             }
+            try self.mark_posted(existing_id, content.len);
             self.dirty_ops += 1;
 
             // Update content cache
@@ -594,6 +609,7 @@ pub const Explorer = struct {
             try self.trigrams.add_text(file_id, content);
             try self.words.add_text(file_id, content);
         }
+        try self.mark_posted(file_id, content.len);
         try self.outlines.put(file_id, outline);
         const cached_new = try self.allocator.dupe(u8, content);
         try self.content_cache.put(file_id, cached_new);
@@ -618,6 +634,7 @@ pub const Explorer = struct {
             try self.trigrams.add_text(file_id, content);
             try self.words.add_text(file_id, content);
         }
+        try self.mark_posted(file_id, content.len);
         const cached = try self.allocator.dupe(u8, content);
         try self.content_cache.put(file_id, cached);
         self.cache_bytes += cached.len;
@@ -662,9 +679,71 @@ pub const Explorer = struct {
                 }
             }
 
+            _ = self.unposted.remove(file_id);
+            _ = self.stamps.remove(file_id);
             try self.deleted_files.put(file_id, {});
             try self.version.record(path, .deleted);
         }
+    }
+
+    /// Record whether `file_id` is too large for postings. Caller holds the
+    /// trigram and word locks, or runs before the index is served.
+    fn mark_posted(self: *Explorer, file_id: u32, len: usize) !void {
+        if (len > self.max_posting_file_bytes) {
+            try self.unposted.put(file_id, {});
+        } else {
+            _ = self.unposted.remove(file_id);
+        }
+    }
+
+    /// The candidate files of a posting lookup: `hits` and every live file
+    /// that has no postings. Caller frees the result and holds the trigram or
+    /// the word lock shared, which keeps `unposted` still.
+    fn with_unposted(self: *Explorer, allocator: std.mem.Allocator, hits: []const u32) ![]u32 {
+        var out = try std.ArrayList(u32).initCapacity(allocator, hits.len + self.unposted.count());
+        errdefer out.deinit(allocator);
+        out.appendSliceAssumeCapacity(hits);
+        var it = self.unposted.keyIterator();
+        while (it.next()) |id| {
+            // A file that grew past the limit keeps the postings of its smaller
+            // past, so it can be in `hits` already.
+            if (std.mem.indexOfScalar(u32, hits, id.*) == null) out.appendAssumeCapacity(id.*);
+        }
+        return out.toOwnedSlice(allocator);
+    }
+
+    /// The files that may hold `word`: its postings and every file without
+    /// postings. The caller checks the content and frees the result.
+    pub fn word_files(self: *Explorer, allocator: std.mem.Allocator, word: []const u8) ![]u32 {
+        return self.with_unposted(allocator, self.words.search(word));
+    }
+
+    /// Whether the live file `file_id` has no postings and its content holds
+    /// `word` as a token of the word index.
+    pub fn unposted_holds_word(self: *Explorer, allocator: std.mem.Allocator, file_id: u32, word: []const u8) bool {
+        if (!self.unposted.contains(file_id)) return false;
+        const cached = self.content_cache.get(file_id);
+        const content = cached orelse (self.content_of(allocator, file_id) orelse return false);
+        defer if (cached == null) allocator.free(content);
+        var it = std.mem.tokenizeAny(u8, content, word_delimiters);
+        while (it.next()) |token| {
+            if (std.mem.eql(u8, token, word)) return true;
+        }
+        return false;
+    }
+
+    /// Record the mtime and size of `path` as they were before its content was
+    /// read for the index. No-op for a path that is not in the index.
+    pub fn record_stamp(self: *Explorer, path: []const u8, stamp: io.Stamp) !void {
+        self.file_lock.lock();
+        defer self.file_lock.unlock();
+        const id = self.file_map.get(path) orelse return;
+        try self.stamps.put(id, stamp);
+    }
+
+    /// The recorded stamp of the live file `file_id`, or null.
+    pub fn stamp_of(self: *Explorer, file_id: u32) ?io.Stamp {
+        return self.stamps.get(file_id);
     }
 
     /// Whether enough modifies/deletes accumulated that stale postings are
@@ -1048,8 +1127,12 @@ pub const Explorer = struct {
 
         // Candidate files from the trigram index (sorted, deduped, possibly
         // stale — the content scan below is the source of truth).
-        const candidates = try self.trigrams.query(query_text);
-        defer if (candidates.len > 0) self.allocator.free(candidates);
+        const posted = try self.trigrams.query(query_text);
+        defer if (posted.len > 0) self.allocator.free(posted);
+        // A query under 3 bytes has no trigram, and the search answers nothing
+        // for it in every file; keep that for the unposted files too.
+        const candidates = if (query_text.len < 3) try self.allocator.alloc(u32, 0) else try self.with_unposted(self.allocator, posted);
+        defer self.allocator.free(candidates);
 
         outer: for (candidates) |file_id| {
             if (self.deleted_files.get(file_id) != null) continue;
@@ -1119,7 +1202,8 @@ pub const Explorer = struct {
             results.deinit(self.allocator);
         }
 
-        const hit_files = self.words.search(name);
+        const hit_files = try self.word_files(self.allocator, name);
+        defer self.allocator.free(hit_files);
         outer: for (hit_files) |file_id| {
             if (self.deleted_files.get(file_id) != null) continue;
             if (file_id >= self.files.items.len) continue;
@@ -1226,7 +1310,9 @@ pub const Explorer = struct {
         self.content_lock.lockShared();
         defer self.content_lock.unlockShared();
         var results = std.ArrayList(WordHit).empty;
-        const hit_files = self.words.search(word);
+        errdefer results.deinit(self.allocator);
+        const hit_files = try self.word_files(self.allocator, word);
+        defer self.allocator.free(hit_files);
         outer: for (hit_files) |file_id| {
             if (self.deleted_files.get(file_id) != null) continue;
             if (file_id >= self.files.items.len) continue;

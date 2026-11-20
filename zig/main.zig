@@ -207,13 +207,17 @@ const WatchCtx = struct {
 };
 
 fn watch_callback(c: *WatchCtx, e: watcher.Event) !void {
-    if (c.f.should_ignore(e.path)) return;
+    // The filter reads folder names, so it gets the path below the workspace.
+    // With the absolute path, a checkout under a folder named build matched the skip
+    // folder `build`, and the daemon dropped every change in it.
+    if (c.f.should_ignore(filter.below_root(c.workspace_root, e.path))) return;
 
     const language = models.Language.from_path(e.path);
     if (language == .unknown) return;
 
     switch (e.op) {
         .create, .modify => {
+            const read_stamp = io.stampFile(e.path);
             const content = io.readFileAlloc(c.allocator, e.path, c.max_file_size) catch return;
             defer c.allocator.free(content);
 
@@ -230,12 +234,14 @@ fn watch_callback(c: *WatchCtx, e: watcher.Event) !void {
                         .symbols = &[_]models.Symbol{},
                         .imports = &[_][]const u8{},
                     }, content) catch return;
+                    if (read_stamp) |st| c.exp.record_stamp(e.path, st) catch {};
                     return;
                 }
                 return err;
             };
             std.debug.print("Reindexed: {s}\n", .{e.path});
             _ = try c.exp.add_file(outline, content);
+            if (read_stamp) |st| try c.exp.record_stamp(e.path, st);
         },
         .delete => {
             std.debug.print("Removed: {s}\n", .{e.path});

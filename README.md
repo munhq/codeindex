@@ -125,7 +125,7 @@ The next time your agent starts, codeindex indexes your project in the backgroun
 | `get_hot_files` | Recently changed files sorted by recency |
 | `read_file` | Read file contents with optional line range |
 | `read_symbol` | Read just a symbol's source code (with optional context lines) |
-| `index_workspace` | Index or re-index a project directory; a session that works in another checkout moves to that checkout's index |
+| `index_workspace` | Index or re-index a project directory; a session that works in another checkout moves to that checkout's index. On the checkout that the index already serves, it reads again each file whose mtime or size changed |
 | `analyze` | Run one of 22 code analyses (see below) |
 
 ### Analyses (`analyze` tool)

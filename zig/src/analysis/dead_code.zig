@@ -277,6 +277,17 @@ pub fn find_dead_code(allocator: std.mem.Allocator, exp: *explorer.Explorer) !Re
                     break;
                 }
             }
+            // A file over the posting limit has no postings; read it.
+            if (!used) {
+                var uit = exp.unposted.keyIterator();
+                while (uit.next()) |hit| {
+                    if (hit.* == file_id or exp.deleted_files.get(hit.*) != null) continue;
+                    if (exp.unposted_holds_word(allocator, hit.*, sym.name)) {
+                        used = true;
+                        break;
+                    }
+                }
+            }
             if (!used) {
                 if (content == null) content = exp.content_of(allocator, file_id);
                 const c = content orelse continue;

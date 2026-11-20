@@ -44,6 +44,105 @@ def check(cond, msg):
 DAEMON_IDLE_SECS = "1"
 
 
+def changes_under_a_build_folder_and_a_large_file():
+    """A checkout below a folder named `build` (for example /srv/build/...),
+    with one source file over the 512 KiB posting limit. The watcher dropped
+    every change in such a checkout, `index_workspace` did not read the disk
+    again, and `search`, `find_word` and `find_callers` found nothing in the
+    large file."""
+    import threading
+    print("\n-- a checkout below a build folder, and a file over the posting limit --")
+    parent = tempfile.mkdtemp(prefix="codeindex_e2e_parent_")
+    ws = os.path.join(parent, "build", "checkout")
+    os.makedirs(f"{ws}/.git", exist_ok=True)
+    os.makedirs(f"{ws}/src", exist_ok=True)
+    with open(f"{ws}/src/lib.rs", "w") as f:
+        f.write("pub fn send_behind(x: u64) -> u64 {\n    x + 1\n}\n")
+    filler = "".join(f"// {'x' * 70} {i}\n" for i in range(8000))
+    with open(f"{ws}/src/big.rs", "w") as f:
+        f.write("fn caller() -> u64 {\n    send_behind(1)\n}\n" + filler)
+    check(os.path.getsize(f"{ws}/src/big.rs") > 512 * 1024, "the large file is over the posting limit")
+
+    p = subprocess.Popen([BIN, "--mcp", "--workspace", ws],
+                         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                         stderr=subprocess.DEVNULL, text=True, encoding="utf-8",
+                         bufsize=1, env=server_env())
+    msgs = {}
+
+    def reader():
+        for line in p.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                m = json.loads(line)
+            except json.JSONDecodeError as e:
+                failures.append(f"non-JSON line on stdout: {line[:80]!r} ({e})")
+                continue
+            if "id" in m:
+                msgs[m["id"]] = m
+
+    threading.Thread(target=reader, daemon=True).start()
+
+    def send(obj):
+        p.stdin.write(json.dumps(obj) + "\n")
+        p.stdin.flush()
+
+    def wait_for(i, secs=60):
+        deadline = time.time() + secs
+        while time.time() < deadline and i not in msgs:
+            time.sleep(0.1)
+        return msgs.get(i)
+
+    def ask(i, name, args):
+        send(tool(i, name, args))
+        m = wait_for(i)
+        return text(m) if m else ""
+
+    send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+          "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                     "clientInfo": {"name": "e2e", "version": "0"}}})
+    send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+    wait_for(1)
+
+    got = ask(2, "find_callers", {"name": "send_behind"})
+    check("big.rs" in got, f"find_callers finds the call in the large file (got {got!r})")
+    got = ask(3, "find_word", {"word": "send_behind"})
+    check("big.rs" in got, f"find_word finds the word in the large file (got {got!r})")
+    got = ask(4, "search", {"query": "send_behind(1)"})
+    check("big.rs" in got, f"search finds the text in the large file (got {got!r})")
+
+    # The watcher: a new function in a file of the checkout.
+    with open(f"{ws}/src/lib.rs", "a") as f:
+        f.write("pub fn added_by_the_watcher() {}\n")
+    found = ""
+    for i in range(100):
+        found = ask(100 + i, "find_symbol", {"name": "added_by_the_watcher"})
+        if "lib.rs" in found:
+            break
+        time.sleep(0.2)
+    check("lib.rs" in found, f"the watcher indexes a change below a build folder (got {found!r})")
+
+    # A folder made after the start, and a file in it.
+    os.makedirs(f"{ws}/src/later", exist_ok=True)
+    with open(f"{ws}/src/later/late.rs", "w") as f:
+        f.write("pub fn in_a_new_folder() {}\n")
+    found = ""
+    for i in range(100):
+        found = ask(300 + i, "find_symbol", {"name": "in_a_new_folder"})
+        if "late.rs" in found:
+            break
+        time.sleep(0.2)
+    check("late.rs" in found, f"the watcher indexes a file in a folder made after the start (got {found!r})")
+
+    try:
+        p.stdin.close()
+        p.wait(timeout=10)
+    except Exception:
+        p.kill()
+    check(p.returncode == 0, f"the session ends cleanly (exit {p.returncode})")
+
+
 def server_env():
     env = dict(os.environ)
     env["CODEINDEX_DAEMON_IDLE_SECS"] = DAEMON_IDLE_SECS
@@ -1048,6 +1147,7 @@ def main():
 
     workspace_recovery()
     session_moves_to_another_checkout()
+    changes_under_a_build_folder_and_a_large_file()
     session_move_without_its_own_executable()
     session_survives_an_install()
     session_follows_the_folder_of_the_hook()

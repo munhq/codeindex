@@ -937,7 +937,8 @@ fn field_scope_files(
     out: *std.ArrayList(u32),
 ) !void {
     try out.append(allocator, field.file_id);
-    const hits = exp.words.search(field.owner);
+    const hits = try exp.word_files(allocator, field.owner);
+    defer allocator.free(hits);
     for (hits) |hit| {
         if (hit == field.file_id) continue;
         if (exp.deleted_files.get(hit) != null) continue;

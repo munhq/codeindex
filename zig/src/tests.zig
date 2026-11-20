@@ -3132,3 +3132,94 @@ test "resolve_rust: the std, core and alloc crates resolve to nothing" {
     defer testing.allocator.free(found);
     try testing.expectEqual(@as(usize, 0), found.len);
 }
+
+test "filter: a workspace below a folder named build keeps its files" {
+    // The watcher checked the absolute path, and a checkout under /srv/build
+    // matched the skip folder `build`: every change in it was dropped.
+    var f = filter_mod.Filter.init(testing.allocator);
+    defer f.deinit();
+    const root = "/srv/build/work/example";
+    const path = "/srv/build/work/example/src/main.rs";
+    try testing.expect(f.should_ignore(path));
+    try testing.expect(!f.should_ignore(filter_mod.below_root(root, path)));
+    try testing.expect(f.should_ignore(filter_mod.below_root(root, "/srv/build/work/example/target/x.rs")));
+}
+
+test "index: a file over the posting limit is found by find_word, find_callers and search" {
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
+    defer exp.deinit();
+    exp.mark_indexing_complete();
+
+    var content = std.ArrayList(u8).empty;
+    defer content.deinit(testing.allocator);
+    try content.appendSlice(testing.allocator, "fn caller() -> u64 {\n    send_behind(1)\n}\n");
+    while (content.items.len <= exp.max_posting_file_bytes) {
+        try content.appendSlice(testing.allocator, "// filler line of a large source file, past the posting limit\n");
+    }
+    _ = try exp.add_file(.{
+        .path = try testing.allocator.dupe(u8, "/ws/src/big.rs"),
+        .language = .rust,
+        .line_count = std.mem.count(u8, content.items, "\n") + 1,
+        .byte_size = content.items.len,
+        .symbols = &[_]models.Symbol{},
+        .imports = &[_][]const u8{},
+    }, content.items);
+    try testing.expect(exp.unposted.contains(0));
+
+    const words = try exp.find_word("send_behind", 10);
+    defer testing.allocator.free(words);
+    try testing.expectEqual(@as(usize, 1), words.len);
+
+    const callers = try exp.find_callers("send_behind", 10);
+    defer {
+        for (callers) |c| testing.allocator.free(c.line_text);
+        testing.allocator.free(callers);
+    }
+    try testing.expectEqual(@as(usize, 1), callers.len);
+    try testing.expectEqual(@as(u32, 2), callers[0].line_num);
+
+    const hits = try exp.search_content("send_behind(1)", 10);
+    defer {
+        for (hits) |h| testing.allocator.free(h.line_text);
+        testing.allocator.free(hits);
+    }
+    try testing.expectEqual(@as(usize, 1), hits.len);
+
+    // Removed, the file is no candidate any more.
+    try exp.remove_file("/ws/src/big.rs");
+    try testing.expect(!exp.unposted.contains(0));
+}
+
+test "index: a refresh from the recorded stamps reads a file that the watcher missed" {
+    const storage = @import("storage/snapshot.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io_mod.io(), .{ .sub_path = "a.zig", .data = "pub fn first() void {}\n" });
+    const dir_path = try tmp.dir.realPathFileAlloc(io_mod.io(), ".", testing.allocator);
+    io_mod.normalizeKey(dir_path);
+    defer testing.allocator.free(dir_path);
+
+    var exp = try explorer_mod.Explorer.init(testing.allocator);
+    defer exp.deinit();
+    var parser = try treesitter.Parser.init(testing.allocator);
+    defer parser.deinit();
+    var f = filter_mod.Filter.init(testing.allocator);
+    defer f.deinit();
+    _ = try scanner_mod.index_tree(testing.allocator, &exp, &parser, &f, dir_path, 1024 * 1024, .{});
+    exp.mark_indexing_complete();
+    try testing.expect(exp.stamp_of(0) != null);
+
+    // A change that no watcher reported.
+    try tmp.dir.writeFile(io_mod.io(), .{ .sub_path = "a.zig", .data = "pub fn first() void {}\npub fn second() void {}\n" });
+
+    var stamps = storage.Stamps.init(testing.allocator);
+    defer stamps.deinit();
+    for (exp.files.items, 0..) |path, i| {
+        try stamps.put(path, exp.stamp_of(@intCast(i)).?);
+    }
+    const res = try scanner_mod.reconcile_tree(testing.allocator, &exp, &parser, &f, dir_path, 1024 * 1024, .{}, &stamps);
+    try testing.expectEqual(@as(usize, 1), res.changed);
+    const found = try exp.find_symbol_exact("second");
+    defer testing.allocator.free(found);
+    try testing.expectEqual(@as(usize, 1), found.len);
+}

@@ -128,7 +128,8 @@ const Usage = struct {
 /// the line scan never touches the whole tree.
 fn count_usage(allocator: std.mem.Allocator, exp: *explorer.Explorer, ident: []const u8) Usage {
     var usage = Usage{ .files = 0, .references = 0 };
-    const hits = exp.words.search(ident);
+    const hits = exp.word_files(allocator, ident) catch return usage;
+    defer allocator.free(hits);
     for (hits) |file_id| {
         if (exp.deleted_files.get(file_id) != null) continue;
         const outline = exp.outlines.get(file_id) orelse continue;

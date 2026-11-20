@@ -29,6 +29,7 @@ const treesitter = @import("../parser/treesitter.zig");
 const filter_mod = @import("../core/filter.zig");
 const scanner = @import("../index/scanner.zig");
 const io = @import("../core/io.zig");
+const snapshot = @import("../storage/snapshot.zig");
 const reload = @import("../core/reload.zig");
 const conn_mod = @import("../core/conn.zig");
 const watcher_mod = @import("../watcher.zig");
@@ -96,6 +97,32 @@ pub const Server = struct {
     /// Share the parser with other connections under this lock. Without it two
     /// concurrent `index_workspace` calls enter one tree-sitter parser, which
     /// keeps mutable scratch state and does not survive that.
+    /// Read again each file of the served tree whose mtime or size differs
+    /// from the read that the index holds, add new files and drop gone ones.
+    pub fn refresh_own_tree(self: *Server) !scanner.Result {
+        const parser = self.parser orelse return error.NoParser;
+        const f = self.filter orelse return error.NoFilter;
+        var stamps = snapshot.Stamps.init(self.allocator);
+        defer stamps.deinit();
+        {
+            self.exp.file_lock.lockShared();
+            defer self.exp.file_lock.unlockShared();
+            self.exp.outline_lock.lockShared();
+            defer self.exp.outline_lock.unlockShared();
+            for (self.exp.files.items, 0..) |path, i| {
+                const id: u32 = @intCast(i);
+                if (self.exp.deleted_files.get(id) != null) continue;
+                if (self.exp.outlines.get(id) == null) continue;
+                // A file with no recorded stamp counts as changed and is read.
+                const st = self.exp.stamp_of(id) orelse io.Stamp{ .mtime_ns = 0, .size = 0 };
+                try stamps.put(path, st);
+            }
+        }
+        if (self.parser_lock) |m| m.lock();
+        defer if (self.parser_lock) |m| m.unlock();
+        return scanner.reconcile_tree(self.allocator, self.exp, parser, f, self.workspace, 10 * 1024 * 1024, .{}, &stamps);
+    }
+
     pub fn with_parser_lock(self: *Server, m: *io.Mutex) void {
         self.parser_lock = m;
     }
@@ -759,9 +786,18 @@ pub const Server = struct {
                 // index current for every session, and the relay sends this
                 // call each time it moves a session here. A full scan for each
                 // move took 25 s on a 505-file tree with the daemon warm. Wait
-                // for the build when it still runs, then answer its counts.
+                // for the build when it still runs, then compare the stamp of
+                // each file with the disk and read only the changed ones: a
+                // change that the watcher missed stayed until a restart.
                 while (self.exp.is_indexing()) {
                     io.sleep(100 * std.time.ns_per_ms);
+                }
+                if (self.refresh_own_tree()) |res| {
+                    if (res.added + res.changed + res.removed > 0) {
+                        try w.print("Refreshed {s}: +{d} new, {d} changed, -{d} gone. ", .{ self.workspace, res.added, res.changed, res.removed });
+                    }
+                } else |err| {
+                    try w.print("Refresh of {s} failed ({s}); the index may hold older copies. ", .{ self.workspace, @errorName(err) });
                 }
                 try w.print("Indexed {s} — {d} files, {d} symbols, watcher active", .{
                     self.workspace, self.exp.file_count(), self.exp.symbol_count(),

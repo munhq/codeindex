@@ -5,8 +5,6 @@ const linux = std.os.linux;
 const io = @import("core/io.zig");
 const filter_mod = @import("core/filter.zig");
 
-const DEBOUNCE_MS: i64 = 200;
-
 /// How the live index learns a file changed, chosen at compile time.
 ///
 /// This module was inotify and nothing else, with no guard on the OS. It still
@@ -28,9 +26,11 @@ pub const Watcher = if (builtin.os.tag == .linux) INotify else Polling;
 /// every platform watches the same way.
 pub const backend = if (builtin.os.tag == .linux) "inotify" else "polling";
 
+pub const Op = enum { create, modify, delete };
+
 pub const Event = struct {
     path: []const u8,
-    op: enum { create, modify, delete },
+    op: Op,
 };
 
 /// Interval between tree walks for the polling backend. Long enough that a walk
@@ -236,7 +236,6 @@ const INotify = struct {
     allocator: std.mem.Allocator,
     fd: i32,
     wd_map: std.AutoHashMap(i32, []const u8),
-    last_event: std.StringHashMap(i64), // path -> timestamp for debouncing
 
     pub fn init(allocator: std.mem.Allocator) !INotify {
         const rc = linux.inotify_init1(linux.IN.NONBLOCK | linux.IN.CLOEXEC);
@@ -247,14 +246,10 @@ const INotify = struct {
             .allocator = allocator,
             .fd = fd,
             .wd_map = std.AutoHashMap(i32, []const u8).init(allocator),
-            .last_event = std.StringHashMap(i64).init(allocator),
         };
     }
 
     pub fn deinit(self: *INotify) void {
-        var le_it = self.last_event.iterator();
-        while (le_it.next()) |entry| self.allocator.free(entry.key_ptr.*);
-        self.last_event.deinit();
         var it = self.wd_map.iterator();
         while (it.next()) |entry| {
             self.allocator.free(entry.value_ptr.*);
@@ -303,41 +298,98 @@ const INotify = struct {
             if (err == error.WouldBlock) return;
             return err;
         };
-
         if (n == 0) return;
+
+        // One write of a large file gives many IN_MODIFY events. The events of
+        // one read merge into one event for each path, in the order of their
+        // first event, with the op of the last one (a create followed by writes
+        // stays a create); the callback reads the file after them. A debounce here skipped `i += ...` on `continue` and spun
+        // on one event for up to 200 ms.
+        var order = std.ArrayList([]const u8).empty;
+        defer {
+            for (order.items) |p| self.allocator.free(p);
+            order.deinit(self.allocator);
+        }
+        var last_op = std.StringHashMap(Op).init(self.allocator);
+        defer last_op.deinit();
+        var new_dirs = std.ArrayList([]const u8).empty;
+        defer {
+            for (new_dirs.items) |p| self.allocator.free(p);
+            new_dirs.deinit(self.allocator);
+        }
 
         var i: usize = 0;
         while (i < n) {
             const event = @as(*const linux.inotify_event, @ptrCast(@alignCast(&buf[i])));
+            const next = i + @sizeOf(linux.inotify_event) + event.len;
+            defer i = next;
             const name_ptr = @as([*:0]const u8, @ptrCast(&buf[i + @sizeOf(linux.inotify_event)]));
             const name = std.mem.span(name_ptr);
+            const dir_path = self.wd_map.get(event.wd) orelse continue;
+            if (name.len == 0) continue;
+            const full_path = try std.fs.path.join(self.allocator, &.{ dir_path, name });
 
-            if (self.wd_map.get(event.wd)) |dir_path| {
-                const full_path = try std.fs.path.join(self.allocator, &.{ dir_path, name });
-                defer self.allocator.free(full_path);
+            const is_dir = event.mask & linux.IN.ISDIR != 0;
+            const op: ?Op = if (event.mask & (linux.IN.CREATE | linux.IN.MOVED_TO) != 0)
+                .create
+            else if (event.mask & linux.IN.MODIFY != 0)
+                .modify
+            else if (event.mask & (linux.IN.DELETE | linux.IN.MOVED_FROM) != 0)
+                .delete
+            else
+                null;
 
-                // Debounce: skip if we got an event for this path recently
-                const now = io.milliTimestamp();
-                if (self.last_event.getEntry(full_path)) |entry| {
-                    if (now - entry.value_ptr.* < DEBOUNCE_MS) continue;
-                    entry.value_ptr.* = now;
+            if (is_dir) {
+                // A folder made after the start had no watch, and nothing in it
+                // reached the index.
+                if (op == .create) {
+                    try new_dirs.append(self.allocator, full_path);
                 } else {
-                    // HashMap stores the slice header by value but the bytes must outlive the entry,
-                    // so dupe the key into allocator-owned memory.
-                    const owned_key = self.allocator.dupe(u8, full_path) catch full_path;
-                    self.last_event.put(owned_key, now) catch self.allocator.free(owned_key);
+                    self.allocator.free(full_path);
                 }
-
-                if (event.mask & (linux.IN.CREATE | linux.IN.MOVED_TO) != 0) {
-                    try callback(context, Event{ .path = full_path, .op = .create });
-                } else if (event.mask & linux.IN.MODIFY != 0) {
-                    try callback(context, Event{ .path = full_path, .op = .modify });
-                } else if (event.mask & (linux.IN.DELETE | linux.IN.MOVED_FROM) != 0) {
-                    try callback(context, Event{ .path = full_path, .op = .delete });
-                }
+                continue;
             }
+            const o = op orelse {
+                self.allocator.free(full_path);
+                continue;
+            };
+            const gop = try last_op.getOrPut(full_path);
+            if (gop.found_existing) {
+                self.allocator.free(full_path);
+                // A new file that is then written stays a new file.
+                if (!(gop.value_ptr.* == .create and o == .modify)) gop.value_ptr.* = o;
+            } else {
+                try order.append(self.allocator, full_path);
+                gop.value_ptr.* = o;
+            }
+        }
 
-            i += @sizeOf(linux.inotify_event) + event.len;
+        for (order.items) |p| {
+            // One failed path must not drop the events of the others.
+            callback(context, Event{ .path = p, .op = last_op.get(p).? }) catch |err| {
+                std.debug.print("codeindex: watch event for {s} failed: {s}\n", .{ p, @errorName(err) });
+            };
+        }
+        for (new_dirs.items) |d| {
+            self.add_recursive(d) catch continue;
+            try self.report_files(d, context, callback);
+        }
+    }
+
+    /// Send a create event for each file below `root`. The files of a new
+    /// folder can land before its watch exists.
+    fn report_files(self: *INotify, root: []const u8, context: anytype, callback: anytype) !void {
+        var dir = io.cwd().openDir(io.io(), root, .{ .iterate = true }) catch return;
+        defer dir.close(io.io());
+        var walker = try dir.walk(self.allocator);
+        defer walker.deinit();
+        while (try walker.next(io.io())) |entry| {
+            if (entry.kind != .file) continue;
+            const full = try std.fs.path.join(self.allocator, &.{ root, entry.path });
+            defer self.allocator.free(full);
+            callback(context, Event{ .path = full, .op = .create }) catch |err| {
+                std.debug.print("codeindex: watch event for {s} failed: {s}\n", .{ full, @errorName(err) });
+            };
         }
     }
 };

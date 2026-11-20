@@ -375,7 +375,7 @@ fn is_code_language(lang: models.Language) bool {
 /// Whether a code file that defines no schema names the table as a word:
 /// `FROM goals`, `"goals"`. An unquoted SQL name folds to one case, so the
 /// lowercase spelling counts too.
-fn referenced_by_code(exp: *explorer.Explorer, schema: *const std.AutoHashMap(u32, void), table: []const u8) bool {
+fn referenced_by_code(allocator: std.mem.Allocator, exp: *explorer.Explorer, schema: *const std.AutoHashMap(u32, void), table: []const u8) bool {
     var buf: [128]u8 = undefined;
     const lower = if (table.len <= buf.len) std.ascii.lowerString(&buf, table) else table;
     for ([_][]const u8{ table, lower }) |word| {
@@ -384,6 +384,14 @@ fn referenced_by_code(exp: *explorer.Explorer, schema: *const std.AutoHashMap(u3
             const o = exp.outlines.get(fid) orelse continue;
             if (!is_code_language(o.language)) continue;
             return true;
+        }
+        // A file over the posting limit has no postings; read it.
+        var uit = exp.unposted.keyIterator();
+        while (uit.next()) |fid| {
+            if (exp.deleted_files.get(fid.*) != null or schema.contains(fid.*)) continue;
+            const o = exp.outlines.get(fid.*) orelse continue;
+            if (!is_code_language(o.language)) continue;
+            if (exp.unposted_holds_word(allocator, fid.*, word)) return true;
         }
     }
     return false;
@@ -456,7 +464,7 @@ pub fn analyze(allocator: std.mem.Allocator, exp: *explorer.Explorer) !Report {
     }
 
     for (live.items) |t| {
-        if (referenced_by_code(exp, &schema, t.name)) continue;
+        if (referenced_by_code(allocator, exp, &schema, t.name)) continue;
         // A model named after the table references it too.
         var modeled = false;
         for (code.items) |m| {

@@ -193,6 +193,9 @@ fn walk_dir(walk: *Walk, dir: *io.Dir, rel_prefix: []const u8) !void {
                     walk.result.added += 1;
                 }
 
+                // Stamp before the read: a write during the read then leaves a
+                // stamp older than the disk, and the next refresh reads again.
+                const read_stamp = io.stampFileFrom(dir.*, entry.name);
                 const content = io.readFileFrom(dir.*, allocator, entry.name, walk.max_file_size) catch continue;
                 defer allocator.free(content);
 
@@ -206,6 +209,7 @@ fn walk_dir(walk: *Walk, dir: *io.Dir, rel_prefix: []const u8) !void {
                             .symbols = &[_]models.Symbol{},
                             .imports = &[_][]const u8{},
                         }, content) catch continue;
+                        if (read_stamp) |st| walk.exp.record_stamp(full_path, st) catch {};
                         walk.result.files += 1;
                         walk.result.bytes += content.len;
                         continue;
@@ -213,6 +217,7 @@ fn walk_dir(walk: *Walk, dir: *io.Dir, rel_prefix: []const u8) !void {
                     continue;
                 };
                 _ = walk.exp.add_file(outline, content) catch continue;
+                if (read_stamp) |st| walk.exp.record_stamp(full_path, st) catch {};
                 walk.result.files += 1;
                 walk.result.bytes += content.len;
             },
